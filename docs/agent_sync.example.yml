@@ -1,0 +1,8 @@
+# Copy to docs/agent_sync.local.yml (gitignored) and fill only ROSC folder IDs.
+# Never commit OAuth client secrets, tokens, or private Drive IDs.
+prompts_folder_id: ""
+reports_folder_id: ""
+credentials_path: credentials.json
+token_path: token.agent-sync.json
+prompts_folder_name: "Agent Prompts / Drafts"
+reports_folder_name: "Agent Reports / Archive"

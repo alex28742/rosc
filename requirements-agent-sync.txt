@@ -1,0 +1,4 @@
+# Optional live Google Drive transport; install in the project virtual environment.
+google-api-python-client==2.201.0
+google-auth==2.62.0
+google-auth-oauthlib==1.5.0
