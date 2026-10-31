@@ -105,8 +105,8 @@ export function useWorkspaceController({ route, routeKey, go }: Navigation, api:
     try {
       const created = await api.createProject(toProjectInput(values));
       await loadProjects();
-      setRegistrationOpen(false);
-      if (live()) go({ kind: 'project', projectId: created.id });
+      // `live()` is false once this modal was dismissed or replaced; the Project stays created and cached, but the UI is not touched.
+      if (live()) { setRegistrationOpen(false); go({ kind: 'project', projectId: created.id }); }
     } catch (e) {
       fail(live, e);
       void loadProjects(true);
@@ -178,8 +178,9 @@ export function useWorkspaceController({ route, routeKey, go }: Navigation, api:
     feedbackFor,
     actions: {
       retry,
-      openRegistration: () => { epoch.current++; setRegistrationOpen(true); },
-      closeRegistration: () => { epoch.current++; setRegistrationOpen(false); },
+      // Each modal instance gets its own epoch and starts and ends with clean, modal-owned feedback.
+      openRegistration: () => { epoch.current++; setError(''); setNotice(''); setRegistrationOpen(true); },
+      closeRegistration: () => { epoch.current++; setError(''); setNotice(''); setRegistrationOpen(false); },
       registerProject, createTask, reconcileProject, repairProject, reconcileTask, repairTask,
     },
   };

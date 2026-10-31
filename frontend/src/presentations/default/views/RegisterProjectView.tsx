@@ -23,7 +23,7 @@ export function RegisterProjectView({ feedback, busy, onSubmit, onClose }: Regis
       <label>Файл документации, необязательно<input name="docs_entrypoint" placeholder="README.md" /></label>
       <label className="check"><input type="checkbox" name="no_external_agent_confirmed" /> В этом checkout сейчас не работает внешний агент (для существующего проекта)</label>
       <p className="subtle">Каталог уже должен существовать. ROSC создаст свои файлы отдельно от исходников проекта.</p>
-      <button className="primary" type="submit" aria-disabled={busy}>Сохранить проект</button>
+      <button className="primary" type="submit" disabled={busy} aria-disabled={busy}>Сохранить проект</button>
     </form>
   </div>;
 }

@@ -148,6 +148,72 @@ describe('Project registration', () => {
     expect(api.createProject).toHaveBeenCalledTimes(1);
     await act(async () => { pending.resolve(project('P0003')); await pending.promise; });
   });
+
+  const openForm = async () => {
+    fireEvent.click(await screen.findByText('＋ Добавить проект'));
+    return screen.getByText('Добавить проект', { selector: 'h2' }).closest('form')!;
+  };
+  const formGone = () => expect(screen.queryByText('Добавить проект', { selector: 'h2' })).toBeNull();
+
+  it.each([
+    ['the close button', () => fireEvent.click(screen.getByLabelText('Закрыть'))],
+    ['the backdrop', () => fireEvent.click(document.querySelector('.modal-back')!)],
+  ])('does not leak a dismissed modal error to the Dashboard or a reopened form (closed via %s)', async (_name, dismiss) => {
+    const createProject = vi.fn().mockRejectedValue(new ApiError('Project root overlaps another registered Project', 'conflict', 409));
+    render(<App api={stubApi({ createProject })} />);
+    const form = await openForm();
+    fill(form);
+    fireEvent.submit(form);
+    await waitFor(() => expect(within(form).getByRole('alert').textContent).toBe('Project root overlaps another registered Project'));
+
+    dismiss();
+    formGone();
+    expect(screen.queryByRole('alert')).toBeNull();
+    expect(screen.queryByText('Project root overlaps another registered Project')).toBeNull();
+
+    const reopened = await openForm();
+    expect(within(reopened).queryByRole('alert')).toBeNull();
+    expect(screen.queryByText('Project root overlaps another registered Project')).toBeNull();
+  });
+
+  it('lets a stale in-flight registration finish without closing or navigating a replacement modal', async () => {
+    const pending = deferred<ReturnType<typeof project>>();
+    const createProject = vi.fn(() => pending.promise);
+    const listProjects = vi.fn(async () => [P1]);
+    render(<App api={stubApi({ createProject, listProjects })} />);
+    const formA = await openForm();
+    fill(formA);
+    fireEvent.submit(formA);
+    expect(createProject).toHaveBeenCalledTimes(1);
+
+    fireEvent.click(screen.getByLabelText('Закрыть'));
+    formGone();
+    const formB = await openForm();
+    fireEvent.change(within(formB).getByLabelText('Название'), { target: { value: 'Second draft' } });
+
+    await act(async () => { pending.resolve(project('P0003', { name: 'New one' })); await pending.promise; });
+    await waitFor(() => expect(listProjects.mock.calls.length).toBeGreaterThan(1));
+
+    expect(screen.getByText('Добавить проект', { selector: 'h2' })).toBeTruthy();
+    expect((within(formB).getByLabelText('Название') as HTMLInputElement).value).toBe('Second draft');
+    expect(within(formB).queryByRole('alert')).toBeNull();
+    expect(location.pathname).toBe('/');
+  });
+
+  it('ignores a stale failure of a dismissed registration in a replacement modal', async () => {
+    const pending = deferred<ReturnType<typeof project>>();
+    render(<App api={stubApi({ createProject: vi.fn(() => pending.promise) })} />);
+    const formA = await openForm();
+    fill(formA);
+    fireEvent.submit(formA);
+    fireEvent.click(screen.getByLabelText('Закрыть'));
+    const formB = await openForm();
+
+    await act(async () => { pending.reject(new ApiError('late A failure', 'conflict', 409)); await pending.promise.catch(() => undefined); });
+
+    expect(within(formB).queryByRole('alert')).toBeNull();
+    expect(screen.queryByText('late A failure')).toBeNull();
+  });
 });
 
 describe('Task Draft creation', () => {
