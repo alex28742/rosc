@@ -34,10 +34,12 @@ export function App({ api = coreApi }: { api?: CoreApi }) {
   return <Shell>
     <Dashboard
       projects={core.projects}
+      projectsStatus={core.projectsStatus}
       feedback={core.feedbackFor('dashboard')}
       inert={route.kind !== 'dashboard' || modalOpen}
       onOpenProject={id => go({ kind: 'project', projectId: id })}
       onRegisterProject={actions.openRegistration}
+      onRetry={() => void actions.retryProjects()}
     />
     {projectId && <Project
       projectId={projectId}

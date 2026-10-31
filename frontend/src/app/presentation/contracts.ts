@@ -20,11 +20,15 @@ export type ShellProps = { children: ReactNode };
 
 export type DashboardViewProps = {
   projects: Project[];
+  /** Whether `projects` is a loaded list: the empty copy is only truthful when `ready`. Cached rows may remain on `failed`. */
+  projectsStatus: LoadStatus;
   feedback: Feedback;
   /** True while an overlay covers the Dashboard: it must not take focus or clicks. */
   inert: boolean;
   onOpenProject: (projectId: string) => void;
   onRegisterProject: () => void;
+  /** Reloads the Project list only; never mutates. */
+  onRetry: () => void;
 };
 
 export type ProjectViewProps = {

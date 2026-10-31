@@ -19,6 +19,9 @@ const repairNotice = (done: RepairResult<unknown>) => done.repair
  * Owns Core data loading, mutations, messages and the registration modal. Rules enforced here, not in views:
  * - a Task list for Project A is never exposed while the route points at Project B;
  * - messages belong to the layer/route where the action started, and are dropped when the user navigates away;
+ * - feedback has three owners that never share a store: route layers (`error/notice`), the registration modal (`modalError`)
+ *   and the Dashboard Project list (`projectsError`, which lives as long as the list is failed). A background list request
+ *   can therefore never write into a foreground modal, and opening/closing the modal never touches Dashboard feedback;
  * - a success notice is only set after the API call succeeded (a 409/503 never produces one);
  * - one mutation at a time; Draft Task creation and repair stay explicit user actions.
  */
@@ -27,6 +30,8 @@ export function useWorkspaceController({ route, routeKey, go }: Navigation, api:
   const [projectsStatus, setProjectsStatus] = useState<LoadStatus>('loading');
   const [tasks, setTasks] = useState<TaskCache>(NO_TASKS);
   const [error, setError] = useState('');
+  const [projectsError, setProjectsError] = useState('');
+  const [modalError, setModalError] = useState('');
   const [notice, setNotice] = useState('');
   const [registrationOpen, setRegistrationOpen] = useState(false);
   const [busy, setBusy] = useState(false);
@@ -34,22 +39,24 @@ export function useWorkspaceController({ route, routeKey, go }: Navigation, api:
   const routeRef = useRef(route);
   routeRef.current = route;
   const epoch = useRef(0);
+  const modalEpoch = useRef(0);
   const projectsSeq = useRef(0);
   const tasksSeq = useRef(0);
   const busyRef = useRef(false);
 
-  const loadProjects = useCallback(async (quiet = false) => {
+  /** The list failure is owned by the Project list itself (not by whichever layer is visible) and stays until a load succeeds. */
+  const loadProjects = useCallback(async () => {
     const seq = ++projectsSeq.current;
-    const started = epoch.current;
     try {
       const list = await api.listProjects();
       if (seq !== projectsSeq.current) return;
       setProjects(list);
       setProjectsStatus('ready');
+      setProjectsError('');
     } catch (e) {
       if (seq !== projectsSeq.current) return;
       setProjectsStatus('failed');
-      if (!quiet && epoch.current === started) setError(describeError(e));
+      setProjectsError(describeError(e));
     }
   }, [api]);
 
@@ -85,21 +92,28 @@ export function useWorkspaceController({ route, routeKey, go }: Navigation, api:
     : (route.kind === 'task' || route.kind === 'new-task') && project ? 'task'
       : route.kind !== 'dashboard' ? 'project' : 'dashboard';
 
-  const feedbackFor = (target: Layer): Feedback => (layer === target ? { error, notice } : NO_FEEDBACK);
+  const feedbackFor = (target: Layer): Feedback => {
+    if (target === 'modal') return layer === 'modal' ? { error: modalError, notice: '' } : NO_FEEDBACK;
+    if (target === 'dashboard') return layer === 'dashboard' ? { error: projectsError, notice: '' } : NO_FEEDBACK;
+    if (layer !== target) return NO_FEEDBACK;
+    // The Project drawer also reports a failed Project list, since it cannot render without it.
+    return { error: error || (target === 'project' ? projectsError : ''), notice };
+  };
 
   /** Runs one mutation. `live()` is false once the user navigated or closed the modal, so late results do not yank the UI. */
-  const mutate = useCallback(async (run: (live: () => boolean) => Promise<void>) => {
+  const mutate = useCallback(async (run: (live: () => boolean) => Promise<void>, scope: 'route' | 'modal' = 'route') => {
     if (busyRef.current) return;
     busyRef.current = true;
     setBusy(true);
-    setError('');
-    setNotice('');
-    const started = epoch.current;
-    try { await run(() => epoch.current === started); }
+    if (scope === 'modal') setModalError(''); else { setError(''); setNotice(''); }
+    const started = epoch.current, startedModal = modalEpoch.current;
+    try { await run(() => epoch.current === started && (scope === 'route' || modalEpoch.current === startedModal)); }
     finally { busyRef.current = false; setBusy(false); }
   }, []);
 
-  const fail = (live: () => boolean, e: unknown) => { if (live()) setError(describeError(e)); };
+  const fail = (live: () => boolean, e: unknown, scope: 'route' | 'modal' = 'route') => {
+    if (live()) (scope === 'modal' ? setModalError : setError)(describeError(e));
+  };
 
   const registerProject = (values: ProjectFormValues) => mutate(async live => {
     try {
@@ -108,10 +122,10 @@ export function useWorkspaceController({ route, routeKey, go }: Navigation, api:
       // `live()` is false once this modal was dismissed or replaced; the Project stays created and cached, but the UI is not touched.
       if (live()) { setRegistrationOpen(false); go({ kind: 'project', projectId: created.id }); }
     } catch (e) {
-      fail(live, e);
-      void loadProjects(true);
+      fail(live, e, 'modal');
+      void loadProjects();
     }
-  });
+  }, 'modal');
 
   const createTask = (values: TaskFormValues) => mutate(async live => {
     const at = routeRef.current;
@@ -130,7 +144,7 @@ export function useWorkspaceController({ route, routeKey, go }: Navigation, api:
     const id = projectIdOf(routeRef.current);
     if (!id) return;
     try { await api.reconcileProject(id); await loadProjects(); }
-    catch (e) { fail(live, e); void loadProjects(true); }
+    catch (e) { fail(live, e); void loadProjects(); }
   });
 
   const repairProject = (_confirmation: RepairConfirmation) => mutate(async live => {
@@ -142,7 +156,7 @@ export function useWorkspaceController({ route, routeKey, go }: Navigation, api:
       if (live()) setNotice(repairNotice(done));
     } catch (e) {
       fail(live, e);
-      void loadProjects(true);
+      void loadProjects();
     }
   });
 
@@ -169,18 +183,26 @@ export function useWorkspaceController({ route, routeKey, go }: Navigation, api:
   const retry = async () => {
     setError('');
     setNotice('');
+    setProjectsError('');
     await loadProjects();
     if (projectId) await loadTasks(projectId);
+  };
+
+  /** Dashboard Retry: one `listProjects` request, no mutation. Cached Projects stay visible while it runs. */
+  const retryProjects = async () => {
+    setProjectsError('');
+    setProjectsStatus('loading');
+    await loadProjects();
   };
 
   return {
     layer, projects, projectsStatus, project, tasks: taskList.items, tasksStatus: taskList.status, task, busy, registrationOpen,
     feedbackFor,
     actions: {
-      retry,
-      // Each modal instance gets its own epoch and starts and ends with clean, modal-owned feedback.
-      openRegistration: () => { epoch.current++; setError(''); setNotice(''); setRegistrationOpen(true); },
-      closeRegistration: () => { epoch.current++; setError(''); setNotice(''); setRegistrationOpen(false); },
+      retry, retryProjects,
+      // Each modal instance gets its own epoch and starts and ends with clean, modal-owned feedback only.
+      openRegistration: () => { modalEpoch.current++; setModalError(''); setRegistrationOpen(true); },
+      closeRegistration: () => { modalEpoch.current++; setModalError(''); setRegistrationOpen(false); },
       registerProject, createTask, reconcileProject, repairProject, reconcileTask, repairTask,
     },
   };

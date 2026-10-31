@@ -311,3 +311,124 @@ describe('Workspace repair', () => {
     expect(api.reconcileTask).toHaveBeenCalledWith('P0001', 'T0001');
   });
 });
+
+describe('Dashboard loading, failure and retry', () => {
+  const down = () => new ApiError('Не удалось связаться с ядром ROSC. Проверьте, что backend запущен, и повторите.', 'network', null);
+  const EMPTY = /Проектов пока нет/;
+  const dashboard = () => document.querySelector('main.dashboard') as HTMLElement;
+
+  it('shows a loading state, not the empty copy, before the first list arrives', async () => {
+    const pending = deferred<ReturnType<typeof project>[]>();
+    render(<App api={stubApi({ listProjects: vi.fn(() => pending.promise) })} />);
+    expect(within(dashboard()).getByText('Загрузка проектов…')).toBeTruthy();
+    expect(screen.queryByText(EMPTY)).toBeNull();
+    await act(async () => { pending.resolve([]); await pending.promise; });
+    expect(await screen.findByText(EMPTY)).toBeTruthy();
+  });
+
+  it('shows failure with Retry (never the empty copy) and recovers on Retry', async () => {
+    const listProjects = vi.fn().mockRejectedValueOnce(down()).mockResolvedValue([P1]);
+    const api = stubApi({ listProjects });
+    render(<App api={api} />);
+    expect(await within(dashboard()).findByText('Не удалось загрузить проекты.')).toBeTruthy();
+    expect(within(dashboard()).getByRole('alert').textContent).toContain('Не удалось связаться с ядром ROSC');
+    expect(screen.queryByText(EMPTY)).toBeNull();
+
+    fireEvent.click(within(dashboard()).getByText('Повторить'));
+    expect(await screen.findByText('Project P0001')).toBeTruthy();
+    expect(listProjects).toHaveBeenCalledTimes(2);
+    expect(screen.queryByRole('alert')).toBeNull();
+    expect(screen.queryByText('Не удалось загрузить проекты.')).toBeNull();
+    for (const m of [api.createProject, api.createTask, api.reconcileProject, api.repairProject]) expect(m).not.toHaveBeenCalled();
+  });
+
+  it('recovers from a failed load into a legitimate empty state', async () => {
+    const listProjects = vi.fn().mockRejectedValueOnce(down()).mockResolvedValue([]);
+    render(<App api={stubApi({ listProjects })} />);
+    fireEvent.click(await within(dashboard()).findByText('Повторить'));
+    expect(await screen.findByText(EMPTY)).toBeTruthy();
+    expect(screen.queryByRole('alert')).toBeNull();
+  });
+
+  it('keeps cached Projects visible and the failure/Retry available after a failed background refresh', async () => {
+    const createProject = vi.fn().mockRejectedValue(new ApiError('Project root overlaps another registered Project', 'conflict', 409));
+    const listProjects = vi.fn().mockResolvedValueOnce([P1]).mockRejectedValueOnce(down()).mockResolvedValue([P1, P2]);
+    render(<App api={stubApi({ createProject, listProjects })} />);
+    await screen.findByText('Project P0001');
+    fireEvent.click(screen.getByText('＋ Добавить проект'));
+    const form = screen.getByText('Добавить проект', { selector: 'h2' }).closest('form')!;
+    fireEvent.change(within(form).getByLabelText('Название'), { target: { value: 'N' } });
+    fireEvent.change(within(form).getByLabelText('Описание'), { target: { value: 'D' } });
+    fireEvent.change(within(form).getByLabelText('Корневая директория'), { target: { value: '/tmp/n' } });
+    fireEvent.submit(form);
+    await waitFor(() => expect(within(form).getByRole('alert').textContent).toBe('Project root overlaps another registered Project'));
+    await waitFor(() => expect(listProjects).toHaveBeenCalledTimes(2));
+    expect(within(form).getByRole('alert').textContent).toBe('Project root overlaps another registered Project');
+    fireEvent.click(screen.getByLabelText('Закрыть'));
+
+    expect(within(dashboard()).getByText('Project P0001')).toBeTruthy();
+    expect(within(dashboard()).getByText('Не удалось загрузить проекты.')).toBeTruthy();
+    fireEvent.click(within(dashboard()).getByText('Повторить'));
+    expect(await screen.findByText('Project P0002')).toBeTruthy();
+    expect(screen.queryByText('Не удалось загрузить проекты.')).toBeNull();
+    expect(createProject).toHaveBeenCalledTimes(1);
+  });
+
+  it.each([
+    ['the close button', () => fireEvent.click(screen.getByLabelText('Закрыть'))],
+    ['the backdrop', () => fireEvent.click(document.querySelector('.modal-back')!)],
+  ])('keeps the Dashboard failure and Retry after opening and dismissing the modal (%s); reopened form is clean', async (_n, dismiss) => {
+    const listProjects = vi.fn().mockRejectedValueOnce(down()).mockResolvedValue([P1]);
+    render(<App api={stubApi({ listProjects })} />);
+    await within(dashboard()).findByText('Не удалось загрузить проекты.');
+
+    fireEvent.click(screen.getByText('＋ Добавить проект'));
+    const form = screen.getByText('Добавить проект', { selector: 'h2' }).closest('form')!;
+    expect(within(form).queryByRole('alert')).toBeNull();
+    dismiss();
+    expect(screen.queryByText('Добавить проект', { selector: 'h2' })).toBeNull();
+    expect(within(dashboard()).getByText('Не удалось загрузить проекты.')).toBeTruthy();
+    expect(within(dashboard()).getByRole('alert').textContent).toContain('Не удалось связаться с ядром ROSC');
+    expect(screen.queryByText(EMPTY)).toBeNull();
+
+    fireEvent.click(screen.getByText('＋ Добавить проект'));
+    expect(within(screen.getByText('Добавить проект', { selector: 'h2' }).closest('form')!).queryByRole('alert')).toBeNull();
+    fireEvent.click(screen.getByLabelText('Закрыть'));
+
+    fireEvent.click(within(dashboard()).getByText('Повторить'));
+    expect(await screen.findByText('Project P0001')).toBeTruthy();
+  });
+
+  it('assigns a list failure that arrives while the modal is open to the Dashboard, not the form', async () => {
+    const late = deferred<ReturnType<typeof project>[]>();
+    const listProjects = vi.fn().mockReturnValueOnce(late.promise).mockResolvedValue([P1]);
+    render(<App api={stubApi({ listProjects })} />);
+    fireEvent.click(screen.getByText('＋ Добавить проект'));
+    const form = screen.getByText('Добавить проект', { selector: 'h2' }).closest('form')!;
+    await act(async () => { late.reject(down()); await late.promise.catch(() => undefined); });
+    expect(within(form).queryByRole('alert')).toBeNull();
+
+    fireEvent.click(screen.getByLabelText('Закрыть'));
+    expect(within(dashboard()).getByText('Не удалось загрузить проекты.')).toBeTruthy();
+    expect(within(dashboard()).getByRole('alert').textContent).toContain('Не удалось связаться с ядром ROSC');
+    expect(screen.queryByText(EMPTY)).toBeNull();
+  });
+
+  it('does not let a registration 409 become a Dashboard error, nor a Dashboard failure a modal error, across close/reopen', async () => {
+    const createProject = vi.fn().mockRejectedValue(new ApiError('Project root overlaps another registered Project', 'conflict', 409));
+    const listProjects = vi.fn().mockRejectedValue(down());
+    render(<App api={stubApi({ createProject, listProjects })} />);
+    await within(dashboard()).findByText('Не удалось загрузить проекты.');
+    fireEvent.click(screen.getByText('＋ Добавить проект'));
+    const form = screen.getByText('Добавить проект', { selector: 'h2' }).closest('form')!;
+    fireEvent.change(within(form).getByLabelText('Название'), { target: { value: 'N' } });
+    fireEvent.change(within(form).getByLabelText('Описание'), { target: { value: 'D' } });
+    fireEvent.change(within(form).getByLabelText('Корневая директория'), { target: { value: '/tmp/n' } });
+    fireEvent.submit(form);
+    await waitFor(() => expect(within(form).getByRole('alert').textContent).toBe('Project root overlaps another registered Project'));
+    fireEvent.click(screen.getByLabelText('Закрыть'));
+    expect(screen.queryByText('Project root overlaps another registered Project')).toBeNull();
+    expect(within(dashboard()).getByRole('alert').textContent).toContain('Не удалось связаться с ядром ROSC');
+    expect(createProject).toHaveBeenCalledTimes(1);
+  });
+});
