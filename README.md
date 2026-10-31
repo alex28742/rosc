@@ -13,6 +13,8 @@ The working architecture and [implementation pipeline](https://drive.google.com/
 
 The [accepted interactive UX reference](https://drive.google.com/file/d/17OZ90HLDmNwRuG8UpSA6FBdbaLl3eQZ7/view) is a mock browser simulation. The [implementation pipeline](https://drive.google.com/file/d/1GVaW8SGFuB8F0CaxLEmPXd-HQkuU21gH/view) is maintained in Drive.
 
+Stage 01 (Foundation) is Owner-accepted with documented deferrals; ADR-0001 remains `proposed` and Stage 01F is not started. UI work follows the UX gate in [docs/development_workflow.md](docs/development_workflow.md), starting from the approved reference above and the Drive [Stage 01 acceptance and UI delivery rules](https://drive.google.com/file/d/1NcHJRHeBK6daFNyGu22fxQqlD-BIy9qC/view).
+
 ## Managed agent workflow
 
 The coordinator and Owner prepare an editable Markdown draft in the ROSC Drive `Agent Prompts / Drafts` folder. An agent receives its filename, pulls and verifies an immutable local revision, works, commits, finalizes a local report, and archives that report in `Agent Reports / Archive`. See [docs/agent_reporting.md](docs/agent_reporting.md). Raw telemetry and credentials stay local and ignored by Git. This workflow manages development agents; it is separate from future in-product ROSC Task Runs.
