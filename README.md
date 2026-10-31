@@ -40,7 +40,11 @@ npm install
 npm run dev
 ```
 
-Open the Vite URL on localhost. API requests are proxied to `127.0.0.1:8000`. Keep `.local-data/` and `.venv/` out of Git. To run backend checks: `python -m unittest discover -s tests -v`.
+Open the Vite URL on localhost. API requests are proxied to `127.0.0.1:8000`; set `ROSC_API_TARGET` (localhost hosts only) to use another backend port, e.g. `ROSC_API_TARGET=http://127.0.0.1:8010 npm run dev`. `frontend/package.json` declares `engines.node >= 24`; Vite 7 refuses to start its dev server on Node 18. Keep `.local-data/` and `.venv/` out of Git. To run backend checks: `python -m unittest discover -s tests -v`.
+
+Workspace manifests (`project.yaml`, `task.yaml`) are projections of SQLite. Ordinary reconciliation only rebuilds a *missing* manifest and never replaces an existing file. A corrupt or drifted manifest needs the separate, Owner-confirmed repair action, which first copies the exact old bytes into `workspace/quarantine/`; a manifest that belongs to another record is never overwritten and needs manual resolution.
+
+`alembic downgrade` drops tables together with their data. Back up `rosc.db` and the `workspace/` directory first and never run it against a real data directory.
 
 ## Current limits
 
