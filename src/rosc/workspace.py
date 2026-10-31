@@ -18,6 +18,8 @@ MAX_MANIFEST_BYTES = 1_048_576
 
 # Inspection outcomes. "ready" means the file equals the canonical projection exactly.
 READY, MISSING, CORRUPT, DRIFT, FOREIGN, UNSAFE = "ready", "missing", "corrupt", "drift", "foreign", "unsafe"
+# Larger than MAX_MANIFEST_BYTES: never loaded, never backed up, never replaced; manual resolution only.
+OVERSIZED = "oversized"
 
 
 class WorkspaceConflict(Exception):
@@ -31,6 +33,18 @@ class WorkspaceConflict(Exception):
 
 class WorkspaceError(Exception):
     """A repair step failed; the original manifest bytes are intact or were restored."""
+
+
+class WorkspaceUncertain(WorkspaceError):
+    """The target may no longer hold the original bytes; the full original is in quarantine."""
+
+    def __init__(self, message: str, backup_id: str | None = None) -> None:
+        super().__init__(message)
+        self.backup_id = backup_id
+
+
+class ReplaceNotDurable(OSError):
+    """os.replace succeeded but the directory fsync afterwards failed."""
 
 
 @dataclass
@@ -112,14 +126,16 @@ def inspect_manifest(path: Path, expected: dict, identity: tuple[str, ...], work
         return Inspection(UNSAFE)
     if not stat.S_ISREG(info.st_mode):
         return Inspection(UNSAFE)
+    if info.st_size > MAX_MANIFEST_BYTES:
+        return Inspection(OVERSIZED)
     try:
         fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
         with os.fdopen(fd, "rb") as handle:
             raw = handle.read(MAX_MANIFEST_BYTES + 1)
     except OSError:
         return Inspection(UNSAFE)
-    if len(raw) > MAX_MANIFEST_BYTES:
-        return Inspection(CORRUPT, raw)
+    if len(raw) > MAX_MANIFEST_BYTES:  # grew after lstat; the prefix is not a complete copy, so drop it
+        return Inspection(OVERSIZED)
     try:
         loaded = yaml.safe_load(raw.decode("utf-8"))
     except (UnicodeDecodeError, yaml.YAMLError):
@@ -171,7 +187,10 @@ def write_yaml_noclobber(path: Path, payload: dict) -> None:
 
 def _atomic_replace(source: str, target: Path) -> None:
     os.replace(source, target)
-    _fsync_directory(target.parent)
+    try:
+        _fsync_directory(target.parent)
+    except OSError as exc:
+        raise ReplaceNotDurable(f"directory sync failed after replace: {exc}") from exc
 
 
 def _provision(path: Path, payload: dict, identity: tuple[str, ...], workspace_root: Path) -> None:
@@ -247,23 +266,51 @@ def _repair(path: Path, payload: dict, identity: tuple[str, ...], workspace_root
     again = inspect_manifest(path, payload, identity, workspace_root)
     if again.raw != current.raw:
         raise WorkspaceConflict(again.problem, "Manifest changed during repair; it was left untouched")
-    temporary = _temp_file(path.parent, _dump(payload))
+    data = _dump(payload)
+    temporary = _temp_file(path.parent, data)
     try:
         _atomic_replace(temporary, path)
+    except ReplaceNotDurable as exc:
+        # The rename happened: the target holds the new bytes, not the original. Do not claim otherwise.
+        landed = _read_target(path) == data
+        state = "now holds the repaired manifest" if landed else "was changed by someone else and was not touched again"
+        raise WorkspaceUncertain(
+            f"The manifest was replaced but the directory sync failed ({exc}); durability is not confirmed and the target {state}. "
+            f"The complete previous manifest is in quarantine as {record['backup_id']}; reconcile manually.",
+            record["backup_id"]) from exc
     except BaseException as exc:
         raise WorkspaceError("Manifest replacement failed; the original is intact") from exc
     finally:
         if os.path.exists(temporary):
             os.unlink(temporary)
     if inspect_manifest(path, payload, identity, workspace_root).problem != READY:
-        restore = _temp_file(path.parent, current.raw)
-        try:
-            _atomic_replace(restore, path)
-        finally:
-            if os.path.exists(restore):
-                os.unlink(restore)
+        _restore(path, current.raw, data, record)
         raise WorkspaceError("Repaired manifest failed verification; the original bytes were restored")
     return record
+
+
+def _read_target(path: Path) -> bytes | None:
+    try:
+        return path.read_bytes()
+    except OSError:
+        return None
+
+
+def _restore(path: Path, original: bytes, written: bytes, record: dict) -> None:
+    """Put the preserved original back, but only over what this repair wrote."""
+    if _read_target(path) != written:
+        raise WorkspaceUncertain("The repaired manifest failed verification and the target changed since; it was not overwritten. "
+                                 f"The complete previous manifest is in quarantine as {record['backup_id']}.", record["backup_id"])
+    restore = _temp_file(path.parent, original)
+    try:
+        _atomic_replace(restore, path)
+    except OSError as exc:
+        raise WorkspaceUncertain(f"The repaired manifest failed verification and restoring the original failed ({exc}). "
+                                 f"The complete previous manifest is in quarantine as {record['backup_id']}; reconcile manually.",
+                                 record["backup_id"]) from exc
+    finally:
+        if os.path.exists(restore):
+            os.unlink(restore)
 
 
 def repair_project(workspace_root: Path, project: Project) -> dict | None:

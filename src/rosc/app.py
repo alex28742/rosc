@@ -12,7 +12,7 @@ from sqlalchemy.exc import IntegrityError, OperationalError
 from .config import data_dir
 from .db import make_session_factory
 from .models import Project, Task
-from .workspace import (READY, WorkspaceConflict, WorkspaceError, inspect_project, inspect_task, provision_project,
+from .workspace import (MAX_MANIFEST_BYTES, READY, WorkspaceConflict, WorkspaceError, WorkspaceUncertain, inspect_project, inspect_task, provision_project,
                         provision_task, repair_project, repair_task)
 
 
@@ -91,6 +91,8 @@ def numeric_id(value: str, prefix: str) -> int:
 def conflict_detail(exc: WorkspaceConflict) -> str:
     if exc.problem in ("corrupt", "drift"):
         return f"Workspace manifest is {exc.problem}; use the Owner-confirmed repair action. {exc.message}"
+    if exc.problem == "oversized":
+        return f"Workspace manifest is larger than the {MAX_MANIFEST_BYTES} byte limit and cannot be backed up automatically; manual resolution is required. It was left untouched."
     return f"Workspace manifest conflicts with the canonical record ({exc.problem}); manual resolution is required. {exc.message}"
 
 
@@ -207,6 +209,8 @@ def create_app(db_path: Path | None = None, workspace_root: Path | None = None, 
                 record = repair_project(workspace_root, project)
             except WorkspaceConflict as exc:
                 raise HTTPException(409, conflict_detail(exc)) from exc
+            except WorkspaceUncertain as exc:
+                raise HTTPException(503, f"Workspace repair outcome is uncertain: {exc}") from exc
             except (WorkspaceError, OSError) as exc:
                 raise HTTPException(503, f"Workspace repair failed and the original manifest is preserved: {exc}") from exc
             project.workspace_state = "ready"
@@ -274,6 +278,8 @@ def create_app(db_path: Path | None = None, workspace_root: Path | None = None, 
                 record = repair_task(workspace_root, task)
             except WorkspaceConflict as exc:
                 raise HTTPException(409, conflict_detail(exc)) from exc
+            except WorkspaceUncertain as exc:
+                raise HTTPException(503, f"Workspace repair outcome is uncertain: {exc}") from exc
             except (WorkspaceError, OSError) as exc:
                 raise HTTPException(503, f"Workspace repair failed and the original manifest is preserved: {exc}") from exc
             task.workspace_state = "ready"

@@ -301,6 +301,88 @@ class HardeningTests(StageCase):
         self.assertEqual(manifest.read_bytes(), original, "failed verification restores the original bytes")
         self.assertEqual(self.repair("/api/projects/P0001/repair-workspace").status_code, 200)
 
+    def test_oversized_manifest_is_never_backed_up_partially_or_replaced(self) -> None:
+        from rosc import workspace
+        manifest = self.make_project()
+        tail = b"\n# DISTINCTIVE-TAIL-BEYOND-READ-BOUNDARY\n"
+        original = b"x: 1\n" + b"#" * (workspace.MAX_MANIFEST_BYTES + 10) + tail
+        manifest.write_bytes(original)
+        view = self.client.get("/api/projects").json()[0]
+        self.assertEqual((view["workspace_state"], view["workspace_problem"]), ("needs_reconciliation", "oversized"))
+        for url in ("/api/projects/P0001/repair-workspace", "/api/projects/P0001/reconcile-workspace"):
+            response = self.repair(url) if url.endswith("repair-workspace") else self.client.post(url)
+            self.assertEqual(response.status_code, 409, response.text)
+            self.assertIn("manual resolution", response.json()["detail"])
+            self.assertEqual(manifest.read_bytes(), original)
+        self.assertFalse((self.data / "workspace/quarantine").exists(), "no truncated backup may be advertised")
+        self.assertEqual(self.repair("/api/projects/P0001/repair-workspace", force=True).status_code, 409)
+        self.assertEqual(manifest.read_bytes(), original)
+
+    def test_post_replace_fsync_failure_is_reported_as_uncertain_not_intact(self) -> None:
+        from rosc import workspace
+        manifest = self.make_project()
+        original = b"broken: ["
+        manifest.write_bytes(original)
+        real_replace, real_sync, replaced = os.replace, workspace._fsync_directory, []
+
+        def replace(source, target):
+            real_replace(source, target)
+            replaced.append(target)
+
+        def sync(directory):
+            if replaced:  # fail only once the rename has actually happened
+                raise OSError("sync failed")
+            real_sync(directory)
+        with patch.object(workspace.os, "replace", side_effect=replace), patch.object(workspace, "_fsync_directory", side_effect=sync):
+            response = self.client.post("/api/projects/P0001/repair-workspace", json={"confirm_repair": True})
+        self.assertEqual(response.status_code, 503, response.text)
+        detail = response.json()["detail"]
+        self.assertIn("uncertain", detail)
+        self.assertNotIn("intact", detail)
+        self.assertNotIn("original manifest is preserved", detail)
+        self.assertEqual(yaml.safe_load(manifest.read_text())["project_id"], "P0001", "the rename really happened")
+        backups = list((self.data / "workspace/quarantine/projects/P0001").glob("*.bak"))
+        self.assertEqual([b.read_bytes() for b in backups], [original])
+        self.assertIn(backups[0].stem, detail)
+        self.assertEqual(self.client.get("/api/projects").json()[0]["workspace_state"], "ready")
+        self.assertEqual(list(manifest.parent.glob(".rosc-*")), [])
+
+    def test_failed_restore_after_verification_failure_is_reported(self) -> None:
+        from rosc import workspace
+        manifest = self.make_project()
+        original = b"broken: ["
+        manifest.write_bytes(original)
+        real = workspace._atomic_replace
+        calls = []
+
+        def flaky(source, target):
+            calls.append(source)
+            if len(calls) == 2:
+                raise OSError("restore failed")
+            real(source, target)
+        with patch.object(workspace, "_dump", return_value=b"format: wrong\n"), patch.object(workspace, "_atomic_replace", side_effect=flaky):
+            response = self.repair("/api/projects/P0001/repair-workspace")
+        self.assertEqual(response.status_code, 503)
+        self.assertIn("uncertain", response.json()["detail"])
+        self.assertIn("restoring the original failed", response.json()["detail"])
+        self.assertEqual(manifest.read_bytes(), b"format: wrong\n")
+        self.assertEqual([b.read_bytes() for b in (self.data / "workspace/quarantine/projects/P0001").glob("*.bak")], [original])
+
+    def test_restore_does_not_overwrite_a_concurrently_changed_target(self) -> None:
+        from rosc import workspace
+        manifest = self.make_project()
+        manifest.write_bytes(b"broken: [")
+        real = workspace._atomic_replace
+
+        def replace_then_interfere(source, target):
+            real(source, target)
+            target.write_bytes(b"someone: else\n")
+        with patch.object(workspace, "_dump", return_value=b"format: wrong\n"), patch.object(workspace, "_atomic_replace", side_effect=replace_then_interfere):
+            response = self.repair("/api/projects/P0001/repair-workspace")
+        self.assertEqual(response.status_code, 503)
+        self.assertIn("changed since", response.json()["detail"])
+        self.assertEqual(manifest.read_bytes(), b"someone: else\n")
+
     # Full-field drift --------------------------------------------------
     def test_every_projected_field_is_compared(self) -> None:
         manifest = self.make_project()
