@@ -1,0 +1,190 @@
+/* Register-Project dialog: modal backdrop, dialog frame, mode switch and form grid. */
+.modal-back {
+  position: fixed;
+  inset: 0;
+  z-index: var(--rosc-layer-dialog);
+  display: grid;
+  place-items: center;
+  padding: 16px;
+  background: rgba(16, 28, 39, 0.4);
+  animation: rosc-fade-in var(--rosc-motion-fast) ease-out;
+}
+
+.rosc-dialog {
+  display: flex;
+  width: min(var(--rosc-dialog-width), 100%);
+  max-height: calc(100vh - 32px);
+  flex-direction: column;
+  overflow: hidden;
+  border-radius: 14px;
+  background: var(--rosc-panel);
+  box-shadow: var(--rosc-shadow-dialog);
+  animation: rosc-dialog-in 0.18s var(--rosc-ease);
+}
+
+@keyframes rosc-dialog-in {
+  from { transform: translateY(6px); opacity: 0.6; }
+  to { transform: translateY(0); opacity: 1; }
+}
+
+.rosc-dialog__head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 14px;
+  padding: 20px 24px 10px;
+}
+
+.rosc-dialog__head h2 {
+  margin: 0;
+  font-size: 22px;
+  letter-spacing: -0.4px;
+  font-weight: 790;
+}
+
+.rosc-dialog__head p {
+  margin: 5px 0 0;
+  color: #8494a0;
+  font-size: 12px;
+}
+
+.rosc-dialog__close {
+  display: grid;
+  place-items: center;
+  width: 34px;
+  height: 34px;
+  flex: none;
+  border: 1px solid var(--rosc-line);
+  border-radius: 7px;
+  background: #f7f8fa;
+  color: #667681;
+}
+
+.rosc-dialog__close:hover {
+  background: #eef3f6;
+}
+
+.rosc-dialog__body {
+  padding: 4px 24px 8px;
+  overflow-y: auto;
+}
+
+.rosc-dialog__footer {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  flex-wrap: wrap;
+  gap: 10px;
+  padding: 14px 24px 18px;
+  border-top: 1px solid var(--rosc-line);
+  background: var(--rosc-panel);
+}
+
+.rosc-mode-switch {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 9px;
+  margin: 4px 0 16px;
+  padding: 0;
+  border: 0;
+}
+
+.rosc-mode-switch legend {
+  padding: 0;
+  margin-bottom: 7px;
+  font-size: 12px;
+  font-weight: 710;
+  color: #536676;
+}
+
+.rosc-mode-switch__option {
+  position: relative;
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  padding: 12px;
+  border: 1px solid var(--rosc-line);
+  border-radius: var(--rosc-radius-sm);
+  background: #fafbfc;
+  color: #657581;
+  font-size: 12px;
+  font-weight: 700;
+  cursor: pointer;
+}
+
+.rosc-mode-switch__option:hover {
+  border-color: #bcd3e2;
+}
+
+.rosc-mode-switch__option input {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  margin: 0;
+  opacity: 0;
+}
+
+.rosc-mode-switch__option:has(input:checked) {
+  border-color: #8fb9d4;
+  background: var(--rosc-soft-blue);
+  color: #1c6a9c;
+}
+
+.rosc-mode-switch__option:has(input:focus-visible) {
+  outline: 3px solid var(--rosc-focus);
+  outline-offset: 2px;
+}
+
+.rosc-form-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 14px 15px;
+}
+
+.rosc-form-grid__wide {
+  grid-column: 1 / -1;
+}
+
+.rosc-dialog .rosc-check {
+  margin: 2px 0 0;
+}
+
+.rosc-create-note {
+  margin: 14px 0 0;
+  padding: 10px 12px;
+  border: 1px solid #deebf3;
+  border-radius: var(--rosc-radius-sm);
+  background: #f3f8fc;
+  color: #517083;
+  font-size: 11px;
+}
+
+@media (max-width: 640px) {
+  .modal-back {
+    padding: 10px;
+  }
+
+  .rosc-dialog {
+    max-height: calc(100vh - 20px);
+  }
+
+  .rosc-dialog__head {
+    padding: 16px 16px 8px;
+  }
+
+  .rosc-dialog__body {
+    padding: 4px 16px 8px;
+  }
+
+  .rosc-dialog__footer {
+    padding: 12px 16px 16px;
+  }
+
+  .rosc-form-grid {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .rosc-mode-switch {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}

@@ -8,7 +8,7 @@ export function Feedback({ error, notice }: FeedbackProps) {
   useEffect(() => { if (error) errorRef.current?.scrollIntoView?.({ block: 'nearest' }); }, [error]);
   useEffect(() => { if (notice) noticeRef.current?.scrollIntoView?.({ block: 'nearest' }); }, [notice]);
   return <>
-    {error && <div ref={errorRef} role="alert" className="error">{error}</div>}
-    {notice && <div ref={noticeRef} role="status" className="notice">{notice}</div>}
+    {error && <div ref={errorRef} role="alert" className="rosc-alert">{error}</div>}
+    {notice && <div ref={noticeRef} role="status" className="rosc-notice">{notice}</div>}
   </>;
 }

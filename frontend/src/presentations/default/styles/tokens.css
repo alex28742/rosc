@@ -1,0 +1,86 @@
+/*
+ * Design tokens for the `default` presentation package.
+ *
+ * Values are translated from the Owner-approved interactive reference
+ * ROSC_Dashboard_Project_Task_Work_Area_v06.html (desktop-first). They are the single
+ * place where colour, surface, spacing, radius, motion and layer depth are declared; views
+ * and primitives only consume the semantic names below.
+ *
+ * Scoping: every custom property is declared on `.rosc-app`, so the package never redefines
+ * a consumer's `:root` or a third-party variable.
+ */
+.rosc-app {
+  /* Surface */
+  --rosc-canvas: #f5f6f8;
+  --rosc-panel: #ffffff;
+  --rosc-soft: #f8fafb;
+  --rosc-soft-blue: #eff6fb;
+  --rosc-soft-green: #edf7f0;
+  --rosc-soft-amber: #fff7e9;
+  --rosc-soft-red: #fff1f1;
+
+  /* Text */
+  --rosc-ink: #232a32;
+  --rosc-ink-strong: #1f2730;
+  --rosc-secondary: #5f6d79;
+  --rosc-muted: #87939f;
+  --rosc-faint: #96a0aa;
+
+  /* Line */
+  --rosc-line: #e0e5e9;
+  --rosc-line-strong: #d6dfe5;
+  --rosc-line-soft: #edf0f3;
+
+  /* Accent and status */
+  --rosc-blue: #256b9d;
+  --rosc-blue-strong: #1d5984;
+  --rosc-blue-line: #cde5f4;
+  --rosc-green: #27734d;
+  --rosc-amber: #93692b;
+  --rosc-red: #ad454f;
+  --rosc-red-line: #f0dadd;
+
+  /* Focus */
+  --rosc-focus: #a6cae2;
+
+  /* Radius */
+  --rosc-radius-lg: 12px;
+  --rosc-radius: 10px;
+  --rosc-radius-sm: 8px;
+  --rosc-radius-xs: 6px;
+
+  /* Spacing scale (4px base) */
+  --rosc-space-1: 4px;
+  --rosc-space-2: 8px;
+  --rosc-space-3: 12px;
+  --rosc-space-4: 16px;
+  --rosc-space-5: 20px;
+  --rosc-space-6: 24px;
+  --rosc-space-7: 32px;
+
+  /* Motion */
+  --rosc-motion-fast: 0.15s;
+  --rosc-motion-overlay: 0.24s;
+  --rosc-ease: cubic-bezier(0.2, 0.75, 0.25, 1);
+
+  /* Depth */
+  --rosc-shadow-panel: 0 6px 26px rgba(28, 42, 55, 0.035);
+  --rosc-shadow-card: 0 10px 35px rgba(25, 44, 59, 0.075);
+  --rosc-shadow-drawer: -8px 0 25px rgba(25, 36, 48, 0.15);
+  --rosc-shadow-dialog: 0 22px 72px rgba(21, 32, 44, 0.25);
+
+  /* Layer stack: overlay < drawer < nested drawer < dialog */
+  --rosc-layer-page: 0;
+  --rosc-layer-backdrop: 30;
+  --rosc-layer-drawer: 31;
+  --rosc-layer-backdrop-nested: 33;
+  --rosc-layer-drawer-nested: 34;
+  --rosc-layer-dialog: 45;
+
+  /* Geometry */
+  --rosc-topbar-height: 66px;
+  --rosc-panel-width: min(1480px, calc(100vw - 96px));
+  --rosc-panel-offset: clamp(56px, 5vw, 118px);
+  --rosc-nested-offset: clamp(96px, 9vw, 186px);
+  --rosc-dialog-width: 780px;
+}

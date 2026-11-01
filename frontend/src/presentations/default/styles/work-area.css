@@ -1,0 +1,538 @@
+/*
+ * Overlay layers: Project drawer, nested Task drawer, edge close affordance and the
+ * content blocks that live inside a work area.
+ */
+.rosc-backdrop,
+.rosc-backdrop--nested {
+  position: fixed;
+  inset: 0;
+  z-index: var(--rosc-layer-backdrop);
+  background: rgba(18, 30, 42, 0.29);
+  animation: rosc-fade-in var(--rosc-motion-fast) ease-out;
+}
+
+.rosc-backdrop--nested {
+  z-index: var(--rosc-layer-backdrop-nested);
+  background: rgba(244, 246, 248, 0.5);
+  animation-duration: 0.12s;
+}
+
+@keyframes rosc-fade-in {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+
+.rosc-drawer {
+  position: absolute;
+  top: 0;
+  right: 0;
+  bottom: 0;
+  left: var(--rosc-panel-offset);
+  z-index: var(--rosc-layer-drawer);
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  border-left: 1px solid var(--rosc-line-strong);
+  background: #f6f7f9;
+  box-shadow: var(--rosc-shadow-drawer);
+  animation: rosc-slide-in var(--rosc-motion-overlay) var(--rosc-ease);
+}
+
+.rosc-drawer--task {
+  left: var(--rosc-nested-offset);
+  z-index: var(--rosc-layer-drawer-nested);
+}
+
+@keyframes rosc-slide-in {
+  from { transform: translateX(2.5%); opacity: 0.4; }
+  to { transform: translateX(0); opacity: 1; }
+}
+
+/* Edge close: the visible affordance in the exposed strip at the drawer's left edge. */
+.rosc-edge-close {
+  position: absolute;
+  top: 77px;
+  left: -47px;
+  display: grid;
+  place-items: center;
+  width: 47px;
+  height: 43px;
+  border: 0;
+  border-radius: 12px 0 0 12px;
+  background: #236e9c;
+  color: #fff;
+  box-shadow: -4px 3px 8px rgba(36, 72, 90, 0.16);
+}
+
+.rosc-edge-close:hover {
+  filter: brightness(1.08);
+}
+
+.rosc-drawer--task .rosc-edge-close {
+  top: 137px;
+  background: #203b52;
+}
+
+.rosc-edge-caption {
+  position: absolute;
+  top: 126px;
+  left: -48px;
+  padding: 9px 13px;
+  border-radius: 6px 0 0 6px;
+  background: #235f86;
+  color: #fff;
+  font-size: 10px;
+  letter-spacing: 0.06em;
+  writing-mode: vertical-rl;
+  transform: rotate(180deg);
+  pointer-events: none;
+  opacity: 0.92;
+}
+
+.rosc-drawer--task .rosc-edge-caption {
+  top: 185px;
+  background: #334e64;
+}
+
+/* Drawer header */
+.rosc-drawer__head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 15px;
+  flex: none;
+  padding: 20px clamp(20px, 2vw, 34px) 16px;
+  border-bottom: 1px solid var(--rosc-line);
+  background: var(--rosc-panel);
+}
+
+.rosc-drawer__heading {
+  min-width: 0;
+}
+
+.rosc-drawer__heading h2 {
+  margin: 3px 0;
+  font-size: 25px;
+  line-height: 1.2;
+  letter-spacing: -0.5px;
+  font-weight: 790;
+  color: var(--rosc-ink-strong);
+  overflow-wrap: anywhere;
+}
+
+.rosc-drawer__heading p {
+  margin: 3px 0 0;
+  color: var(--rosc-muted);
+  font-size: 12px;
+  overflow-wrap: anywhere;
+}
+
+.rosc-drawer__controls {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  flex: none;
+}
+
+/* Scroll region: the surface the app remembers a scroll position for. */
+.rosc-drawer__scroll {
+  flex: 1;
+  min-height: 0;
+  padding: clamp(18px, 2vw, 32px);
+  overflow-y: auto;
+  overscroll-behavior: contain;
+}
+
+.rosc-drawer__form {
+  display: flex;
+  flex: 1;
+  min-height: 0;
+  flex-direction: column;
+}
+
+.rosc-drawer__footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 10px;
+  flex: none;
+  padding: 14px clamp(18px, 2vw, 30px);
+  border-top: 1px solid var(--rosc-line);
+  background: var(--rosc-panel);
+}
+
+/* Work area content */
+.rosc-hero {
+  display: grid;
+  grid-template-columns: minmax(0, 1.35fr) minmax(245px, 0.7fr);
+  gap: 18px;
+  margin: 0 0 20px;
+}
+
+.rosc-panel-card {
+  min-width: 0;
+  padding: 20px;
+  border: 1px solid var(--rosc-line);
+  border-radius: var(--rosc-radius-lg);
+  background: var(--rosc-panel);
+}
+
+.rosc-panel-card h3 {
+  margin: 0 0 10px;
+  font-size: 16px;
+  font-weight: 770;
+  letter-spacing: -0.2px;
+}
+
+.rosc-panel-card p {
+  margin: 6px 0 10px;
+  color: var(--rosc-secondary);
+  line-height: 1.65;
+  white-space: pre-wrap;
+}
+
+.rosc-panel-card p:last-child {
+  margin-bottom: 0;
+}
+
+.rosc-facts {
+  display: grid;
+  grid-template-columns: 116px minmax(0, 1fr);
+  gap: 9px;
+  margin: 12px 0 0;
+  font-size: 12px;
+}
+
+.rosc-facts dt {
+  color: #80909c;
+}
+
+.rosc-facts dd {
+  margin: 0;
+  font-weight: 650;
+  color: #3c4b58;
+}
+
+.rosc-spec {
+  margin: 0;
+}
+
+.rosc-spec dt {
+  margin: 14px 0 4px;
+  font-size: 11px;
+  font-weight: 780;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: #84909c;
+}
+
+.rosc-spec dt:first-child {
+  margin-top: 0;
+}
+
+.rosc-spec dd {
+  margin: 0;
+  color: #33414d;
+  font-size: 13px;
+  line-height: 1.65;
+  white-space: pre-wrap;
+}
+
+/* Tabs / toolbar / task list */
+.rosc-tabs {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin: 0 0 18px;
+}
+
+.rosc-tab {
+  padding: 9px 14px;
+  border: 1px solid var(--rosc-line);
+  border-radius: 9px;
+  background: var(--rosc-panel);
+  color: #5a6a75;
+  font-weight: 650;
+}
+
+.rosc-tab:disabled {
+  color: #93a0ab;
+}
+
+.rosc-tab--active {
+  border-color: #a9cee8;
+  background: #eaf4fb;
+  color: #186b9c;
+}
+
+.rosc-work-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+  margin: 0 0 12px;
+}
+
+.rosc-work-toolbar h3 {
+  font-size: 16px;
+  font-weight: 770;
+  letter-spacing: -0.2px;
+}
+
+.rosc-work-toolbar__title {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.rosc-task-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.rosc-task-item {
+  display: flex;
+  align-items: center;
+  gap: 17px;
+  width: 100%;
+  padding: 15px 16px;
+  border: 1px solid #e4eaf0;
+  border-radius: var(--rosc-radius);
+  background: var(--rosc-panel);
+  text-align: left;
+}
+
+.rosc-task-item:hover {
+  border-color: #a3c9e2;
+  background: #f8fbfd;
+}
+
+.rosc-task-item__glyph {
+  display: grid;
+  place-items: center;
+  width: 30px;
+  height: 30px;
+  flex: none;
+  border-radius: var(--rosc-radius-sm);
+  background: #f1f5f8;
+  color: #7b8d9b;
+}
+
+.rosc-task-item__main {
+  flex: 1;
+  min-width: 0;
+}
+
+.rosc-task-title {
+  display: block;
+  font-size: 13px;
+  font-weight: 730;
+  color: var(--rosc-ink);
+  overflow-wrap: anywhere;
+}
+
+.rosc-task-item__chevron {
+  flex: none;
+  color: #9aa8b4;
+}
+
+/* Workspace repair controls */
+.rosc-repair {
+  color: #5b7080;
+  font-size: 12px;
+}
+
+.rosc-repair > p {
+  margin: 0 0 10px;
+  color: #5b7080;
+  line-height: 1.55;
+}
+
+.rosc-check {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  margin: 8px 0 12px;
+  font-size: 12px;
+  font-weight: 400;
+  color: #4d6474;
+}
+
+.rosc-check input {
+  margin-top: 2px;
+  flex: none;
+}
+
+/* Forms inside a work area or dialog */
+.rosc-form {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  width: 100%;
+  max-width: 760px;
+  margin: 0 auto;
+}
+
+.rosc-field {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.rosc-field > span {
+  font-size: 12px;
+  font-weight: 710;
+  color: #536676;
+}
+
+.rosc-field input,
+.rosc-field textarea,
+.rosc-field select {
+  width: 100%;
+  min-width: 0;
+  padding: 10px 11px;
+  border: 1px solid #d7e0e6;
+  border-radius: var(--rosc-radius-sm);
+  background: var(--rosc-panel);
+  color: #273748;
+}
+
+.rosc-field textarea {
+  resize: vertical;
+}
+
+.rosc-field__assist {
+  font-size: 11px;
+  color: #8a97a2;
+  font-weight: 400;
+}
+
+@media (max-width: 1100px) {
+  .rosc-drawer {
+    left: 58px;
+  }
+
+  .rosc-drawer--task {
+    left: 107px;
+  }
+}
+
+@media (max-width: 850px) {
+  .rosc-hero {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .rosc-drawer {
+    left: 38px;
+  }
+
+  .rosc-drawer--task {
+    left: 65px;
+  }
+
+  .rosc-edge-close {
+    left: -35px;
+    width: 35px;
+  }
+
+  .rosc-edge-caption {
+    display: none;
+  }
+
+  .rosc-drawer__head {
+    padding: 14px 18px;
+  }
+
+  .rosc-drawer__heading h2 {
+    font-size: 21px;
+  }
+
+  .rosc-drawer__controls .rosc-chip {
+    display: none;
+  }
+
+  .rosc-drawer__scroll {
+    padding: 16px;
+  }
+}
+
+/* Narrow viewport: functional safety only (navigation, close controls, forms, errors). */
+@media (max-width: 640px) {
+  .rosc-drawer,
+  .rosc-drawer--task {
+    left: 0;
+    border-left: 0;
+  }
+
+  .rosc-drawer__head {
+    padding: 12px 14px;
+    align-items: flex-start;
+  }
+
+  .rosc-edge-close,
+  .rosc-drawer--task .rosc-edge-close {
+    top: 10px;
+    right: 10px;
+    left: auto;
+    width: 40px;
+    height: 40px;
+    border-radius: var(--rosc-radius-sm);
+    z-index: 3;
+  }
+
+  .rosc-drawer__head {
+    padding-right: 62px;
+  }
+
+  .rosc-drawer__heading h2 {
+    font-size: 19px;
+  }
+
+  .rosc-drawer__scroll {
+    padding: 12px;
+  }
+
+  .rosc-hero {
+    gap: 12px;
+  }
+
+  .rosc-panel-card {
+    padding: 16px;
+  }
+
+  .rosc-facts {
+    grid-template-columns: minmax(0, 1fr);
+    gap: 2px;
+  }
+
+  .rosc-facts dd {
+    margin-bottom: 8px;
+  }
+
+  .rosc-tabs {
+    gap: 6px;
+  }
+
+  .rosc-tab {
+    padding: 8px 10px;
+    font-size: 12px;
+  }
+
+  .rosc-task-item {
+    gap: 10px;
+    padding: 12px;
+  }
+
+  .rosc-drawer__footer {
+    padding: 12px 14px;
+  }
+
+  .rosc-form {
+    max-width: none;
+  }
+}

@@ -1,4 +1,4 @@
-import './style.css';
+import './styles/index.css';
 import type { Presentation } from '../../app/presentation/contracts';
 import { Shell } from './Shell';
 import { DashboardView } from './views/DashboardView';

@@ -1,0 +1,8 @@
+/* Entry point for the `default` presentation package styles. Order matters: tokens first,
+ * then base primitives, then the surfaces that consume them. */
+@import './tokens.css';
+@import './base.css';
+@import './shell.css';
+@import './dashboard.css';
+@import './work-area.css';
+@import './modal.css';

@@ -1,0 +1,67 @@
+/* Application frame: the top bar that frames every view. */
+.rosc-topbar {
+  position: relative;
+  z-index: 8;
+  display: flex;
+  align-items: center;
+  gap: clamp(10px, 1.2vw, 22px);
+  height: var(--rosc-topbar-height);
+  padding: 0 clamp(16px, 1.55vw, 38px);
+  border-bottom: 1px solid var(--rosc-line);
+  background: var(--rosc-panel);
+}
+
+.rosc-brand {
+  display: flex;
+  align-items: baseline;
+  gap: 9px;
+  white-space: nowrap;
+}
+
+.rosc-brand__name {
+  font-size: 23px;
+  font-weight: 850;
+  letter-spacing: -1.1px;
+  color: var(--rosc-ink-strong);
+}
+
+.rosc-brand__slash {
+  color: #b3bcc4;
+  font-size: 17px;
+}
+
+.rosc-brand__context {
+  color: #6e7883;
+  font-size: 12px;
+}
+
+.rosc-topbar__actions {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  margin-left: auto;
+}
+
+@media (max-width: 650px) {
+  .rosc-topbar {
+    height: auto;
+    min-height: 56px;
+    flex-wrap: wrap;
+    padding: 10px 14px;
+    gap: 8px;
+  }
+
+  .rosc-brand__context,
+  .rosc-brand__slash {
+    display: none;
+  }
+
+  .rosc-brand__name {
+    font-size: 21px;
+  }
+
+  .rosc-topbar__actions .rosc-chip {
+    font-size: 10px;
+    padding: 5px 8px;
+  }
+}
