@@ -1,5 +1,6 @@
-/* Register-Project dialog: modal backdrop, dialog frame, mode switch and form grid. */
-.modal-back {
+/* Register-Project dialog: modal backdrop, dialog frame, mode switch and form grid.
+ * The backdrop selector is package-scoped; `.modal-back` stays only as a compatible DOM hook. */
+.rosc-app .modal-back {
   position: fixed;
   inset: 0;
   z-index: var(--rosc-layer-dialog);
@@ -160,7 +161,7 @@
 }
 
 @media (max-width: 640px) {
-  .modal-back {
+  .rosc-app .modal-back {
     padding: 10px;
   }
 

@@ -4,13 +4,13 @@ import type { WorkspaceControls } from '../../../app/presentation/contracts';
 
 type Props = { state: WorkspaceState; problem: WorkspaceProblem | null; controls: WorkspaceControls };
 
-/** Workspace manifest controls. Repair is only reachable after an explicit confirmation. */
+/**
+ * Workspace manifest controls. A healthy Workspace offers no action: reconciliation and repair are
+ * only exposed while something needs attention, and repair stays behind an explicit confirmation.
+ */
 export function WorkspaceActions({ state, problem, controls }: Props) {
   const [confirmed, setConfirmed] = useState(false);
-  if (state === 'ready') return <div className="rosc-repair">
-    <p>Манифест Workspace соответствует записи в базе.</p>
-    <button className="rosc-btn rosc-btn--small" aria-disabled={controls.busy} onClick={controls.onReconcile}>Проверить Workspace</button>
-  </div>;
+  if (state === 'ready') return null;
   if (problem === 'corrupt' || problem === 'drift') {
     return <div className="rosc-repair">
       <p>{problem === 'corrupt' ? 'Манифест Workspace повреждён.' : 'Манифест Workspace расходится с записью в базе.'} Перед заменой текущий файл будет сохранён в карантин ROSC.</p>

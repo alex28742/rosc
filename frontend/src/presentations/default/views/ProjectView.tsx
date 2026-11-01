@@ -38,7 +38,10 @@ export function ProjectView({ projectId, project, projectStatus, tasks, tasksSta
         </section>
         <section className="rosc-panel-card">
           <h3>Состояние Workspace</h3>
-          <WorkspaceActions key={`${project.id}:${project.workspace_problem}`} state={project.workspace_state} problem={project.workspace_problem} controls={workspace} />
+          {/* Read-only Core fact: a healthy Workspace has no action, only the state it reports. */}
+          {project.workspace_state === 'ready'
+            ? <div className="rosc-repair"><p>Манифест Workspace соответствует записи в базе.</p></div>
+            : <WorkspaceActions key={`${project.id}:${project.workspace_problem}`} state={project.workspace_state} problem={project.workspace_problem} controls={workspace} />}
         </section>
       </div>
       <div className="rosc-tabs" role="tablist" aria-label="Разделы проекта">

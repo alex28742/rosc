@@ -99,6 +99,58 @@ describe('Work area presentation', () => {
   });
 });
 
+describe('Workspace presentation', () => {
+  const baseProject = {
+    projectId: 'P0001', projectStatus: 'ready' as const, tasks: [], tasksStatus: 'ready' as const,
+    feedback, inert: false, scroll, onClose: vi.fn(), onRetry: vi.fn(), onOpenTask: vi.fn(), onNewTask: vi.fn(),
+  };
+  const controls = () => ({ busy: false, onReconcile: vi.fn(), onRepair: vi.fn() });
+
+  it('offers no reconcile or repair control for a healthy Workspace in the Project or Task layer', () => {
+    const workspace = controls();
+    const { unmount } = render(<ProjectView {...baseProject} project={project('P0001')} workspace={workspace} />);
+    expect(screen.queryByRole('button', { name: 'Проверить Workspace' })).toBeNull();
+    expect(screen.queryByRole('button', { name: 'Восстановить манифест' })).toBeNull();
+    expect(screen.getByText('Манифест Workspace соответствует записи в базе.')).toBeTruthy();
+    unmount();
+
+    render(<TaskView projectName="ROSC Platform" taskId="T0001" task={task('T0001', 'P0001')} tasksStatus="ready" feedback={feedback} inert={false} scroll={scroll} workspace={workspace} onClose={vi.fn()} onRetry={vi.fn()} />);
+    expect(screen.queryByRole('button', { name: 'Проверить Workspace' })).toBeNull();
+    expect(screen.queryByRole('button', { name: 'Восстановить манифест' })).toBeNull();
+    expect(workspace.onReconcile).not.toHaveBeenCalled();
+    expect(workspace.onRepair).not.toHaveBeenCalled();
+  });
+
+  it('keeps the reconcile action for a Workspace that has not been checked yet', () => {
+    const workspace = controls();
+    render(<ProjectView {...baseProject} project={project('P0002', { workspace_state: 'needs_reconciliation', workspace_problem: 'missing' })} workspace={workspace} />);
+    fireEvent.click(screen.getByRole('button', { name: 'Проверить Workspace' }));
+    expect(workspace.onReconcile).toHaveBeenCalledTimes(1);
+    expect(workspace.onRepair).not.toHaveBeenCalled();
+  });
+
+  it('requires the explicit confirmation before repairing a damaged manifest', () => {
+    const workspace = controls();
+    render(<ProjectView {...baseProject} project={project('P0003', { workspace_state: 'needs_reconciliation', workspace_problem: 'corrupt' })} workspace={workspace} />);
+    const repair = screen.getByRole('button', { name: 'Восстановить манифест' }) as HTMLButtonElement;
+    expect(repair.disabled).toBe(true);
+    fireEvent.click(repair);
+    expect(workspace.onRepair).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByRole('checkbox'));
+    expect(repair.disabled).toBe(false);
+    fireEvent.click(repair);
+    expect(workspace.onRepair).toHaveBeenCalledWith({ confirmed: true });
+  });
+
+  it.each(['oversized', 'foreign', 'unsafe'] as const)('keeps automatic repair off for an %s manifest', problem => {
+    const workspace = controls();
+    render(<ProjectView {...baseProject} project={project('P0004', { workspace_state: 'needs_reconciliation', workspace_problem: problem })} workspace={workspace} />);
+    expect(screen.getByText(/исправление отключено/)).toBeTruthy();
+    expect(screen.queryByRole('button', { name: 'Проверить Workspace' })).toBeNull();
+    expect(screen.queryByRole('button', { name: 'Восстановить манифест' })).toBeNull();
+  });
+});
+
 describe('Register Project dialog', () => {
   it('defaults to linking an existing directory and keeps the mode switch accessible', () => {
     const onSubmit = vi.fn();
