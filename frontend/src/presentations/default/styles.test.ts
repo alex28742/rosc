@@ -3,7 +3,7 @@ import { describe, expect, it } from 'vitest';
 // stylesheet bytes from disk. The frontend deliberately has no @types/node; only the test runner
 // provides this API.
 // @ts-expect-error -- Node API available to Vitest, not part of the browser-facing source
-import { readFileSync, readdirSync } from 'node:fs';
+import { readFileSync } from 'node:fs';
 
 // Style-source guards for the presentation package. The approved v0.6 visual system must arrive as
 // readable, package-owned CSS in one scoped token layer, not as inline styles or a palette in JSX.
@@ -66,6 +66,11 @@ function declarationsOf(rules: Rule[], prefix: string): { selector: string; decl
 }
 
 const PARTIALS = ['base.css', 'dashboard.css', 'index.css', 'modal.css', 'shell.css', 'tokens.css', 'work-area.css'];
+// Allowlist for the whole `default` package: any CSS file that appears anywhere else in the package
+// (a returning legacy ./style.css, a stray ./views/rogue.css, ...) must fail this guard.
+const ALLOWED_CSS = PARTIALS.map(name => `./styles/${name}`).sort();
+/** Every `.css` anywhere under the package, as glob keys relative to this test file. */
+const packageCssFiles: string[] = Object.keys(import.meta.glob('./**/*.css')).sort();
 
 const stylesDir = (() => {
   // The Vitest runner executes with the frontend package as its working directory (`npm test`).
@@ -73,7 +78,7 @@ const stylesDir = (() => {
   const root: string = process.cwd();
   return `${root}/src/presentations/default/styles`;
 })();
-const cssFiles: string[] = readdirSync(stylesDir).filter((name: string) => name.endsWith('.css')).sort();
+const cssFiles: string[] = packageCssFiles.filter(path => path.startsWith('./styles/')).map(path => path.slice('./styles/'.length));
 const sheets = cssFiles.map(name => {
   const css = readFileSync(`${stylesDir}/${name}`, 'utf8');
   return { name, selectors: selectorsOf(parseRules(css)), rules: parseRules(css) };
@@ -82,9 +87,10 @@ const modules = Object.entries(import.meta.glob('./**/*.{ts,tsx}', { query: '?ra
   .filter(([path]) => !path.includes('.test.'));
 
 describe('presentation styling', () => {
-  it('inventories the real stylesheet files instead of an always-true module glob', () => {
-    expect(cssFiles.length).toBeGreaterThan(0);
-    expect(cssFiles, 'the legacy one-line package sheet is gone').not.toContain('style.css');
+  it('inventories every stylesheet in the package and rejects CSS outside ./styles/', () => {
+    expect(packageCssFiles.length).toBeGreaterThan(0);
+    expect(packageCssFiles, 'the legacy one-line package sheet is gone').not.toContain('./style.css');
+    expect(packageCssFiles, 'every package stylesheet lives in ./styles/').toEqual(ALLOWED_CSS);
     expect(cssFiles).toEqual(PARTIALS);
   });
 
