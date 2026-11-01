@@ -16,7 +16,7 @@ from .models import Project, Task
 
 MAX_MANIFEST_BYTES = 1_048_576
 
-# Inspection outcomes. "ready" means the file equals the canonical projection exactly.
+# Inspection outcomes. "ready" means a supported format with exact keys/types whose identity matches SQLite.
 READY, MISSING, CORRUPT, DRIFT, FOREIGN, UNSAFE = "ready", "missing", "corrupt", "drift", "foreign", "unsafe"
 # Larger than MAX_MANIFEST_BYTES: never loaded, never backed up, never replaced; manual resolution only.
 OVERSIZED = "oversized"
@@ -70,22 +70,38 @@ def task_manifest_path(workspace_root: Path, task: Task) -> Path:
 
 
 def project_payload(project: Project) -> dict:
-    return {
-        "format": "rosc.project.v1",
-        "project_id": f"P{project.id:04d}",
-        "name": project.name,
-        "root_path": project.root_path,
-        "mode": project.mode,
-        "docs_entrypoint": project.docs_entrypoint,
-    }
+    """Identity-only projection (rosc.project.v2). SQLite is authoritative for name, docs_entrypoint and mode."""
+    return {"format": "rosc.project.v2", "project_id": f"P{project.id:04d}", "root_path": project.root_path}
 
 
 def task_payload(task: Task) -> dict:
-    return {"format": "rosc.task.v1", "task_id": f"T{task.id:04d}", "project_id": f"P{task.project_id:04d}", "status": task.status}
+    """Identity-only projection (rosc.task.v2). SQLite is authoritative for title and status."""
+    return {"format": "rosc.task.v2", "task_id": f"T{task.id:04d}", "project_id": f"P{task.project_id:04d}"}
 
 
 PROJECT_IDENTITY = ("project_id", "root_path")
 TASK_IDENTITY = ("task_id", "project_id")
+
+_STR = (str,)
+_OPT_STR = (str, type(None))
+# Supported on-disk formats: exact key set and value types. v1 manifests were written by earlier ROSC; their
+# name/mode/docs_entrypoint/status values are legacy, non-authoritative projections: shape-checked, never compared
+# with SQLite. Identity keys are compared with SQLite separately (a mismatch is FOREIGN).
+MANIFEST_SCHEMAS: dict[str, dict] = {
+    "rosc.project.v2": {"project_id": _STR, "root_path": _STR},
+    "rosc.project.v1": {"project_id": _STR, "name": _STR, "root_path": _STR, "mode": _STR, "docs_entrypoint": _OPT_STR},
+    "rosc.task.v2": {"task_id": _STR, "project_id": _STR},
+    "rosc.task.v1": {"task_id": _STR, "project_id": _STR, "status": _STR},
+}
+
+
+def _conforms(loaded: dict) -> bool:
+    schema = MANIFEST_SCHEMAS.get(loaded.get("format")) if isinstance(loaded.get("format"), str) else None
+    if schema is None or set(loaded) != {"format", *schema}:
+        return False
+    if not all(isinstance(loaded[key], types) for key, types in schema.items()):
+        return False
+    return loaded.get("mode", "new") in ("new", "existing")
 
 
 def _fsync_directory(directory: Path) -> None:
@@ -142,11 +158,9 @@ def inspect_manifest(path: Path, expected: dict, identity: tuple[str, ...], work
         return Inspection(CORRUPT, raw)
     if not isinstance(loaded, dict) or any(key not in loaded for key in identity):
         return Inspection(CORRUPT, raw)
-    if loaded == expected:
-        return Inspection(READY, raw)
     if any(loaded[key] != expected[key] for key in identity):
         return Inspection(FOREIGN, raw)
-    return Inspection(DRIFT, raw)
+    return Inspection(READY if _conforms(loaded) else DRIFT, raw)
 
 
 def inspect_project(workspace_root: Path, project: Project) -> Inspection:

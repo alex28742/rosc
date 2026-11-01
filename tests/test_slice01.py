@@ -249,24 +249,24 @@ class HardeningTests(StageCase):
         manifest = self.make_project()
         for attempt in range(2):
             drifted = yaml.safe_load(manifest.read_text())
-            drifted["name"] = f"STALE{attempt}"
+            drifted[f"unexpected{attempt}"] = "x"  # same identity but outside the supported shape
             manifest.write_text(yaml.safe_dump(drifted))
             self.assertEqual(self.client.get("/api/projects").json()[0]["workspace_problem"], "drift")
             self.assertEqual(self.repair("/api/projects/P0001/repair-workspace").status_code, 200)
-            self.assertEqual(yaml.safe_load(manifest.read_text())["name"], "Fixture")
+            self.assertEqual(set(yaml.safe_load(manifest.read_text())), {"format", "project_id", "root_path"})
         backups = list((self.data / "workspace/quarantine/projects/P0001").glob("*.bak"))
         self.assertEqual(len(backups), 2)
 
-    def test_task_manifest_repair_for_corrupt_and_status_drift(self) -> None:
+    def test_task_manifest_repair_for_corrupt_and_shape_drift(self) -> None:
         manifest = self.make_task()
         manifest.write_bytes(b"garbage: [")
         self.assertEqual(self.repair("/api/projects/P0001/tasks/T0001/repair-workspace").status_code, 200)
         drifted = yaml.safe_load(manifest.read_text())
-        drifted["status"] = "Running"
+        drifted["unexpected"] = "x"
         manifest.write_text(yaml.safe_dump(drifted))
         self.assertEqual(self.client.get("/api/projects/P0001/tasks").json()[0]["workspace_problem"], "drift")
         self.assertEqual(self.repair("/api/projects/P0001/tasks/T0001/repair-workspace").status_code, 200)
-        self.assertEqual(yaml.safe_load(manifest.read_text())["status"], "Draft")
+        self.assertEqual(set(yaml.safe_load(manifest.read_text())), {"format", "task_id", "project_id"})
         self.assertEqual(len(list((self.data / "workspace/quarantine/tasks/T0001").glob("*.bak"))), 2)
         self.assertNotIn("title", yaml.safe_load(manifest.read_text()))
 
@@ -383,30 +383,144 @@ class HardeningTests(StageCase):
         self.assertIn("changed since", response.json()["detail"])
         self.assertEqual(manifest.read_bytes(), b"someone: else\n")
 
-    # Full-field drift --------------------------------------------------
-    def test_every_projected_field_is_compared(self) -> None:
+    # Manifest shape and identity (P006) --------------------------------
+    # Replaces the former "every projected field is compared": name/docs_entrypoint/mode/status are mutable
+    # SQLite-authoritative data, so comparing them produced false drift. The invariant that replaces it:
+    # identity is compared with SQLite; format/keys/types are validated strictly.
+    def sql(self, statement: str, *args) -> None:
+        import sqlite3
+        with sqlite3.connect(self.data / "rosc.db") as connection:
+            connection.execute(statement, args)
+
+    def project_view(self) -> dict:
+        return self.client.get("/api/projects").json()[0]
+
+    def task_view(self) -> dict:
+        return self.client.get("/api/projects/P0001/tasks").json()[0]
+
+    def state(self, view: dict) -> tuple:
+        return view["workspace_state"], view["workspace_problem"]
+
+    def test_new_manifests_are_identity_only_v2_and_idempotent(self) -> None:
+        manifest = self.make_task()
+        root = str(Path(self.base / "empty-project").resolve())
+        self.assertEqual(yaml.safe_load((self.project_dir() / "project.yaml").read_text()),
+                         {"format": "rosc.project.v2", "project_id": "P0001", "root_path": root})
+        self.assertEqual(yaml.safe_load(manifest.read_text()), {"format": "rosc.task.v2", "task_id": "T0001", "project_id": "P0001"})
+        before = (self.project_dir() / "project.yaml").read_bytes(), manifest.read_bytes()
+        self.assertEqual(self.client.post("/api/projects/P0001/reconcile-workspace").status_code, 200)
+        self.assertEqual(self.client.post("/api/projects/P0001/tasks/T0001/reconcile-workspace").status_code, 200)
+        restarted = TestClient(create_app(self.data / "rosc.db", self.data / "workspace"))
+        self.assertEqual(restarted.get("/api/projects").json()[0]["workspace_state"], "ready")
+        self.assertEqual(((self.project_dir() / "project.yaml").read_bytes(), manifest.read_bytes()), before)
+
+    def test_mutable_project_metadata_never_changes_identity_or_workspace_state(self) -> None:
+        self.make_task()
+        self.sql("UPDATE projects SET name = ?, docs_entrypoint = ? WHERE id = 1", "Fixtrue corrected", "docs/NEW.md")
+        view = self.project_view()
+        self.assertEqual((view["id"], view["name"], view["docs_entrypoint"]), ("P0001", "Fixtrue corrected", "docs/NEW.md"))
+        self.assertEqual(self.state(view), ("ready", None))
+        self.assertEqual(self.state(self.task_view()), ("ready", None))
+        self.assertEqual(self.task_view()["id"], "T0001")
+        self.assertTrue((self.project_dir() / "tasks/T0001/task.yaml").is_file())
+
+    def test_task_title_and_status_changes_keep_parent_path_and_state(self) -> None:
+        self.make_task()
+        self.sql("UPDATE tasks SET title = ?, status = ? WHERE id = 1", "Renamed task", "Running")
+        view = self.task_view()
+        self.assertEqual((view["id"], view["title"], view["status"]), ("T0001", "Renamed task", "Running"))
+        self.assertEqual(self.state(view), ("ready", None))
+        self.assertEqual(self.client.get("/api/projects").json()[0]["id"], "P0001")
+
+    def legacy_project(self, **overrides) -> dict:
+        root = str(Path(self.base / "empty-project").resolve())
+        return {"format": "rosc.project.v1", "project_id": "P0001", "name": "Fixture", "root_path": root,
+                "mode": "new", "docs_entrypoint": None, **overrides}
+
+    def test_legacy_v1_project_manifest_is_ready_with_stale_mutable_values(self) -> None:
+        manifest = self.make_project()
+        for overrides in ({}, {"name": "Old typo"}, {"docs_entrypoint": "README.md"}, {"mode": "existing"},
+                          {"name": "Stale", "docs_entrypoint": "x.md", "mode": "existing"}):
+            with self.subTest(overrides=overrides):
+                manifest.write_text(yaml.safe_dump(self.legacy_project(**overrides)))
+                before = manifest.read_bytes()
+                self.assertEqual(self.state(self.project_view()), ("ready", None))
+                self.assertEqual(self.client.post("/api/projects/P0001/reconcile-workspace").status_code, 200)
+                self.assertEqual(manifest.read_bytes(), before, "a valid legacy manifest is never rewritten")
+
+    def test_legacy_v1_task_manifest_is_ready_with_stale_status(self) -> None:
+        manifest = self.make_task()
+        self.sql("UPDATE tasks SET status = ? WHERE id = 1", "Done")
+        for status in ("Draft", "Running", "anything"):
+            with self.subTest(status=status):
+                manifest.write_text(yaml.safe_dump({"format": "rosc.task.v1", "task_id": "T0001", "project_id": "P0001", "status": status}))
+                self.assertEqual(self.state(self.task_view()), ("ready", None))
+
+    def test_unexpected_project_shapes_are_never_ready(self) -> None:
+        manifest = self.make_project()
+        good = self.legacy_project()
+        v2 = {"format": "rosc.project.v2", "project_id": "P0001", "root_path": good["root_path"]}
+        missing = {k: v for k, v in good.items() if k != "name"}
+        cases = {
+            "unsupported version": ({**good, "format": "rosc.project.v0"}, "drift"),
+            "future version": ({**v2, "format": "rosc.project.v3"}, "drift"),
+            "non-string format": ({**good, "format": 1}, "drift"),
+            "missing legacy key": (missing, "drift"),
+            "extra key on v1": ({**good, "extra": 1}, "drift"),
+            "extra key on v2": ({**v2, "name": "Fixture"}, "drift"),
+            "bad name type": ({**good, "name": 5}, "drift"),
+            "bad docs type": ({**good, "docs_entrypoint": ["a"]}, "drift"),
+            "bad mode value": ({**good, "mode": "other"}, "drift"),
+            "missing identity": ({k: v for k, v in v2.items() if k != "root_path"}, "corrupt"),
+            "not a mapping": (["a"], "corrupt"),
+        }
+        for label, (content, problem) in cases.items():
+            with self.subTest(label):
+                manifest.write_text(yaml.safe_dump(content))
+                self.assertEqual(self.state(self.project_view()), ("needs_reconciliation", problem))
+        manifest.write_bytes(b"a: [unterminated")
+        self.assertEqual(self.state(self.project_view()), ("needs_reconciliation", "corrupt"))
+
+    def test_unexpected_task_shapes_are_never_ready(self) -> None:
+        manifest = self.make_task()
+        v1 = {"format": "rosc.task.v1", "task_id": "T0001", "project_id": "P0001", "status": "Draft"}
+        v2 = {"format": "rosc.task.v2", "task_id": "T0001", "project_id": "P0001"}
+        for label, content in {"unsupported": {**v2, "format": "rosc.task.v0"}, "extra v2": {**v2, "status": "Draft"},
+                               "extra v1": {**v1, "title": "t"}, "missing status": {k: v for k, v in v1.items() if k != "status"},
+                               "bad status type": {**v1, "status": 1}}.items():
+            with self.subTest(label):
+                manifest.write_text(yaml.safe_dump(content))
+                self.assertEqual(self.state(self.task_view()), ("needs_reconciliation", "drift"))
+
+    def test_identity_tampering_is_foreign_and_never_auto_replaced(self) -> None:
         manifest = self.make_project()
         good = yaml.safe_load(manifest.read_text())
-        for field, value in (("format", "rosc.project.v0"), ("name", "Other"), ("mode", "existing"),
-                             ("docs_entrypoint", "README.md")):
+        for field, value in (("project_id", "P0002"), ("root_path", str(self.base / "elsewhere"))):
             with self.subTest(field=field):
-                manifest.write_text(yaml.safe_dump({**good, field: value}))
-                view = self.client.get("/api/projects").json()[0]
-                self.assertEqual((view["workspace_state"], view["workspace_problem"]), ("needs_reconciliation", "drift"))
-        manifest.write_text(yaml.safe_dump({**good, "extra": 1}))
-        self.assertEqual(self.client.get("/api/projects").json()[0]["workspace_problem"], "drift")
+                tampered = yaml.safe_dump({**good, field: value}).encode()
+                manifest.write_bytes(tampered)
+                self.assertEqual(self.state(self.project_view()), ("needs_reconciliation", "foreign"))
+                self.assertNotEqual(self.client.post("/api/projects/P0001/reconcile-workspace").status_code, 200)
+                self.assertNotEqual(self.repair("/api/projects/P0001/repair-workspace").status_code, 200)
+                self.assertEqual(manifest.read_bytes(), tampered)
         manifest.write_text(yaml.safe_dump(good))
-        self.assertEqual(self.client.get("/api/projects").json()[0]["workspace_state"], "ready")
-
-    def test_every_projected_task_field_is_compared(self) -> None:
-        manifest = self.make_task()
-        good = yaml.safe_load(manifest.read_text())
-        self.assertEqual(set(good), {"format", "task_id", "project_id", "status"})
-        for field, value in (("format", "rosc.task.v0"), ("status", "Running")):
+        task_manifest = self.make_task_manifest_path()
+        task_good = yaml.safe_load(task_manifest.read_text())
+        for field, value in (("task_id", "T0009"), ("project_id", "P0002")):
             with self.subTest(field=field):
-                manifest.write_text(yaml.safe_dump({**good, field: value}))
-                view = self.client.get("/api/projects/P0001/tasks").json()[0]
-                self.assertEqual((view["workspace_state"], view["workspace_problem"]), ("needs_reconciliation", "drift"))
+                tampered = yaml.safe_dump({**task_good, field: value}).encode()
+                task_manifest.write_bytes(tampered)
+                self.assertEqual(self.state(self.task_view()), ("needs_reconciliation", "foreign"))
+                self.assertEqual(task_manifest.read_bytes(), tampered)
+
+    def make_task_manifest_path(self) -> Path:
+        self.assertEqual(self.client.post("/api/projects/P0001/tasks", json=TASK_BODY).status_code, 201)
+        return self.project_dir() / "tasks/T0001/task.yaml"
+
+    def test_legacy_v1_with_foreign_root_or_id_stays_foreign(self) -> None:
+        manifest = self.make_project()
+        manifest.write_text(yaml.safe_dump(self.legacy_project(root_path="/somewhere/else")))
+        self.assertEqual(self.state(self.project_view()), ("needs_reconciliation", "foreign"))
 
     # F3 ----------------------------------------------------------------
     def test_independent_processes_cannot_register_overlapping_roots(self) -> None:
