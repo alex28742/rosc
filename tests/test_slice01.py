@@ -53,7 +53,13 @@ class FoundationSliceTests(StageCase):
         self.assertEqual(project["architect"], "not_active")
         self.assertEqual(project["active_workers"], 0)
         manifest = self.data / "workspace/projects/P0001/project.yaml"
-        self.assertEqual(yaml.safe_load(manifest.read_text())["root_path"], str(root.resolve()))
+        payload = yaml.safe_load(manifest.read_text())
+        self.assertEqual(set(payload), {"format", "project_id", "project_uuid"})
+        self.assertEqual(payload["format"], "rosc.project.v3")
+        self.assertEqual(payload["project_uuid"], project["project_uuid"])
+        self.assertEqual(project["registration_root_path"], str(root.resolve()))
+        self.assertEqual(project["root_binding"]["root_path"], str(root.resolve()))
+        self.assertEqual(project["root_binding"]["version"], 1)
         self.assertEqual(list(root.iterdir()), [], "ROSC must not write into application source root")
 
         response = self.client.post("/api/projects/P0001/tasks", json={
@@ -253,7 +259,7 @@ class HardeningTests(StageCase):
             manifest.write_text(yaml.safe_dump(drifted))
             self.assertEqual(self.client.get("/api/projects").json()[0]["workspace_problem"], "drift")
             self.assertEqual(self.repair("/api/projects/P0001/repair-workspace").status_code, 200)
-            self.assertEqual(set(yaml.safe_load(manifest.read_text())), {"format", "project_id", "root_path"})
+            self.assertEqual(set(yaml.safe_load(manifest.read_text())), {"format", "project_id", "project_uuid"})
         backups = list((self.data / "workspace/quarantine/projects/P0001").glob("*.bak"))
         self.assertEqual(len(backups), 2)
 
@@ -401,11 +407,16 @@ class HardeningTests(StageCase):
     def state(self, view: dict) -> tuple:
         return view["workspace_state"], view["workspace_problem"]
 
-    def test_new_manifests_are_identity_only_v2_and_idempotent(self) -> None:
+    def test_new_manifests_are_identity_only_v3_and_idempotent(self) -> None:
         manifest = self.make_task()
         root = str(Path(self.base / "empty-project").resolve())
-        self.assertEqual(yaml.safe_load((self.project_dir() / "project.yaml").read_text()),
-                         {"format": "rosc.project.v2", "project_id": "P0001", "root_path": root})
+        project_payload = yaml.safe_load((self.project_dir() / "project.yaml").read_text())
+        self.assertEqual(set(project_payload), {"format", "project_id", "project_uuid"})
+        self.assertEqual(project_payload["format"], "rosc.project.v3")
+        self.assertEqual(project_payload["project_id"], "P0001")
+        self.assertNotIn("root_path", project_payload)
+        self.assertEqual(self.project_view()["registration_root_path"], root)
+        self.assertEqual(self.project_view()["root_binding"]["root_path"], root)
         self.assertEqual(yaml.safe_load(manifest.read_text()), {"format": "rosc.task.v2", "task_id": "T0001", "project_id": "P0001"})
         before = (self.project_dir() / "project.yaml").read_bytes(), manifest.read_bytes()
         self.assertEqual(self.client.post("/api/projects/P0001/reconcile-workspace").status_code, 200)
@@ -460,14 +471,18 @@ class HardeningTests(StageCase):
         manifest = self.make_project()
         good = self.legacy_project()
         v2 = {"format": "rosc.project.v2", "project_id": "P0001", "root_path": good["root_path"]}
+        v3 = {"format": "rosc.project.v3", "project_id": "P0001", "project_uuid": self.project_view()["project_uuid"]}
         missing = {k: v for k, v in good.items() if k != "name"}
         cases = {
             "unsupported version": ({**good, "format": "rosc.project.v0"}, "drift"),
-            "future version": ({**v2, "format": "rosc.project.v3"}, "drift"),
+            "future version": ({**v2, "format": "rosc.project.v4"}, "drift"),
             "non-string format": ({**good, "format": 1}, "drift"),
             "missing legacy key": (missing, "drift"),
             "extra key on v1": ({**good, "extra": 1}, "drift"),
             "extra key on v2": ({**v2, "name": "Fixture"}, "drift"),
+            "v3 missing uuid": ({**v2, "format": "rosc.project.v3"}, "corrupt"),
+            "v3 extra root_path": ({**v3, "root_path": good["root_path"]}, "drift"),
+            "v3 extra key": ({**v3, "name": "Fixture"}, "drift"),
             "bad name type": ({**good, "name": 5}, "drift"),
             "bad docs type": ({**good, "docs_entrypoint": ["a"]}, "drift"),
             "bad mode value": ({**good, "mode": "other"}, "drift"),
@@ -495,7 +510,7 @@ class HardeningTests(StageCase):
     def test_identity_tampering_is_foreign_and_never_auto_replaced(self) -> None:
         manifest = self.make_project()
         good = yaml.safe_load(manifest.read_text())
-        for field, value in (("project_id", "P0002"), ("root_path", str(self.base / "elsewhere"))):
+        for field, value in (("project_id", "P0002"), ("project_uuid", "00000000-0000-4000-8000-000000000000")):
             with self.subTest(field=field):
                 tampered = yaml.safe_dump({**good, field: value}).encode()
                 manifest.write_bytes(tampered)
@@ -623,7 +638,7 @@ class HardeningTests(StageCase):
         self.assertEqual(list((self.data / "workspace/projects/P0001/architect").iterdir()), [])
         from sqlalchemy import create_engine, inspect
         tables = set(inspect(create_engine(f"sqlite:///{self.data / 'rosc.db'}")).get_table_names())
-        self.assertEqual(tables, {"projects", "tasks", "alembic_version"})
+        self.assertEqual(tables, {"projects", "tasks", "project_root_bindings", "alembic_version"})
 
 
 if __name__ == "__main__":

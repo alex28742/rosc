@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import re
+import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -11,7 +12,7 @@ from sqlalchemy.exc import IntegrityError, OperationalError
 
 from .config import data_dir
 from .db import make_session_factory
-from .models import Project, Task
+from .models import BindingStateError, CURRENT_BINDING, Project, ProjectRootBinding, Task, reserved_roots
 from .workspace import (MAX_MANIFEST_BYTES, READY, WorkspaceConflict, WorkspaceError, WorkspaceUncertain, inspect_project, inspect_task, provision_project,
                         provision_task, repair_project, repair_task)
 
@@ -60,11 +61,31 @@ def workspace_status(db_state: str, problem: str) -> tuple[str, str | None]:
     return "needs_reconciliation", "pending" if problem == READY else problem
 
 
+def binding_view(binding: ProjectRootBinding | None) -> dict | None:
+    if binding is None:
+        return None
+    return {"binding_id": binding.id, "version": binding.version, "root_path": binding.root_path,
+            "docs_entrypoint": binding.docs_entrypoint, "mode": binding.mode, "state": binding.state,
+            "created_at": utc_iso(binding.created_at)}
+
+
+def project_identity_problem() -> HTTPException:
+    return HTTPException(503, "Project identity records are inconsistent; manual reconciliation is required")
+
+
 def project_view(project: Project, workspace_root: Path) -> dict:
+    try:
+        binding = project.current_binding
+    except BindingStateError as exc:
+        raise project_identity_problem() from exc
     state, problem = workspace_status(project.workspace_state, inspect_project(workspace_root, project).problem)
     return {
         "id": f"P{project.id:04d}", "name": project.name, "description": project.description,
-        "root_path": project.root_path, "mode": project.mode, "docs_entrypoint": project.docs_entrypoint,
+        # Transitional compatibility field: the original registration root, unchanged from earlier slices.
+        "root_path": project.root_path,
+        "registration_root_path": project.registration_root_path, "project_uuid": project.project_uuid,
+        "root_binding": binding_view(binding),
+        "mode": project.mode, "docs_entrypoint": project.docs_entrypoint,
         "workspace_state": state, "workspace_problem": problem,
         "architect": "not_active", "active_workers": 0, "created_at": utc_iso(project.created_at),
     }
@@ -128,8 +149,17 @@ def validate_root(data: ProjectInput) -> str:
 
 
 def check_overlap(root: str, session) -> None:
+    """Reject a root that duplicates or overlaps any *current* Root Binding.
+
+    Historical bindings never reserve a root, and contradictory identity records fail closed instead of making a
+    root look free.
+    """
     candidate = Path(root)
-    for other in session.scalars(select(Project.root_path)):
+    try:
+        reservations = reserved_roots(session)
+    except BindingStateError as exc:
+        raise project_identity_problem() from exc
+    for other in reservations:
         path = Path(other)
         if path == candidate or path in candidate.parents or candidate in path.parents:
             raise HTTPException(409, "Project root overlaps another registered Project")
@@ -161,7 +191,11 @@ def create_app(db_path: Path | None = None, workspace_root: Path | None = None, 
                 session.connection().exec_driver_sql("BEGIN IMMEDIATE")
                 check_overlap(root, session)
                 project = Project(name=data.name, description=data.description, root_path=root,
+                                  registration_root_path=root, project_uuid=str(uuid.uuid4()),
                                   mode=data.mode, docs_entrypoint=data.docs_entrypoint, workspace_state="provisioning")
+                # The initial version 1 current binding is committed with the Project or not at all.
+                project.bindings.append(ProjectRootBinding(version=1, root_path=root, docs_entrypoint=data.docs_entrypoint,
+                                                           mode=data.mode, state=CURRENT_BINDING))
                 session.add(project)
                 session.commit()
             except OperationalError:

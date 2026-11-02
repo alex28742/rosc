@@ -70,8 +70,11 @@ def task_manifest_path(workspace_root: Path, task: Task) -> Path:
 
 
 def project_payload(project: Project) -> dict:
-    """Identity-only projection (rosc.project.v2). SQLite is authoritative for name, docs_entrypoint and mode."""
-    return {"format": "rosc.project.v2", "project_id": f"P{project.id:04d}", "root_path": project.root_path}
+    """Identity-only projection (rosc.project.v3): Project ID and immutable UUID, never a mutable root path.
+
+    SQLite stays authoritative for name, docs_entrypoint and mode.
+    """
+    return {"format": "rosc.project.v3", "project_id": f"P{project.id:04d}", "project_uuid": project.project_uuid}
 
 
 def task_payload(task: Task) -> dict:
@@ -79,8 +82,27 @@ def task_payload(task: Task) -> dict:
     return {"format": "rosc.task.v2", "task_id": f"T{task.id:04d}", "project_id": f"P{task.project_id:04d}"}
 
 
-PROJECT_IDENTITY = ("project_id", "root_path")
-TASK_IDENTITY = ("task_id", "project_id")
+def project_identity(project: Project) -> dict[str, dict]:
+    """Expected identity values per supported Project manifest format.
+
+    v1/v2 are keyed by Project ID and the immutable *original registration root*, never by a mutable current
+    binding. v3 is keyed by Project ID and the canonical DB UUID. Writing always uses v3 (``project_payload``);
+    the legacy entries exist only so an existing valid legacy manifest is recognized and left untouched.
+    """
+    project_id = f"P{project.id:04d}"
+    legacy = {"project_id": project_id, "root_path": project.registration_root_path}
+    return {"rosc.project.v3": {"project_id": project_id, "project_uuid": project.project_uuid},
+            "rosc.project.v2": dict(legacy), "rosc.project.v1": dict(legacy)}
+
+
+def task_identity(task: Task) -> dict[str, dict]:
+    identity = {"task_id": f"T{task.id:04d}", "project_id": f"P{task.project_id:04d}"}
+    return {"rosc.task.v2": dict(identity), "rosc.task.v1": dict(identity)}
+
+
+# Identity keys a manifest must carry to be attributed to this record when its format is unsupported or unknown.
+PROJECT_UNATTRIBUTED = ("project_id",)
+TASK_UNATTRIBUTED = ("task_id", "project_id")
 
 _STR = (str,)
 _OPT_STR = (str, type(None))
@@ -88,6 +110,7 @@ _OPT_STR = (str, type(None))
 # name/mode/docs_entrypoint/status values are legacy, non-authoritative projections: shape-checked, never compared
 # with SQLite. Identity keys are compared with SQLite separately (a mismatch is FOREIGN).
 MANIFEST_SCHEMAS: dict[str, dict] = {
+    "rosc.project.v3": {"project_id": _STR, "project_uuid": _STR},
     "rosc.project.v2": {"project_id": _STR, "root_path": _STR},
     "rosc.project.v1": {"project_id": _STR, "name": _STR, "root_path": _STR, "mode": _STR, "docs_entrypoint": _OPT_STR},
     "rosc.task.v2": {"task_id": _STR, "project_id": _STR},
@@ -131,7 +154,14 @@ def _chain_is_unsafe(path: Path, workspace_root: Path) -> bool:
         current = current.parent
 
 
-def inspect_manifest(path: Path, expected: dict, identity: tuple[str, ...], workspace_root: Path) -> Inspection:
+def inspect_manifest(path: Path, expected: dict[str, dict], unattributed: tuple[str, ...],
+                     workspace_root: Path) -> Inspection:
+    """Inspect one manifest against the expected identity of its record, per supported format.
+
+    ``expected`` maps each supported ``format`` to that format's expected identity values. A supported format is
+    compared on its own identity keys; a file with an unsupported/unknown format is still compared on every
+    identity key it declares, so a foreign or tampered file cannot become ready by changing ``format`` alone.
+    """
     if _chain_is_unsafe(path, workspace_root):
         return Inspection(UNSAFE)
     try:
@@ -156,19 +186,30 @@ def inspect_manifest(path: Path, expected: dict, identity: tuple[str, ...], work
         loaded = yaml.safe_load(raw.decode("utf-8"))
     except (UnicodeDecodeError, yaml.YAMLError):
         return Inspection(CORRUPT, raw)
-    if not isinstance(loaded, dict) or any(key not in loaded for key in identity):
+    if not isinstance(loaded, dict):
         return Inspection(CORRUPT, raw)
-    if any(loaded[key] != expected[key] for key in identity):
+    declared = loaded.get("format")
+    known = expected.get(declared) if isinstance(declared, str) else None
+    if known is None:
+        required = unattributed
+        values = {key: value for per_format in expected.values() for key, value in per_format.items()}
+    else:
+        required, values = tuple(known), known
+    if any(key not in loaded for key in required):
+        return Inspection(CORRUPT, raw)
+    if any(loaded[key] != values[key] for key in values if key in loaded):
         return Inspection(FOREIGN, raw)
     return Inspection(READY if _conforms(loaded) else DRIFT, raw)
 
 
 def inspect_project(workspace_root: Path, project: Project) -> Inspection:
-    return inspect_manifest(project_manifest_path(workspace_root, project.id), project_payload(project), PROJECT_IDENTITY, workspace_root)
+    return inspect_manifest(project_manifest_path(workspace_root, project.id), project_identity(project),
+                            PROJECT_UNATTRIBUTED, workspace_root)
 
 
 def inspect_task(workspace_root: Path, task: Task) -> Inspection:
-    return inspect_manifest(task_manifest_path(workspace_root, task), task_payload(task), TASK_IDENTITY, workspace_root)
+    return inspect_manifest(task_manifest_path(workspace_root, task), task_identity(task),
+                            TASK_UNATTRIBUTED, workspace_root)
 
 
 def _dump(payload: dict) -> bytes:
@@ -207,8 +248,9 @@ def _atomic_replace(source: str, target: Path) -> None:
         raise ReplaceNotDurable(f"directory sync failed after replace: {exc}") from exc
 
 
-def _provision(path: Path, payload: dict, identity: tuple[str, ...], workspace_root: Path) -> None:
-    current = inspect_manifest(path, payload, identity, workspace_root)
+def _provision(path: Path, payload: dict, expected: dict[str, dict], unattributed: tuple[str, ...],
+               workspace_root: Path) -> None:
+    current = inspect_manifest(path, expected, unattributed, workspace_root)
     if current.problem == READY:
         return
     if current.problem != MISSING:
@@ -216,7 +258,7 @@ def _provision(path: Path, payload: dict, identity: tuple[str, ...], workspace_r
     try:
         write_yaml_noclobber(path, payload)
     except FileExistsError:
-        raced = inspect_manifest(path, payload, identity, workspace_root)
+        raced = inspect_manifest(path, expected, unattributed, workspace_root)
         if raced.problem != READY:
             raise WorkspaceConflict(raced.problem, f"Existing manifest is {raced.problem}; it was left untouched") from None
 
@@ -225,14 +267,15 @@ def provision_project(workspace_root: Path, project: Project) -> None:
     directory = project_directory(workspace_root, project.id)
     for part in (workspace_root, workspace_root / "projects", directory, directory / "architect", directory / "tasks"):
         _ensure_directory(part)
-    _provision(project_manifest_path(workspace_root, project.id), project_payload(project), PROJECT_IDENTITY, workspace_root)
+    _provision(project_manifest_path(workspace_root, project.id), project_payload(project), project_identity(project),
+               PROJECT_UNATTRIBUTED, workspace_root)
 
 
 def provision_task(workspace_root: Path, task: Task) -> None:
     path = task_manifest_path(workspace_root, task)
     _ensure_directory(path.parent.parent)
     _ensure_directory(path.parent)
-    _provision(path, task_payload(task), TASK_IDENTITY, workspace_root)
+    _provision(path, task_payload(task), task_identity(task), TASK_UNATTRIBUTED, workspace_root)
 
 
 def quarantine_directory(workspace_root: Path, kind: str, record_id: str) -> Path:
@@ -265,19 +308,20 @@ def _write_backup(workspace_root: Path, kind: str, record_id: str, raw: bytes, p
     return {"backup_id": backup_id, "backup_path": str(backup.relative_to(workspace_root)), "sha256": digest, "problem": problem}
 
 
-def _repair(path: Path, payload: dict, identity: tuple[str, ...], workspace_root: Path, kind: str, record_id: str) -> dict | None:
+def _repair(path: Path, payload: dict, expected: dict[str, dict], unattributed: tuple[str, ...],
+            workspace_root: Path, kind: str, record_id: str) -> dict | None:
     """Replace a corrupt or drifted manifest after preserving its exact bytes. Fails closed otherwise."""
-    current = inspect_manifest(path, payload, identity, workspace_root)
+    current = inspect_manifest(path, expected, unattributed, workspace_root)
     if current.problem == READY:
         return None
     if current.problem == MISSING:
-        _provision(path, payload, identity, workspace_root)
+        _provision(path, payload, expected, unattributed, workspace_root)
         return None
     if current.problem not in (CORRUPT, DRIFT):
         raise WorkspaceConflict(current.problem, f"Manifest is {current.problem}; manual resolution is required and it was left untouched")
     record = _write_backup(workspace_root, kind, record_id, current.raw, current.problem)
     # The file must still be exactly what was backed up before we replace it.
-    again = inspect_manifest(path, payload, identity, workspace_root)
+    again = inspect_manifest(path, expected, unattributed, workspace_root)
     if again.raw != current.raw:
         raise WorkspaceConflict(again.problem, "Manifest changed during repair; it was left untouched")
     data = _dump(payload)
@@ -297,7 +341,7 @@ def _repair(path: Path, payload: dict, identity: tuple[str, ...], workspace_root
     finally:
         if os.path.exists(temporary):
             os.unlink(temporary)
-    if inspect_manifest(path, payload, identity, workspace_root).problem != READY:
+    if inspect_manifest(path, expected, unattributed, workspace_root).problem != READY:
         _restore(path, current.raw, data, record)
         raise WorkspaceError("Repaired manifest failed verification; the original bytes were restored")
     return record
@@ -328,10 +372,10 @@ def _restore(path: Path, original: bytes, written: bytes, record: dict) -> None:
 
 
 def repair_project(workspace_root: Path, project: Project) -> dict | None:
-    return _repair(project_manifest_path(workspace_root, project.id), project_payload(project), PROJECT_IDENTITY,
-                   workspace_root, "projects", f"P{project.id:04d}")
+    return _repair(project_manifest_path(workspace_root, project.id), project_payload(project), project_identity(project),
+                   PROJECT_UNATTRIBUTED, workspace_root, "projects", f"P{project.id:04d}")
 
 
 def repair_task(workspace_root: Path, task: Task) -> dict | None:
-    return _repair(task_manifest_path(workspace_root, task), task_payload(task), TASK_IDENTITY,
-                   workspace_root, "tasks", f"T{task.id:04d}")
+    return _repair(task_manifest_path(workspace_root, task), task_payload(task), task_identity(task),
+                   TASK_UNATTRIBUTED, workspace_root, "tasks", f"T{task.id:04d}")
