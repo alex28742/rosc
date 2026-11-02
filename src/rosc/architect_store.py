@@ -23,10 +23,11 @@ import uuid
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Protocol
 
 from sqlalchemy.orm import Session, sessionmaker
 
+from .authorization import (DOCUMENT_LIST, DOCUMENT_READ, DOCUMENT_RECONCILE, DOCUMENT_WRITE, ActorContext,  # noqa: F401 (re-export)
+                            AuthorizationPolicy, ResourceScope, evaluate)
 from .models import Project, ProjectIdentityError, validate_project_identity
 from .workspace import (READY, ReplaceNotDurable, WorkspaceConflict, _atomic_replace, _chain_is_unsafe,
                         _ensure_directory, _fsync_directory, _temp_file, inspect_project, project_directory)
@@ -109,17 +110,6 @@ class CommitUncertain(StoreError):
         super().__init__(message)
         self.current_revision = current_revision
         self.committed = committed
-
-
-@dataclass(frozen=True)
-class ActorContext:
-    """Trusted actor slot; ``actor_id`` is provenance, not authentication."""
-
-    actor_id: str
-
-
-class AuthorizationPolicy(Protocol):
-    def authorize(self, actor: ActorContext, action: str, project_id: int, doc_id: str | None) -> bool: ...
 
 
 @dataclass(frozen=True)
@@ -923,8 +913,9 @@ class ArchitectDocumentService:
         self._store = ArchitectDocumentStore(workspace_root)
 
     def _gate(self, actor: ActorContext, action: str, project_id: int, doc_id: str | None) -> None:
-        if not isinstance(actor, ActorContext) or not self._policy.authorize(actor, action, project_id, doc_id):
-            raise AuthorizationDenied(f"Not authorized to {action}")
+        # Authorization is decided first, before any lookup, directory, revision or manifest access.
+        if not evaluate(self._policy, actor, action, ResourceScope(project_id=project_id, doc_id=doc_id)).allowed:
+            raise AuthorizationDenied("Not authorized for this operation")
         with self._sessions() as session:
             project = session.get(Project, project_id)
             if project is None:
@@ -937,22 +928,22 @@ class ArchitectDocumentService:
                 raise UnsafeStore("Project Workspace is not ready")
 
     def list_documents(self, actor: ActorContext, project_id: int) -> list[DocumentInfo | StoreDiagnostic]:
-        self._gate(actor, "list", project_id, None)
+        self._gate(actor, DOCUMENT_LIST, project_id, None)
         return self._store.list(project_id)
 
     def read_document(self, actor: ActorContext, project_id: int, doc_id: str, revision: int | None = None) -> Document:
-        self._gate(actor, "read", project_id, doc_id)
+        self._gate(actor, DOCUMENT_READ, project_id, doc_id)
         return self._store.read(project_id, doc_id, revision)
 
     def write_document(self, actor: ActorContext, project_id: int, doc_id: str, content: str | bytes, *,
                        expected_revision: int | None = None, media_type: str = "text/markdown",
                        logical_path: str | None = None) -> DocumentInfo:
-        self._gate(actor, "write", project_id, doc_id)
+        self._gate(actor, DOCUMENT_WRITE, project_id, doc_id)
         return self._store.write(project_id, doc_id, content, actor_id=actor.actor_id,
                                  expected_revision=expected_revision, media_type=media_type, logical_path=logical_path)
 
     def reconcile_document(self, actor: ActorContext, project_id: int, diagnostic_id: str) -> RecoveryResult:
         parts = diagnostic_id.split(":", 2)
-        doc_id = parts[1] if len(parts) > 1 else None
-        self._gate(actor, "reconcile", project_id, doc_id)
+        doc_id = (parts[1] or None) if len(parts) > 1 else None
+        self._gate(actor, DOCUMENT_RECONCILE, project_id, doc_id)
         return self._store.reconcile(project_id, diagnostic_id)

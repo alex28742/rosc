@@ -11,18 +11,17 @@ from fastapi.testclient import TestClient
 
 import test_slice01 as base
 from rosc.app import create_app
-from rosc.architect_store import ActorContext, ArchitectDocumentService, UnsafeStore
+from rosc.architect_store import ArchitectDocumentService, UnsafeStore
+from rosc.authorization import LocalOwnerPolicy, LocalOwnerProvider
 from rosc.db import make_session_factory
 from rosc.models import (BindingStateError, Project, ProjectRootBinding, ProjectUUIDError,
                          validate_project_uuid)
 from rosc.workspace import provision_project
 
-ACTOR = ActorContext("p009-test-actor")
+ACTOR = LocalOwnerProvider().actor()
 
 
-class AllowAll:
-    def authorize(self, actor, action, project_id, doc_id) -> bool:
-        return True
+AllowAll = LocalOwnerPolicy  # explicit, narrow default-deny policy for the local Owner actor
 
 
 class IdentityCase(base.StageCase):
@@ -38,7 +37,7 @@ class IdentityCase(base.StageCase):
             return connection.execute(statement, args).fetchall()
 
     def api(self) -> TestClient:
-        return TestClient(create_app(self.data / "rosc.db", self.data / "workspace"))
+        return TestClient(create_app(self.data / "rosc.db", self.data / "workspace"), base_url="http://localhost")
 
     def make_root(self, name: str, *files: str) -> Path:
         path = self.base / name

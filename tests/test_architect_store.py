@@ -10,13 +10,14 @@ from unittest.mock import patch
 
 import test_slice01 as base
 from rosc import architect_store as store
-from rosc.architect_store import (ActorContext, ArchitectDocumentService, ArchitectDocumentStore, AuthorizationDenied,
+from rosc.architect_store import (ArchitectDocumentService, ArchitectDocumentStore, AuthorizationDenied,
                                   CommitUncertain, DocumentExists, DocumentInfo, DocumentNotFound, InvalidDocument,
                                   RevisionConflict, StoreDiagnostic, UnsafeStore, normalize_doc_id, normalize_logical_path)
+from rosc.authorization import (DOCUMENT_WRITE, AuthorizationDecision, LocalOwnerPolicy, LocalOwnerProvider)
 from rosc.db import make_session_factory
 
 ROOT = Path(__file__).resolve().parents[1]
-ACTOR = ActorContext("test-actor")
+ACTOR = LocalOwnerProvider().actor()
 
 
 def racing_writer(workspace: str, barrier, queue, content: str) -> None:
@@ -29,14 +30,14 @@ def racing_writer(workspace: str, barrier, queue, content: str) -> None:
         queue.put(("conflict", exc.current_revision, content))
 
 
-class AllowAll:
-    def authorize(self, actor, action, project_id, doc_id) -> bool:
-        return True
+AllowAll = LocalOwnerPolicy  # explicit, narrow default-deny policy for the local Owner actor
 
 
-class DenyWrites:
-    def authorize(self, actor, action, project_id, doc_id) -> bool:
-        return action != "write"
+class DenyWrites(LocalOwnerPolicy):
+    def decide(self, actor, action, resource):
+        if action == DOCUMENT_WRITE:
+            return AuthorizationDecision(False, "test_denied")
+        return super().decide(actor, action, resource)
 
 
 class ArchitectStoreCase(base.StageCase):

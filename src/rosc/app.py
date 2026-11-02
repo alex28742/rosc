@@ -5,11 +5,13 @@ import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field, field_validator
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError, OperationalError
 
+from . import authorization as authz
 from .config import data_dir
 from .db import make_session_factory
 from .models import (CURRENT_BINDING, Project, ProjectIdentityError, ProjectRootBinding, Task, reserved_roots,
@@ -170,12 +172,76 @@ def check_overlap(root: str, session) -> None:
             raise HTTPException(409, "Project root overlaps another registered Project")
 
 
-def create_app(db_path: Path | None = None, workspace_root: Path | None = None, busy_timeout_ms: int = 5000) -> FastAPI:
+LOOPBACK_HOSTS = frozenset({"localhost", "127.0.0.1", "::1"})
+# Vite dev server (5173), Vite preview (4173) and uvicorn itself (8000).
+LOOPBACK_PORTS = (5173, 4173, 8000)
+DEFAULT_ALLOWED_ORIGINS = frozenset(f"http://{host}:{port}" for host in ("localhost", "127.0.0.1", "[::1]")
+                                    for port in LOOPBACK_PORTS)
+SAFE_METHODS = frozenset({"GET", "HEAD", "OPTIONS"})
+
+
+def host_name(header: str) -> str:
+    """Hostname of a Host header value without port; IPv6 literals keep their brackets stripped."""
+    value = header.strip().lower()
+    if value.startswith("["):
+        end = value.find("]")
+        return value[1:end] if end > 0 else ""
+    return value.rsplit(":", 1)[0] if value.count(":") == 1 else value
+
+
+def checked_hosts(extra: frozenset[str]) -> frozenset[str]:
+    if any(not isinstance(h, str) or not h or "*" in h or "/" in h for h in extra):
+        raise ValueError("Test host overrides must be explicit host names, never wildcards")
+    return LOOPBACK_HOSTS | frozenset(h.lower() for h in extra)
+
+
+def checked_origins(extra: frozenset[str]) -> frozenset[str]:
+    if any(not isinstance(o, str) or "*" in o or o == "null" or not o.startswith("http://") for o in extra):
+        raise ValueError("Test origin overrides must be explicit http:// origins, never wildcards or null")
+    return DEFAULT_ALLOWED_ORIGINS | frozenset(o.lower() for o in extra)
+
+
+def create_app(db_path: Path | None = None, workspace_root: Path | None = None, busy_timeout_ms: int = 5000, *,
+               auth_provider: authz.AuthenticationProvider | None = None,
+               authorization_policy: authz.AuthorizationPolicy | None = None,
+               extra_allowed_hosts: frozenset[str] = frozenset(),
+               extra_allowed_origins: frozenset[str] = frozenset()) -> FastAPI:
+    """``auth_provider``/``authorization_policy`` and the ``extra_allowed_*`` sets are Python-level composition and
+    test seams only. Nothing in a request (body, query, header, cookie) can select an actor, a role or these values,
+    and there is deliberately no environment knob."""
+    provider = auth_provider or authz.LocalOwnerProvider()
+    policy = authorization_policy or authz.LocalOwnerPolicy()
+    allowed_hosts = checked_hosts(extra_allowed_hosts)
+    allowed_origins = checked_origins(extra_allowed_origins)
     base = data_dir() if db_path is None or workspace_root is None else None
     db_path = db_path or base / "rosc.db"
     workspace_root = workspace_root or base / "workspace"
     sessions = make_session_factory(db_path, busy_timeout_ms)
     app = FastAPI(title="ROSC Core", version="0.1.0")
+
+    @app.middleware("http")
+    async def local_request_guard(request: Request, call_next):
+        """Loopback-oriented defence against DNS rebinding and cross-site browser requests. It is NOT authentication:
+        a direct non-browser local caller sends no Origin and is accepted, and it still only ever receives the
+        ``local_unverified`` Owner context. Forwarded/X-Forwarded-* headers are never consulted."""
+        problem = None
+        if host_name(request.headers.get("host", "")) not in allowed_hosts:
+            problem = "Host is not allowed"
+        elif request.headers.get("sec-fetch-site", "").lower() == "cross-site":
+            problem = "Cross-site requests are not allowed"
+        else:
+            origin = request.headers.get("origin")
+            if origin is not None and origin.lower() not in allowed_origins:
+                problem = "Origin is not allowed"
+        if problem:
+            return JSONResponse({"detail": problem}, status_code=403)
+        return await call_next(request)
+
+    def authorize(action: str, **scope) -> None:
+        """Application-owned actor resolution + policy check; runs before any lookup, SQL write or Workspace access."""
+        decision = authz.evaluate(policy, provider.actor(), action, authz.ResourceScope(**scope))
+        if not decision.allowed:
+            raise HTTPException(403, "Not authorized for this operation")
 
     @app.get("/api/health")
     def health() -> dict:
@@ -183,11 +249,13 @@ def create_app(db_path: Path | None = None, workspace_root: Path | None = None, 
 
     @app.get("/api/projects")
     def list_projects() -> list[dict]:
+        authorize(authz.PROJECT_LIST)
         with sessions() as session:
             return [project_view(p, workspace_root) for p in session.scalars(select(Project).order_by(Project.id))]
 
     @app.post("/api/projects", status_code=201)
     def create_project(data: ProjectInput) -> dict:
+        authorize(authz.PROJECT_REGISTER)
         root = validate_root(data)
         with sessions() as session:
             try:
@@ -227,6 +295,7 @@ def create_app(db_path: Path | None = None, workspace_root: Path | None = None, 
 
     @app.post("/api/projects/{project_id}/reconcile-workspace")
     def reconcile_project(project_id: str) -> dict:
+        authorize(authz.PROJECT_RECONCILE, project_id=numeric_id(project_id, "P"))
         with sessions() as session:
             project = load_project(session, project_id)
             require_project_identity(project)
@@ -242,6 +311,7 @@ def create_app(db_path: Path | None = None, workspace_root: Path | None = None, 
 
     @app.post("/api/projects/{project_id}/repair-workspace")
     def repair_project_workspace(project_id: str, data: RepairInput) -> dict:
+        authorize(authz.PROJECT_REPAIR, project_id=numeric_id(project_id, "P"))
         require_confirmation(data)
         with sessions() as session:
             project = load_project(session, project_id)
@@ -261,6 +331,7 @@ def create_app(db_path: Path | None = None, workspace_root: Path | None = None, 
     @app.get("/api/projects/{project_id}/tasks")
     def list_tasks(project_id: str) -> list[dict]:
         pid = numeric_id(project_id, "P")
+        authorize(authz.TASK_LIST, project_id=pid)
         with sessions() as session:
             if not session.get(Project, pid):
                 raise HTTPException(404, "Project not found")
@@ -269,6 +340,7 @@ def create_app(db_path: Path | None = None, workspace_root: Path | None = None, 
     @app.post("/api/projects/{project_id}/tasks", status_code=201)
     def create_task(project_id: str, data: TaskInput) -> dict:
         pid = numeric_id(project_id, "P")
+        authorize(authz.TASK_CREATE, project_id=pid)
         with sessions() as session:
             project = session.get(Project, pid)
             if not project:
@@ -299,6 +371,7 @@ def create_app(db_path: Path | None = None, workspace_root: Path | None = None, 
 
     @app.post("/api/projects/{project_id}/tasks/{task_id}/reconcile-workspace")
     def reconcile_task(project_id: str, task_id: str) -> dict:
+        authorize(authz.TASK_RECONCILE, project_id=numeric_id(project_id, "P"), task_id=numeric_id(task_id, "T"))
         with sessions() as session:
             task = load_task(session, project_id, task_id)
             require_project_identity(session.get(Project, task.project_id))
@@ -314,6 +387,7 @@ def create_app(db_path: Path | None = None, workspace_root: Path | None = None, 
 
     @app.post("/api/projects/{project_id}/tasks/{task_id}/repair-workspace")
     def repair_task_workspace(project_id: str, task_id: str, data: RepairInput) -> dict:
+        authorize(authz.TASK_REPAIR, project_id=numeric_id(project_id, "P"), task_id=numeric_id(task_id, "T"))
         require_confirmation(data)
         with sessions() as session:
             task = load_task(session, project_id, task_id)

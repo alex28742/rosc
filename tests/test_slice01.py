@@ -29,7 +29,7 @@ class StageCase(unittest.TestCase):
         self.alembic = Config(str(ROOT / "alembic.ini"))
         self.alembic.set_main_option("script_location", str(ROOT / "migrations"))
         command.upgrade(self.alembic, "head")
-        self.client = TestClient(create_app(self.data / "rosc.db", self.data / "workspace"))
+        self.client = TestClient(create_app(self.data / "rosc.db", self.data / "workspace"), base_url="http://localhost")
 
     def new_root(self) -> Path:
         path = self.base / "empty-project"
@@ -76,7 +76,7 @@ class FoundationSliceTests(StageCase):
         self.assertEqual(repaired.status_code, 200)
         self.assertEqual(repaired.json()["workspace_state"], "ready")
 
-        restarted = TestClient(create_app(self.data / "rosc.db", self.data / "workspace"))
+        restarted = TestClient(create_app(self.data / "rosc.db", self.data / "workspace"), base_url="http://localhost")
         self.assertEqual(restarted.get("/api/projects").json()[0]["id"], "P0001")
         self.assertEqual(restarted.get("/api/projects/P0001/tasks").json()[0]["id"], "T0001")
         self.assertEqual(restarted.get("/api/health").json()["agent_runtime"], "not_started")
@@ -123,7 +123,7 @@ import sys, time
 from fastapi.testclient import TestClient
 from rosc.app import create_app
 db, ws, root, start = sys.argv[1:5]
-client = TestClient(create_app(__import__('pathlib').Path(db), __import__('pathlib').Path(ws)))
+client = TestClient(create_app(__import__('pathlib').Path(db), __import__('pathlib').Path(ws)), base_url="http://localhost")
 time.sleep(max(0.0, float(start) - time.time()))
 r = client.post('/api/projects', json={'name': 'n', 'description': 'd', 'root_path': root, 'mode': 'existing', 'no_external_agent_confirmed': True})
 print(r.status_code)
@@ -421,7 +421,7 @@ class HardeningTests(StageCase):
         before = (self.project_dir() / "project.yaml").read_bytes(), manifest.read_bytes()
         self.assertEqual(self.client.post("/api/projects/P0001/reconcile-workspace").status_code, 200)
         self.assertEqual(self.client.post("/api/projects/P0001/tasks/T0001/reconcile-workspace").status_code, 200)
-        restarted = TestClient(create_app(self.data / "rosc.db", self.data / "workspace"))
+        restarted = TestClient(create_app(self.data / "rosc.db", self.data / "workspace"), base_url="http://localhost")
         self.assertEqual(restarted.get("/api/projects").json()[0]["workspace_state"], "ready")
         self.assertEqual(((self.project_dir() / "project.yaml").read_bytes(), manifest.read_bytes()), before)
 
@@ -563,7 +563,7 @@ class HardeningTests(StageCase):
 
     def test_lock_contention_returns_controlled_503_and_registers_nothing(self) -> None:
         import sqlite3
-        client = TestClient(create_app(self.data / "rosc.db", self.data / "workspace", busy_timeout_ms=50))
+        client = TestClient(create_app(self.data / "rosc.db", self.data / "workspace", busy_timeout_ms=50), base_url="http://localhost")
         blocker = sqlite3.connect(self.data / "rosc.db", isolation_level=None)
         blocker.execute("BEGIN IMMEDIATE")
         try:
@@ -629,7 +629,7 @@ class HardeningTests(StageCase):
         task = self.client.get("/api/projects/P0001/tasks").json()[0]
         for value in (created_project, task["created_at"]):
             self.assertRegex(value, r"^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d(\.\d+)?Z$")
-        restarted = TestClient(create_app(self.data / "rosc.db", self.data / "workspace"))
+        restarted = TestClient(create_app(self.data / "rosc.db", self.data / "workspace"), base_url="http://localhost")
         self.assertEqual(restarted.get("/api/projects").json()[0]["created_at"], created_project)
         self.assertEqual(restarted.get("/api/projects/P0001/tasks").json()[0]["created_at"], task["created_at"])
         second = self.base / "second"
