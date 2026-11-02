@@ -383,6 +383,34 @@ class ArchitectDocumentStore:
             return False
         return len(data) == marker["size"] and hashlib.sha256(data).hexdigest() == marker["sha256"]
 
+    def _pending_observation(self, directory: Path, marker: dict, info: DocumentInfo) -> tuple[str, bool, str]:
+        """Classify one pending operation and bind reconciliation to the observed candidate state."""
+        committed = (info.revision == marker["candidate_revision"] and info.revisions[-1].file == marker["file"] and
+                     info.sha256 == marker["sha256"])
+        if committed:
+            return "commit_uncertain", True, f"committed-{marker['sha256']}"
+        if info.revision != marker["base_revision"]:
+            return "unsafe_pending", False, "base-conflict"
+        candidate = directory / marker["file"]
+        if not os.path.lexists(candidate):
+            return "pending_no_candidate", True, "missing"
+        try:
+            file_info = os.lstat(candidate)
+        except OSError:
+            return "unsafe_pending", False, "inaccessible"
+        if not stat.S_ISREG(file_info.st_mode):
+            return "unsafe_pending", False, "unsafe-type"
+        if file_info.st_size > MAX_DOCUMENT_BYTES:
+            return "unsafe_pending", False, f"oversized-{file_info.st_size}"
+        try:
+            data = self._read_regular(candidate, MAX_DOCUMENT_BYTES)
+        except (FileNotFoundError, UnsafeStore):
+            return "unsafe_pending", False, "changed"
+        digest = hashlib.sha256(data).hexdigest()
+        if len(data) == marker["size"] and digest == marker["sha256"]:
+            return "pending_revision", True, f"valid-{digest}"
+        return "pending_partial_candidate", True, f"partial-{len(data)}-{digest}"
+
     def _creation_diagnostic(self, project_id: int, directory: Path, doc_id: str) -> StoreDiagnostic:
         try:
             marker = self._load_creation(project_id, directory, doc_id)
@@ -399,6 +427,26 @@ class ArchitectDocumentStore:
         except (FileNotFoundError, UnsafeStore, OSError):
             return StoreDiagnostic(f"unsafe:{doc_id}", "unknown_document", doc_id,
                                    "Directory has no valid committed metadata or ROSC ownership proof", doc_id, None, False)
+
+    def _staged_creation_diagnostic(self, project_id: int, directory: Path, doc_id: str) -> StoreDiagnostic:
+        diagnostic = self._creation_diagnostic(project_id, directory, doc_id)
+        if not diagnostic.recoverable:
+            return diagnostic
+        try:
+            marker = self._load_creation(project_id, directory, doc_id)
+            info = self._info(self._load_meta(project_id, directory, doc_id))
+            self._read_revision(directory, info.revisions[-1])
+        except UnsafeStore:
+            return diagnostic
+        complete = (info.revision == 1 and info.sha256 == marker["sha256"] and info.size == marker["size"] and
+                    info.media_type == marker["media_type"] and info.logical_path == marker["logical_path"])
+        if not complete:
+            return StoreDiagnostic(diagnostic.diagnostic_id, "unsafe_creation", diagnostic.entry,
+                                   "Staged metadata conflicts with its creation marker; automatic recovery is refused",
+                                   doc_id, marker["logical_path"], False)
+        return StoreDiagnostic(diagnostic.diagnostic_id, "staged_document", diagnostic.entry,
+                               "Document metadata is complete in staging but was never published",
+                               doc_id, marker["logical_path"], True)
 
     def _document_diagnostics(self, project_id: int, directory: Path, info: DocumentInfo) -> list[StoreDiagnostic]:
         allowed = {"document.json", *(entry.file for entry in info.revisions)}
@@ -417,17 +465,12 @@ class ArchitectDocumentStore:
         if os.path.lexists(directory / _PENDING_MARKER):
             try:
                 marker = self._load_pending(project_id, directory, info.doc_id)
-                matches = self._candidate_matches(directory, marker)
-                committed = (info.revision == marker["candidate_revision"] and info.revisions[-1].file == marker["file"] and
-                             info.sha256 == marker["sha256"])
-                uncommitted = info.revision == marker["base_revision"] and matches
-                recoverable = committed or uncommitted
-                code = "commit_uncertain" if committed else "pending_revision" if uncommitted else "unsafe_pending"
-                diagnostics.append(StoreDiagnostic(f"pending:{info.doc_id}:{marker['op_id']}", code, info.doc_id,
+                code, recoverable, observation = self._pending_observation(directory, marker, info)
+                diagnostics.append(StoreDiagnostic(f"pending:{info.doc_id}:{marker['op_id']}:{observation}", code, info.doc_id,
                                                    "Pending revision requires explicit reconciliation" if recoverable else
                                                    "Pending marker or candidate bytes conflict; automatic recovery is refused",
                                                    info.doc_id, info.logical_path, recoverable))
-                if matches:
+                if os.path.lexists(directory / marker["file"]):
                     handled.add(marker["file"])
             except UnsafeStore:
                 diagnostics.append(StoreDiagnostic(f"unsafe:{info.doc_id}:{_PENDING_MARKER}", "foreign_entry", info.doc_id,
@@ -461,7 +504,7 @@ class ArchitectDocumentStore:
                     doc_id = normalize_doc_id(marker.get("doc_id"))
                     if marker.get("op_id") != stage_match.group(1):
                         raise UnsafeStore("Creation stage identity does not match its marker")
-                    diagnostics.append(self._creation_diagnostic(project_id, child, doc_id))
+                    diagnostics.append(self._staged_creation_diagnostic(project_id, child, doc_id))
                 except (FileNotFoundError, InvalidDocument, UnsafeStore):
                     diagnostics.append(StoreDiagnostic(f"unsafe-root:{child.name}", "foreign_root_entry", child.name,
                                                        "Unexpected root entry was preserved", None, None, False))
@@ -706,12 +749,28 @@ class ArchitectDocumentStore:
         directory = stage if os.path.lexists(stage) else root / doc_id
         destination_parent = self._prepare_quarantine(project_id, "initial-create", doc_id)
         destination = destination_parent / op_id
+        if not os.path.lexists(stage) and destination.is_dir() and not destination.is_symlink():
+            marker = self._load_creation(project_id, destination, doc_id)
+            if marker["op_id"] == op_id:
+                return RecoveryResult(diagnostic_id, "already_quarantined", str(destination.relative_to(self.workspace_root)),
+                                      doc_id, None)
         if not os.path.lexists(directory):
             if destination.is_dir() and not destination.is_symlink():
                 marker = self._load_creation(project_id, destination, doc_id)
                 if marker["op_id"] == op_id:
                     return RecoveryResult(diagnostic_id, "already_quarantined", str(destination.relative_to(self.workspace_root)), doc_id, None)
             raise UnsafeStore("Incomplete creation no longer exists at the recorded location")
+        if directory == stage:
+            diagnostic = self._staged_creation_diagnostic(project_id, directory, doc_id)
+            if diagnostic.diagnostic_id != diagnostic_id or not diagnostic.recoverable:
+                raise UnsafeStore("Staged creation is not in a proven recoverable state; it was preserved in place")
+            if os.path.lexists(destination):
+                raise UnsafeStore("Quarantine destination already exists; staged creation was preserved in place")
+            os.rename(directory, destination)
+            _fsync_directory(root)
+            _fsync_directory(destination_parent)
+            outcome = "staged_creation_quarantined" if diagnostic.code == "staged_document" else "incomplete_creation_quarantined"
+            return RecoveryResult(diagnostic_id, outcome, str(destination.relative_to(self.workspace_root)), doc_id, None)
         try:
             meta = self._load_meta(project_id, directory, doc_id)
         except UnsafeStore:
@@ -749,10 +808,10 @@ class ArchitectDocumentStore:
         return RecoveryResult(diagnostic_id, "incomplete_creation_quarantined", str(destination.relative_to(self.workspace_root)), doc_id, None)
 
     def _reconcile_pending(self, project_id: int, root: Path, diagnostic_id: str) -> RecoveryResult:
-        parts = diagnostic_id.split(":")
-        if len(parts) != 3:
+        parts = diagnostic_id.split(":", 3)
+        if len(parts) != 4:
             raise UnsafeStore("Invalid pending diagnostic")
-        _, raw_doc_id, op_id = parts
+        _, raw_doc_id, op_id, expected_observation = parts
         doc_id = normalize_doc_id(raw_doc_id)
         if _OP_ID.fullmatch(op_id) is None:
             raise UnsafeStore("Invalid pending diagnostic")
@@ -760,30 +819,40 @@ class ArchitectDocumentStore:
         meta = self._load_meta(project_id, directory, doc_id)
         info = self._info(meta)
         destination = self._prepare_quarantine(project_id, "revisions", doc_id) / op_id
-        self._ensure(destination)
+        if os.path.lexists(destination):
+            if destination.is_symlink() or not destination.is_dir():
+                raise UnsafeStore("Pending quarantine destination is unsafe")
         marker_source = directory / _PENDING_MARKER
         marker_destination = destination / _PENDING_MARKER
         if marker_source.exists():
             marker = self._load_pending(project_id, directory, doc_id)
         elif marker_destination.exists():
-            marker = self._load_json(marker_destination)
-            if marker.get("format") != PENDING_FORMAT or marker.get("op_id") != op_id or marker.get("doc_id") != doc_id:
-                raise UnsafeStore("Quarantined pending marker conflicts with the diagnostic")
+            marker = self._load_pending(project_id, destination, doc_id)
         else:
             raise UnsafeStore("Pending ownership marker is missing")
         if marker.get("op_id") != op_id:
             raise UnsafeStore("Pending diagnostic no longer matches the ownership marker")
-        committed = (info.revision == marker["candidate_revision"] and info.sha256 == marker["sha256"] and
-                     info.revisions[-1].file == marker["file"])
-        uncommitted = info.revision == marker["base_revision"] and self._candidate_matches(directory, marker)
         candidate_source = directory / marker["file"]
         candidate_destination = destination / marker["file"]
-        if not committed and not uncommitted:
-            if not (info.revision == marker["base_revision"] and candidate_destination.exists() and
-                    hashlib.sha256(self._read_regular(candidate_destination, MAX_DOCUMENT_BYTES)).hexdigest() == marker["sha256"]):
-                raise UnsafeStore("Pending revision is not in a proven recoverable state; all bytes were preserved")
-            uncommitted = True
-        if uncommitted and candidate_source.exists():
+        destination_names = {entry.name for entry in destination.iterdir()} if destination.exists() else set()
+        if destination_names - {_PENDING_MARKER, marker["file"]}:
+            raise UnsafeStore("Pending quarantine receipt contains unexpected entries")
+        if os.path.lexists(candidate_source) and os.path.lexists(candidate_destination):
+            raise UnsafeStore("Quarantine candidate conflicts; source bytes were preserved")
+        if expected_observation == "missing" and os.path.lexists(candidate_destination):
+            raise UnsafeStore("Missing-candidate receipt conflicts with a quarantined candidate")
+        code, recoverable, observed = self._pending_observation(directory, marker, info)
+        resumed_candidate = False
+        if observed != expected_observation and not os.path.lexists(candidate_source) and os.path.lexists(candidate_destination):
+            _, destination_recoverable, destination_observation = self._pending_observation(destination, marker, info)
+            resumed_candidate = destination_recoverable and destination_observation == expected_observation
+        if not recoverable or (observed != expected_observation and not resumed_candidate):
+            raise UnsafeStore("Pending operation changed since diagnosis or is unsafe; all bytes were preserved")
+        if not os.path.lexists(destination):
+            self._ensure(destination)
+        committed = code == "commit_uncertain"
+        moves_candidate = code in ("pending_revision", "pending_partial_candidate") or resumed_candidate
+        if moves_candidate and os.path.lexists(candidate_source):
             if candidate_destination.exists():
                 raise UnsafeStore("Quarantine candidate already exists; source bytes were preserved")
             os.rename(candidate_source, candidate_destination)
@@ -796,7 +865,14 @@ class ArchitectDocumentStore:
                 os.rename(marker_source, marker_destination)
         _fsync_directory(directory)
         _fsync_directory(destination)
-        outcome = "committed_marker_quarantined" if committed else "uncommitted_revision_quarantined"
+        if committed:
+            outcome = "committed_marker_quarantined"
+        elif expected_observation == "missing":
+            outcome = "pending_marker_quarantined"
+        elif expected_observation.startswith("partial-"):
+            outcome = "partial_revision_quarantined"
+        else:
+            outcome = "uncommitted_revision_quarantined"
         return RecoveryResult(diagnostic_id, outcome, str(destination.relative_to(self.workspace_root)), doc_id, info.revision)
 
     def _reconcile_unknown(self, project_id: int, root: Path, diagnostic_id: str) -> RecoveryResult:

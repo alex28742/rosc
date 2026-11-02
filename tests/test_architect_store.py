@@ -270,12 +270,180 @@ class AtomicityTests(ArchitectStoreCase):
                 self.service.write_document(ACTOR, 1, "raced", "candidate")
         self.assertEqual((self.docs1 / "raced/foreign.bin").read_bytes(), b"raced foreign bytes")
         diagnostics = self.diagnostics()
-        self.assertEqual({item.code for item in diagnostics}, {"incomplete_creation", "unknown_document"})
-        owned = next(item for item in diagnostics if item.code == "incomplete_creation")
-        self.service.reconcile_document(ACTOR, 1, owned.diagnostic_id)
+        self.assertEqual({item.code for item in diagnostics}, {"staged_document", "unknown_document"})
+        owned = next(item for item in diagnostics if item.code == "staged_document")
+        candidate = next(self.docs1.glob(".create-*")) / "r0001.md"
+        self.assertEqual(candidate.read_bytes(), b"candidate")
+        result = self.service.reconcile_document(ACTOR, 1, owned.diagnostic_id)
+        self.assertEqual(result.outcome, "staged_creation_quarantined")
         self.assertEqual((self.docs1 / "raced/foreign.bin").read_bytes(), b"raced foreign bytes")
+        self.assertEqual(self.service.reconcile_document(ACTOR, 1, owned.diagnostic_id).outcome, "already_quarantined")
         with self.assertRaises(UnsafeStore):
             self.service.write_document(ACTOR, 1, "raced", "replacement")
+
+    def test_complete_unpublished_stage_is_quarantined_as_a_whole_after_restart(self) -> None:
+        self.service.write_document(ACTOR, 1, "kept", "safe")
+        with patch.object(store, "_rename_noreplace", side_effect=OSError("crash before publication")):
+            with self.assertRaises(OSError):
+                self.service.write_document(ACTOR, 1, "staged", "complete candidate",
+                                            logical_path="notes/staged.md")
+        stage = next(self.docs1.glob(".create-*"))
+        before = self.snapshot(stage)
+        self.assertEqual(set(before), {".creation.json", "document.json", "r0001.md"})
+
+        reopened = ArchitectDocumentService(make_session_factory(self.data / "rosc.db"), self.workspace, AllowAll())
+        listing = reopened.list_documents(ACTOR, 1)
+        diagnostic = next(item for item in listing if isinstance(item, StoreDiagnostic))
+        self.assertEqual((diagnostic.code, diagnostic.recoverable), ("staged_document", True))
+        self.assertEqual(reopened.read_document(ACTOR, 1, "kept").text, "safe")
+        with self.assertRaises(DocumentNotFound):
+            reopened.read_document(ACTOR, 1, "staged")
+
+        recovery = reopened.reconcile_document(ACTOR, 1, diagnostic.diagnostic_id)
+        quarantined = self.workspace / recovery.quarantine_path
+        self.assertEqual((recovery.outcome, self.snapshot(quarantined)), ("staged_creation_quarantined", before))
+        self.assertFalse(stage.exists())
+        self.assertEqual(reopened.reconcile_document(ACTOR, 1, diagnostic.diagnostic_id).outcome, "already_quarantined")
+        self.assertEqual(reopened.read_document(ACTOR, 1, "kept").text, "safe")
+
+    def test_published_final_with_leftover_creation_marker_keeps_committed_head(self) -> None:
+        real_unlink = Path.unlink
+
+        def fail_creation_marker(path, *args, **kwargs):
+            if path.name == ".creation.json":
+                raise OSError("marker cleanup interrupted")
+            return real_unlink(path, *args, **kwargs)
+
+        with patch.object(Path, "unlink", new=fail_creation_marker):
+            with self.assertRaises(CommitUncertain) as caught:
+                self.service.write_document(ACTOR, 1, "published", "committed bytes")
+        self.assertEqual((caught.exception.committed, caught.exception.current_revision), (True, 1))
+        reopened = ArchitectDocumentService(make_session_factory(self.data / "rosc.db"), self.workspace, AllowAll())
+        self.assertEqual(reopened.read_document(ACTOR, 1, "published").text, "committed bytes")
+        diagnostic = next(item for item in reopened.list_documents(ACTOR, 1) if isinstance(item, StoreDiagnostic))
+        self.assertEqual(diagnostic.code, "committed_creation_marker")
+        recovery = reopened.reconcile_document(ACTOR, 1, diagnostic.diagnostic_id)
+        self.assertEqual((recovery.outcome, recovery.current_revision), ("committed_marker_quarantined", 1))
+        self.assertEqual(reopened.read_document(ACTOR, 1, "published").text, "committed bytes")
+        self.assertEqual(reopened.reconcile_document(ACTOR, 1, diagnostic.diagnostic_id).outcome, "already_quarantined")
+
+    def test_pending_marker_without_candidate_can_be_reconciled_after_restart(self) -> None:
+        self.service.write_document(ACTOR, 1, "notes", "one")
+        original_sha = self.service.read_document(ACTOR, 1, "notes").info.sha256
+        real_write = self.service._store._write_exclusive
+
+        def fail_before_candidate(path, data):
+            if path.name == "r0002.md":
+                raise OSError("crash before candidate creation")
+            return real_write(path, data)
+
+        with patch.object(self.service._store, "_write_exclusive", side_effect=fail_before_candidate):
+            with self.assertRaises(OSError):
+                self.service.write_document(ACTOR, 1, "notes", "two", expected_revision=1)
+        reopened = ArchitectDocumentService(make_session_factory(self.data / "rosc.db"), self.workspace, AllowAll())
+        diagnostic = next(item for item in reopened.list_documents(ACTOR, 1) if isinstance(item, StoreDiagnostic))
+        self.assertEqual((diagnostic.code, diagnostic.recoverable), ("pending_no_candidate", True))
+        self.assertEqual(reopened.read_document(ACTOR, 1, "notes").info.sha256, original_sha)
+        recovery = reopened.reconcile_document(ACTOR, 1, diagnostic.diagnostic_id)
+        receipt = self.workspace / recovery.quarantine_path
+        self.assertEqual(recovery.outcome, "pending_marker_quarantined")
+        self.assertTrue((receipt / ".pending.json").is_file())
+        self.assertEqual(reopened.reconcile_document(ACTOR, 1, diagnostic.diagnostic_id).outcome,
+                         "pending_marker_quarantined")
+        revised = reopened.write_document(ACTOR, 1, "notes", "two", expected_revision=1)
+        self.assertEqual((revised.revision, reopened.read_document(ACTOR, 1, "notes").text), (2, "two"))
+
+    def test_partial_pending_candidate_is_preserved_then_revision_number_is_reused(self) -> None:
+        self.service.write_document(ACTOR, 1, "notes", "one")
+        original = self.service.read_document(ACTOR, 1, "notes")
+        real_write = self.service._store._write_exclusive
+
+        def short_write(path, data):
+            if path.name == "r0002.md":
+                path.write_bytes(b"partial candidate")
+                raise OSError("short write")
+            return real_write(path, data)
+
+        with patch.object(self.service._store, "_write_exclusive", side_effect=short_write):
+            with self.assertRaises(OSError):
+                self.service.write_document(ACTOR, 1, "notes", "complete candidate", expected_revision=1)
+        diagnostic = self.diagnostics()[0]
+        self.assertEqual((diagnostic.code, diagnostic.recoverable), ("pending_partial_candidate", True))
+        recovery = self.service.reconcile_document(ACTOR, 1, diagnostic.diagnostic_id)
+        receipt = self.workspace / recovery.quarantine_path
+        self.assertEqual((recovery.outcome, (receipt / "r0002.md").read_bytes()),
+                         ("partial_revision_quarantined", b"partial candidate"))
+        self.assertTrue((receipt / ".pending.json").is_file())
+        self.assertEqual(self.service.read_document(ACTOR, 1, "notes").info.sha256, original.info.sha256)
+        revised = self.service.write_document(ACTOR, 1, "notes", "complete candidate", expected_revision=1)
+        self.assertEqual((revised.revision, [item.revision for item in revised.revisions]), (2, [1, 2]))
+
+    def test_changed_or_unsafe_pending_candidate_and_conflicting_receipt_fail_closed(self) -> None:
+        def leave_pending(service, content="two"):
+            real_write = service._store._write_exclusive
+
+            def fail_before_candidate(path, data):
+                if path.name == "r0002.md":
+                    raise OSError("stop")
+                return real_write(path, data)
+
+            with patch.object(service._store, "_write_exclusive", side_effect=fail_before_candidate):
+                with self.assertRaises(OSError):
+                    service.write_document(ACTOR, 1, "notes", content, expected_revision=1)
+
+        self.service.write_document(ACTOR, 1, "notes", "one")
+        leave_pending(self.service)
+        missing = self.diagnostics()[0]
+        (self.docs1 / "notes/r0002.md").write_bytes(b"first partial")
+        partial = self.diagnostics()[0]
+        (self.docs1 / "notes/r0002.md").write_bytes(b"changed after diagnosis")
+        with self.assertRaises(UnsafeStore):
+            self.service.reconcile_document(ACTOR, 1, partial.diagnostic_id)
+        self.assertEqual((self.docs1 / "notes/r0002.md").read_bytes(), b"changed after diagnosis")
+        self.assertTrue((self.docs1 / "notes/.pending.json").is_file())
+
+        (self.docs1 / "notes/r0002.md").unlink()
+        outside = self.base / "outside-pending"
+        outside.write_bytes(b"outside")
+        (self.docs1 / "notes/r0002.md").symlink_to(outside)
+        unsafe = self.diagnostics()[0]
+        self.assertEqual((unsafe.code, unsafe.recoverable), ("unsafe_pending", False))
+        with self.assertRaises(UnsafeStore):
+            self.service.reconcile_document(ACTOR, 1, unsafe.diagnostic_id)
+        self.assertEqual(outside.read_bytes(), b"outside")
+        self.assertTrue((self.docs1 / "notes/r0002.md").is_symlink())
+
+        (self.docs1 / "notes/r0002.md").unlink()
+        op_id = missing.diagnostic_id.split(":")[2]
+        conflict = self.workspace / f"projects/P0001/architect/quarantine/revisions/notes/{op_id}"
+        conflict.mkdir(parents=True)
+        (conflict / "foreign.bin").write_bytes(b"foreign receipt")
+        with self.assertRaises(UnsafeStore):
+            self.service.reconcile_document(ACTOR, 1, missing.diagnostic_id)
+        self.assertEqual((conflict / "foreign.bin").read_bytes(), b"foreign receipt")
+        self.assertTrue((self.docs1 / "notes/.pending.json").is_file())
+
+    def test_invalid_pending_marker_is_not_treated_as_recoverable(self) -> None:
+        self.service.write_document(ACTOR, 1, "notes", "one")
+        real_write = self.service._store._write_exclusive
+
+        def fail_before_candidate(path, data):
+            if path.name == "r0002.md":
+                raise OSError("stop")
+            return real_write(path, data)
+
+        with patch.object(self.service._store, "_write_exclusive", side_effect=fail_before_candidate):
+            with self.assertRaises(OSError):
+                self.service.write_document(ACTOR, 1, "notes", "two", expected_revision=1)
+        marker_path = self.docs1 / "notes/.pending.json"
+        marker = json.loads(marker_path.read_text())
+        marker["project_id"] = "P9999"
+        marker_path.write_text(json.dumps(marker))
+        diagnostic = self.diagnostics()[0]
+        self.assertEqual((diagnostic.code, diagnostic.recoverable), ("foreign_entry", False))
+        with self.assertRaises(UnsafeStore):
+            self.service.reconcile_document(ACTOR, 1, diagnostic.diagnostic_id)
+        self.assertEqual(json.loads(marker_path.read_text())["project_id"], "P9999")
 
     def test_unknown_orphan_temp_and_symlink_are_preserved_and_block_only_writes(self) -> None:
         self.service.write_document(ACTOR, 1, "notes", "committed")
