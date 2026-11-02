@@ -441,6 +441,11 @@ class AgentRegistryService:
                 if not ROLE_REQUIRED_CAPABILITIES[role] <= declared:
                     session.rollback()
                     raise InvalidRegistryInput("Agent has not declared the capabilities this role requires")
+                # The role allowlist says what the role *may* request; only this Agent's declarations say what it has.
+                # An optional capability the Agent never declared is refused instead of being recorded as `unverified`.
+                if not set(requested) <= declared:
+                    session.rollback()
+                    raise InvalidRegistryInput("Agent has not declared one or more requested capabilities")
                 self._check_duplicate(session, agent_key, project_id, role, task_key)
                 now = _now()
                 assignment = RoleAssignment(assignment_id=str(uuid.uuid4()), agent_id=agent_key,

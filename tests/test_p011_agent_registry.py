@@ -366,6 +366,68 @@ class AssignmentSemanticsTests(RegistryCase):
         self.assertEqual(self.fetch("SELECT count(*) FROM project_root_bindings WHERE state = 'current'"), [(2,)])
 
 
+class OptionalCapabilityGuardTests(RegistryCase):
+    """P011.1: a requested optional capability must already be declared by the Agent, not merely role-allowed.
+
+    The role allowlist says what a role *may* request; the AgentDefinition says what that Agent has actually declared.
+    An assignment may only request the intersection, so an undeclared optional capability is a 422 at creation
+    instead of a silently `unverified` durable row.
+    """
+
+    OPTIONAL = CAPABILITY_TASK_ARTIFACT_PUBLISH
+
+    def setUp(self) -> None:
+        super().setUp()
+        self.project("p1")
+        self.task("P0001")
+
+    def worker_body(self, agent_id: str, capabilities) -> dict:
+        return {"agent_id": agent_id, "role": "worker", "task_id": "T0001", "capabilities": list(capabilities)}
+
+    def test_undeclared_optional_capability_is_refused_without_mutation(self) -> None:
+        agent = self.register_agent(display_name="Worker", capabilities=CAPS_WORKER)
+        self.assertNotIn(self.OPTIONAL, [item["capability"] for item in agent["capabilities"]],
+                         "the fixture Agent declares only the role-required Worker capabilities")
+        before = self.state()
+        response = self.client.post("/api/projects/P0001/assignments",
+                                    json=self.worker_body(agent["agent_id"], CAPS_WORKER + [self.OPTIONAL]))
+        self.assertEqual(response.status_code, 422, response.text)
+        self.assertNotIn(self.OPTIONAL, response.text, "the refusal message stays sanitized")
+        self.assertEqual(self.state(), before)
+        self.assertEqual(self.fetch("SELECT count(*) FROM role_assignments"), [(0,)])
+        self.assertEqual(self.fetch("SELECT count(*) FROM assignment_capabilities"), [(0,)])
+
+    def test_direct_service_applies_the_same_optional_capability_guard(self) -> None:
+        agent = self.register_agent(display_name="Worker", capabilities=CAPS_WORKER)
+        service = self.service()
+        before = self.state()
+        with self.assertRaises(InvalidRegistryInput):
+            service.create_assignment(OWNER, 1, agent_id=agent["agent_id"], role="worker", task_id=1,
+                                      capabilities=CAPS_WORKER + [self.OPTIONAL])
+        self.assertEqual(self.state(), before)
+        self.assertEqual(self.fetch("SELECT count(*) FROM role_assignments"), [(0,)])
+
+    def test_declared_optional_capability_is_accepted_then_withdrawal_blocks_the_assignment(self) -> None:
+        declared = CAPS_WORKER + [self.OPTIONAL]
+        agent = self.register_agent(display_name="Worker", capabilities=declared)
+        tree_before = self.state()["tree"]
+        created = self.create_assignment(agent["agent_id"], "worker", declared, task_id="T0001")
+        self.assertEqual((created["state"], created["readiness"], created["runtime_effect"]),
+                         ("active", "unverified", "none"))
+        self.assertNotIn(created["readiness"], {"verified", "ready", "granted", "authorized"})
+        self.assertEqual(self.state()["tree"], tree_before, "an assignment writes no Workspace byte or directory")
+        # Withdrawing the optional declaration downgrades the existing assignment rather than fabricating a grant.
+        self.assertEqual(self.patch_agent(agent["agent_id"], 1, capabilities=CAPS_WORKER).status_code, 200)
+        blocked = self.client.get("/api/projects/P0001/assignments").json()[0]
+        self.assertEqual((blocked["readiness"], blocked["runtime_effect"]), ("blocked", "none"))
+        self.assertNotEqual(blocked["version"], created["version"])
+        # Restoring the declaration returns at most `unverified`, never a verified/effective state.
+        self.assertEqual(self.patch_agent(agent["agent_id"], 2, capabilities=declared).status_code, 200)
+        restored = self.client.get("/api/projects/P0001/assignments").json()[0]
+        self.assertEqual(restored["readiness"], "unverified")
+        self.assertNotIn(restored["readiness"], {"verified", "ready", "granted", "authorized"})
+
+
 class AuthorizationBoundaryTests(RegistryCase):
     def test_agent_context_and_denying_policy_are_refused_on_every_new_route(self) -> None:
         self.project("p1")
