@@ -18,6 +18,9 @@ import test_slice01 as base
 
 OWNER = LocalOwnerProvider().actor()
 TASK = {"title": "T", "description": "D", "acceptance_criteria": "A"}
+# Canonical UUIDv4 fixtures for the P011 registry scope; they are identifiers, never actor credentials.
+AGENT_ID = "3f2504e0-4f89-41d3-9a0c-0305e82c3301"
+ASSIGNMENT_ID = "9b2d1f0e-6a3c-4c5b-8e7d-1f2a3b4c5d6e"
 
 
 class DenyAll:
@@ -33,7 +36,9 @@ class AgentProvider:
 def scope_for(action: str) -> ResourceScope:
     required, _ = authz._SHAPES[action]
     return ResourceScope(project_id=1 if "project_id" in required else None, task_id=1 if "task_id" in required else None,
-                         doc_id="notes" if "doc_id" in required else None)
+                         doc_id="notes" if "doc_id" in required else None,
+                         agent_id=AGENT_ID if "agent_id" in required else None,
+                         assignment_id=ASSIGNMENT_ID if "assignment_id" in required else None)
 
 
 class ActorAndPolicyTests(unittest.TestCase):
@@ -50,8 +55,14 @@ class ActorAndPolicyTests(unittest.TestCase):
         self.assertNotEqual(AgentProvider().actor(), OWNER)
 
     def test_owner_is_allowed_exactly_the_implemented_actions(self) -> None:
+        # The 12 M2-B actions are frozen here; P011 adds Owner-only registry administration to the same default-deny
+        # policy without changing how those 12 behave.
+        m2b_actions = frozenset({"project.list", "project.register", "project.reconcile", "project.repair", "task.list",
+                                 "task.create", "task.reconcile", "task.repair", "architect_document.list",
+                                 "architect_document.read", "architect_document.write", "architect_document.reconcile"})
+        self.assertTrue(m2b_actions <= authz.IMPLEMENTED_ACTIONS)
+        self.assertEqual(len(authz.IMPLEMENTED_ACTIONS), 19)
         policy = LocalOwnerPolicy()
-        self.assertEqual(len(authz.IMPLEMENTED_ACTIONS), 12)
         for action in sorted(authz.IMPLEMENTED_ACTIONS):
             self.assertTrue(evaluate(policy, OWNER, action, scope_for(action)).allowed, action)
 
@@ -86,7 +97,16 @@ class ActorAndPolicyTests(unittest.TestCase):
                (authz.TASK_CREATE, ResourceScope(project_id=1, task_id=2)),
                (authz.DOCUMENT_READ, ResourceScope(project_id=1)), (authz.DOCUMENT_WRITE, ResourceScope(project_id=1, doc_id=5)),  # type: ignore[arg-type]
                (authz.DOCUMENT_LIST, ResourceScope(project_id=1, doc_id="x")), (authz.DOCUMENT_RECONCILE, ResourceScope()),
-               (authz.PROJECT_LIST, None), (authz.PROJECT_LIST, {"project_id": 1})]
+               (authz.PROJECT_LIST, None), (authz.PROJECT_LIST, {"project_id": 1}),
+               # P011 registry scope: a canonical agent/assignment id is required, and nothing else may be added.
+               (authz.AGENT_READ, ResourceScope()), (authz.AGENT_READ, ResourceScope(agent_id="not-a-uuid")),
+               (authz.AGENT_READ, ResourceScope(agent_id=AGENT_ID.upper())),
+               (authz.AGENT_READ, ResourceScope(agent_id=AGENT_ID, project_id=1)),
+               (authz.AGENT_UPDATE, ResourceScope(agent_id=AGENT_ID, task_id=1)),
+               (authz.ASSIGNMENT_LIST, ResourceScope(agent_id=AGENT_ID)),
+               (authz.ASSIGNMENT_REVOKE, ResourceScope(project_id=1)),
+               (authz.ASSIGNMENT_REVOKE, ResourceScope(project_id=1, assignment_id=ASSIGNMENT_ID, doc_id="x")),
+               (authz.ASSIGNMENT_CREATE, ResourceScope(project_id=1, assignment_id=ASSIGNMENT_ID))]
         for action, resource in bad:
             decision = evaluate(policy, OWNER, action, resource)
             self.assertFalse(decision.allowed, (action, resource))

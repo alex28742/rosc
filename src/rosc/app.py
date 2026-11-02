@@ -14,6 +14,9 @@ from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError, OperationalError
 
 from . import authorization as authz
+from .agent_registry import (AgentNotFound, AgentRegistryService, AssignmentNotFound, InvalidRegistryInput, ProjectNotFound,
+                             RegistryConflict, RegistryDenied, RegistryError, RegistryStoreError, UnsafeProjectIdentity,
+                             canonical_agent_id)
 from .config import data_dir
 from .db import make_session_factory
 from .models import (CURRENT_BINDING, Project, ProjectIdentityError, ProjectRootBinding, Task, reserved_roots,
@@ -121,6 +124,38 @@ def numeric_id(value: str, prefix: str) -> int:
     return int(value[1:])
 
 
+def agent_path_id(value: str) -> str:
+    """Accept only canonical UUIDv4 Agent/assignment ids exactly as the API emits them; anything else is 404."""
+    try:
+        return canonical_agent_id(value)
+    except InvalidRegistryInput:
+        raise HTTPException(404, "Not found") from None
+
+
+def registry_error(exc: RegistryError) -> HTTPException:
+    """Map the administrative boundary onto the established HTTP status contract.
+
+    Messages stay generic and never include a path, credential or provider detail.
+    """
+    if isinstance(exc, RegistryDenied):
+        return HTTPException(403, "Not authorized for this operation")
+    if isinstance(exc, AgentNotFound):
+        return HTTPException(404, "Agent not found")
+    if isinstance(exc, ProjectNotFound):
+        return HTTPException(404, "Project not found")
+    if isinstance(exc, AssignmentNotFound):
+        return HTTPException(404, "Assignment not found")
+    if isinstance(exc, RegistryConflict):
+        return HTTPException(409, str(exc))
+    if isinstance(exc, InvalidRegistryInput):
+        return HTTPException(422, str(exc))
+    if isinstance(exc, UnsafeProjectIdentity):
+        return HTTPException(503, "Project identity records are inconsistent; manual reconciliation is required")
+    if isinstance(exc, RegistryStoreError):
+        return HTTPException(503, "Another registry change is in progress; retry shortly")
+    return HTTPException(503, "Agent registry operation failed")
+
+
 def conflict_detail(exc: WorkspaceConflict) -> str:
     if exc.problem in ("corrupt", "drift"):
         return f"Workspace manifest is {exc.problem}; use the Owner-confirmed repair action. {exc.message}"
@@ -131,6 +166,34 @@ def conflict_detail(exc: WorkspaceConflict) -> str:
 
 class RepairInput(BaseModel):
     confirm_repair: bool = False
+
+
+class AgentInput(BaseModel):
+    """Descriptive metadata only: no credential, path, command or provider session is accepted here."""
+
+    display_name: str = Field(min_length=1, max_length=80)
+    icon_label: str | None = Field(default=None, max_length=32)
+    runtime_adapter: str = Field(min_length=1, max_length=64)
+    provider_id: str = Field(min_length=1, max_length=64)
+    model_id: str = Field(min_length=1, max_length=96)
+    capabilities: list[str] = Field(default_factory=list, max_length=8)
+
+
+class AgentUpdateInput(AgentInput):
+    """Full replacement of editable metadata with an optimistic version check."""
+
+    expected_version: int = Field(ge=1)
+
+
+class AssignmentInput(BaseModel):
+    agent_id: str = Field(min_length=36, max_length=36)
+    role: str = Field(min_length=1, max_length=16)
+    task_id: str | None = None
+    capabilities: list[str] = Field(default_factory=list, max_length=8)
+
+
+class RevokeInput(BaseModel):
+    expected_version: int = Field(ge=1)
 
 
 def require_confirmation(data: RepairInput) -> None:
@@ -237,6 +300,7 @@ def create_app(db_path: Path | None = None, workspace_root: Path | None = None, 
     db_path = db_path or base / "rosc.db"
     workspace_root = workspace_root or base / "workspace"
     sessions = make_session_factory(db_path, busy_timeout_ms)
+    registry = AgentRegistryService(sessions, policy)
     app = FastAPI(title="ROSC Core", version="0.1.0")
 
     @app.middleware("http")
@@ -258,16 +322,26 @@ def create_app(db_path: Path | None = None, workspace_root: Path | None = None, 
             return JSONResponse({"detail": problem}, status_code=403)
         return await call_next(request)
 
-    def authorize(action: str, **scope) -> None:
-        """Application-owned actor resolution + policy check; runs before any lookup, SQL write or Workspace access."""
+    def current_actor() -> authz.ActorContext:
+        """Resolve the trusted actor from the application-selected provider. Never from request data."""
         try:
-            actor = provider.actor()
+            return provider.actor()
         except Exception as exc:  # fail closed: no policy allow, no Core read or mutation
             log.warning("Authentication provider failed: %s", type(exc).__name__)
             raise HTTPException(503, "Actor context unavailable") from None
-        decision = authz.evaluate(policy, actor, action, authz.ResourceScope(**scope))
+
+    def authorize(action: str, **scope) -> None:
+        """Application-owned actor resolution + policy check; runs before any lookup, SQL write or Workspace access."""
+        decision = authz.evaluate(policy, current_actor(), action, authz.ResourceScope(**scope))
         if not decision.allowed:
             raise HTTPException(403, "Not authorized for this operation")
+
+    def registry_call(call, *args, **kwargs):
+        """Run one administrative service call and translate its boundary errors into HTTP contract errors."""
+        try:
+            return call(*args, **kwargs)
+        except RegistryError as exc:
+            raise registry_error(exc) from None
 
     @app.get("/api/health")
     def health() -> dict:
@@ -429,6 +503,53 @@ def create_app(db_path: Path | None = None, workspace_root: Path | None = None, 
             task.workspace_state = "ready"
             session.commit()
             return repair_response(task_view(task, workspace_root), record)
+
+    # -- M2-C Owner-only Agent registry and scoped assignments (no agent-facing surface) ----------------------
+    @app.get("/api/agents")
+    def list_agents() -> list[dict]:
+        return registry_call(registry.list_agents, current_actor())
+
+    @app.post("/api/agents", status_code=201)
+    def register_agent(data: AgentInput) -> dict:
+        return registry_call(registry.register_agent, current_actor(), display_name=data.display_name,
+                             icon_label=data.icon_label, runtime_adapter=data.runtime_adapter,
+                             provider_id=data.provider_id, model_id=data.model_id,
+                             capabilities=data.capabilities)
+
+    @app.get("/api/agents/{agent_id}")
+    def get_agent(agent_id: str) -> dict:
+        return registry_call(registry.get_agent, current_actor(), agent_path_id(agent_id))
+
+    @app.patch("/api/agents/{agent_id}")
+    def update_agent(agent_id: str, data: AgentUpdateInput) -> dict:
+        return registry_call(registry.update_agent, current_actor(), agent_path_id(agent_id),
+                             expected_version=data.expected_version, display_name=data.display_name,
+                             icon_label=data.icon_label, runtime_adapter=data.runtime_adapter,
+                             provider_id=data.provider_id, model_id=data.model_id,
+                             capabilities=data.capabilities)
+
+    @app.get("/api/projects/{project_id}/assignments")
+    def list_assignments(project_id: str, include_revoked: bool = False) -> list[dict]:
+        pid = numeric_id(project_id, "P")
+        return registry_call(registry.list_assignments, current_actor(), pid, include_revoked=include_revoked)
+
+    @app.post("/api/projects/{project_id}/assignments", status_code=201)
+    def create_assignment(project_id: str, data: AssignmentInput) -> dict:
+        pid = numeric_id(project_id, "P")
+        task_id = None
+        if data.task_id is not None:
+            try:
+                task_id = numeric_id(data.task_id, "T")
+            except HTTPException:
+                raise HTTPException(422, "Task id must be canonical (T0001 or T10000)") from None
+        return registry_call(registry.create_assignment, current_actor(), pid, agent_id=data.agent_id,
+                             role=data.role, task_id=task_id, capabilities=data.capabilities)
+
+    @app.post("/api/projects/{project_id}/assignments/{assignment_id}/revoke")
+    def revoke_assignment(project_id: str, assignment_id: str, data: RevokeInput) -> dict:
+        pid = numeric_id(project_id, "P")
+        return registry_call(registry.revoke_assignment, current_actor(), pid, agent_path_id(assignment_id),
+                             expected_version=data.expected_version)
 
     return app
 

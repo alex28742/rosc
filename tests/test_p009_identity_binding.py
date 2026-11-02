@@ -84,7 +84,7 @@ class FreshRegistrationTests(IdentityCase):
 
     def test_single_migration_head(self) -> None:
         from alembic.script import ScriptDirectory
-        self.assertEqual(ScriptDirectory.from_config(self.alembic).get_heads(), ["0002_project_identity_binding"])
+        self.assertEqual(ScriptDirectory.from_config(self.alembic).get_heads(), ["0003_agent_registry_assignments"])
 
     def test_read_model_adds_identity_and_keeps_legacy_root_path(self) -> None:
         root = self.new_root()
@@ -100,9 +100,12 @@ class FreshRegistrationTests(IdentityCase):
     def test_no_binding_mutation_route_or_agent_launch_is_added(self) -> None:
         app = create_app(self.data / "rosc.db", self.data / "workspace")
         paths = {route.path for route in app.routes if hasattr(route, "path")}
-        for forbidden in ("binding", "rebind", "unlink", "archive", "run", "worker", "agent"):
+        # P011 adds Owner-only Agent registry/assignment administration; it must still add no activation, binding or
+        # execution route (no RuntimeBinding, session, Run or Worker launch surface).
+        for forbidden in ("binding", "rebind", "unlink", "archive", "run", "worker", "session", "runtime"):
             self.assertFalse([path for path in paths if forbidden in path], (forbidden, sorted(paths)))
         self.assertIn("/api/projects/{project_id}/tasks", paths)
+        self.assertIn("/api/agents", paths)
 
     def test_second_current_binding_is_rejected_by_the_database(self) -> None:
         self.assertFalse(self.register(self.new_root()).status_code >= 400)

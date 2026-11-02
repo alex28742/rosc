@@ -22,6 +22,7 @@ This protects ROSC-owned Core/Workspace state. It is not a hostile-OS sandbox an
 """
 from __future__ import annotations
 
+import uuid
 from dataclasses import dataclass
 from typing import Protocol
 
@@ -43,6 +44,15 @@ DOCUMENT_LIST = "architect_document.list"
 DOCUMENT_READ = "architect_document.read"
 DOCUMENT_WRITE = "architect_document.write"
 DOCUMENT_RECONCILE = "architect_document.reconcile"
+# M2-C Owner-only registry and assignment administration. These actions describe administrative bookkeeping, never
+# agent execution authority: holding one does not let an Agent reach a Project, Task or Architect document.
+AGENT_LIST = "agent.list"
+AGENT_REGISTER = "agent.register"
+AGENT_READ = "agent.read"
+AGENT_UPDATE = "agent.update"
+ASSIGNMENT_LIST = "assignment.list"
+ASSIGNMENT_CREATE = "assignment.create"
+ASSIGNMENT_REVOKE = "assignment.revoke"
 
 # Resource shapes: which identifiers an action must carry and which it may carry.
 # (required fields, optional fields); every other field must be absent.
@@ -60,6 +70,13 @@ _SHAPES: dict[str, tuple[frozenset[str], frozenset[str]]] = {
     DOCUMENT_WRITE: (frozenset({"project_id", "doc_id"}), frozenset()),
     # A diagnostic id may not name a document (for example a staged creation), so doc_id is optional here.
     DOCUMENT_RECONCILE: (frozenset({"project_id"}), frozenset({"doc_id"})),
+    AGENT_LIST: (frozenset(), frozenset()),
+    AGENT_REGISTER: (frozenset(), frozenset()),
+    AGENT_READ: (frozenset({"agent_id"}), frozenset()),
+    AGENT_UPDATE: (frozenset({"agent_id"}), frozenset()),
+    ASSIGNMENT_LIST: (frozenset({"project_id"}), frozenset()),
+    ASSIGNMENT_CREATE: (frozenset({"project_id"}), frozenset()),
+    ASSIGNMENT_REVOKE: (frozenset({"project_id", "assignment_id"}), frozenset()),
 }
 IMPLEMENTED_ACTIONS = frozenset(_SHAPES)
 
@@ -80,11 +97,18 @@ class ActorContext:
 
 @dataclass(frozen=True)
 class ResourceScope:
-    """Typed scope of one operation. Identifiers are canonical numeric Project/Task ids and a document id."""
+    """Typed scope of one operation.
+
+    Identifiers are canonical numeric Project/Task ids, a document id and, for registry administration only,
+    canonical UUIDv4 Agent/assignment ids. Agent ids appear in a scope because an administrative action targets a
+    registered Agent; they never select the actor.
+    """
 
     project_id: int | None = None
     task_id: int | None = None
     doc_id: str | None = None
+    agent_id: str | None = None
+    assignment_id: str | None = None
 
 
 @dataclass(frozen=True)
@@ -119,6 +143,17 @@ def _valid_id(value: object) -> bool:
     return isinstance(value, int) and not isinstance(value, bool) and value > 0
 
 
+def is_canonical_uuid4(value: object) -> bool:
+    """True only for a canonical lowercase RFC 4122 UUIDv4 string, without normalizing anything."""
+    if not isinstance(value, str):
+        return False
+    try:
+        parsed = uuid.UUID(value)
+    except (ValueError, AttributeError, TypeError):
+        return False
+    return parsed.version == 4 and parsed.variant == uuid.RFC_4122 and str(parsed) == value
+
+
 def resource_problem(action: str, resource: object) -> str | None:
     """Return a reason code when the scope is missing, contradictory or malformed for ``action``."""
     shape = _SHAPES.get(action)
@@ -127,16 +162,20 @@ def resource_problem(action: str, resource: object) -> str | None:
     if not isinstance(resource, ResourceScope):
         return "invalid_resource"
     required, optional = shape
-    values = {"project_id": resource.project_id, "task_id": resource.task_id, "doc_id": resource.doc_id}
+    values = {"project_id": resource.project_id, "task_id": resource.task_id, "doc_id": resource.doc_id,
+              "agent_id": resource.agent_id, "assignment_id": resource.assignment_id}
     for name, value in values.items():
         if name in required:
-            # doc_id is syntactically validated by the document store itself; here it only has to be present text.
-            valid = isinstance(value, str) if name == "doc_id" else _valid_id(value)
+            if name in ("doc_id", "agent_id", "assignment_id"):
+                # doc_id is syntactically validated by the document store itself; here it only has to be present text.
+                valid = is_canonical_uuid4(value) if name != "doc_id" else isinstance(value, str)
+            else:
+                valid = _valid_id(value)
             if not valid:
                 return "invalid_resource"
         elif value is not None and name not in optional:
             return "invalid_resource"
-        elif value is not None and name == "doc_id" and not isinstance(value, str):
+        elif value is not None and name in ("doc_id", "agent_id", "assignment_id") and not isinstance(value, str):
             return "invalid_resource"
     return None
 

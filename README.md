@@ -8,6 +8,7 @@ The working architecture and [implementation pipeline](https://drive.google.com/
 
 - Register a new or existing local Project without starting an agent.
 - Create a Draft Task with a title, description and acceptance criteria.
+- Register a provider-neutral Agent and record scoped `architect`/`worker` assignments for a Project or Task; neither action starts a runtime, session or Run, and neither grants an Agent Core authority.
 - Persist both in SQLite and provision a separate ROSC Workspace manifest.
 - Inspect and create them in a small React UI; closing and reopening the UI does not change agent state.
 
@@ -51,5 +52,7 @@ Workspace manifests (`project.yaml`, `task.yaml`) are projections of SQLite. Ord
 ## Current limits
 
 There is no Worker launch, Architect session, Run approval, event import, attachment service or production chat yet. No UI action in this slice starts an agent. Existing Project registration assumes no external agent currently writes the checkout; it does not adopt external sessions. ROSC Workspace artifacts are separate from the project's application source.
+
+Registered Agents and role assignments are administrative records only. A registered Agent is not a session, credential or runtime; an assignment is bounded intent, not activation or an effective permission. Capability readiness is reported as `declared`/`unverified` or `blocked` and is never `verified`; agent actors remain denied by the Core policy until a later authorized Run slice exists.
 
 Canonical architecture and scenarios remain in the ROSC Google Drive folder; this public repository contains implementation code and a mock UX reference, not copies of private project documentation.

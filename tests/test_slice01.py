@@ -647,7 +647,8 @@ class HardeningTests(StageCase):
         self.assertEqual(list((self.data / "workspace/projects/P0001/architect").iterdir()), [])
         from sqlalchemy import create_engine, inspect
         tables = set(inspect(create_engine(f"sqlite:///{self.data / 'rosc.db'}")).get_table_names())
-        self.assertEqual(tables, {"projects", "tasks", "project_root_bindings", "alembic_version"})
+        self.assertEqual(tables, {"projects", "tasks", "project_root_bindings", "agent_definitions", "agent_capabilities",
+                                  "role_assignments", "assignment_capabilities", "alembic_version"})
 
 
 if __name__ == "__main__":
