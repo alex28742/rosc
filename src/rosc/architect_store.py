@@ -27,7 +27,7 @@ from typing import Protocol
 
 from sqlalchemy.orm import Session, sessionmaker
 
-from .models import Project
+from .models import Project, ProjectIdentityError, validate_project_identity
 from .workspace import (READY, ReplaceNotDurable, WorkspaceConflict, _atomic_replace, _chain_is_unsafe,
                         _ensure_directory, _fsync_directory, _temp_file, inspect_project, project_directory)
 
@@ -929,6 +929,10 @@ class ArchitectDocumentService:
             project = session.get(Project, project_id)
             if project is None:
                 raise DocumentNotFound("Project not found")
+            try:
+                validate_project_identity(project)
+            except ProjectIdentityError as exc:
+                raise UnsafeStore("Project identity records are inconsistent") from exc
             if project.workspace_state != "ready" or inspect_project(self._root, project).problem != READY:
                 raise UnsafeStore("Project Workspace is not ready")
 

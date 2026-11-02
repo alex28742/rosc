@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import uuid
 from datetime import datetime, timezone
 
 from sqlalchemy import CheckConstraint, DateTime, ForeignKey, Index, Integer, String, Text, UniqueConstraint, select, text
@@ -10,8 +11,16 @@ CURRENT_BINDING = "current"
 SUPERSEDED_BINDING = "superseded"
 
 
-class BindingStateError(Exception):
+class ProjectIdentityError(Exception):
+    """Canonical Project identity records are unsafe to use; callers must fail closed."""
+
+
+class BindingStateError(ProjectIdentityError):
     """Project identity and Root Binding records contradict each other; callers must fail closed."""
+
+
+class ProjectUUIDError(ProjectIdentityError):
+    """The canonical Project UUID in SQLite is not a canonical RFC 4122 UUIDv4."""
 
 
 class Base(DeclarativeBase):
@@ -43,12 +52,9 @@ class Project(Base):
         back_populates="project", lazy="selectin", order_by="ProjectRootBinding.version")
 
     @property
-    def current_binding(self) -> ProjectRootBinding | None:
-        """The single current Root Binding, or None. Never picks one arbitrarily out of several."""
-        current = [binding for binding in self.bindings if binding.state == CURRENT_BINDING]
-        if len(current) > 1:
-            raise BindingStateError(f"Project P{self.id} has {len(current)} current Root Bindings")
-        return current[0] if current else None
+    def current_binding(self) -> ProjectRootBinding:
+        """Return the validated current Root Binding; absence is corruption until Unlink exists."""
+        return validate_current_binding(self)
 
 
 class ProjectRootBinding(Base):
@@ -78,6 +84,36 @@ class ProjectRootBinding(Base):
     project: Mapped[Project] = relationship(back_populates="bindings")
 
 
+def validate_project_uuid(value: object) -> str:
+    """Return a canonical lowercase RFC 4122 UUIDv4 string without normalizing corrupt DB state."""
+    if not isinstance(value, str):
+        raise ProjectUUIDError("Project UUID is not a string")
+    try:
+        parsed = uuid.UUID(value)
+    except (ValueError, AttributeError, TypeError) as exc:
+        raise ProjectUUIDError("Project UUID is malformed") from exc
+    if parsed.version != 4 or parsed.variant != uuid.RFC_4122 or str(parsed) != value:
+        raise ProjectUUIDError("Project UUID is not canonical RFC 4122 UUIDv4")
+    return value
+
+
+def validate_current_binding(project: Project) -> ProjectRootBinding:
+    """Validate the transitional M2-A current-binding invariant for one existing Project."""
+    current = [binding for binding in project.bindings if binding.state == CURRENT_BINDING]
+    if len(current) != 1:
+        raise BindingStateError(f"Project P{project.id} does not have exactly one current Root Binding")
+    binding = current[0]
+    if binding.version == 1 and binding.root_path != project.registration_root_path:
+        raise BindingStateError(f"Project P{project.id} initial Root Binding disagrees with its registration root")
+    return binding
+
+
+def validate_project_identity(project: Project) -> ProjectRootBinding:
+    """Validate canonical UUID and current Root Binding through one reusable Core gate."""
+    validate_project_uuid(project.project_uuid)
+    return validate_current_binding(project)
+
+
 def reserved_roots(session) -> list[str]:
     """Roots reserved by the current Root Bindings; the only source of truth for new root availability.
 
@@ -88,16 +124,10 @@ def reserved_roots(session) -> list[str]:
     current: dict[int, list[ProjectRootBinding]] = {}
     for binding in session.scalars(select(ProjectRootBinding).where(ProjectRootBinding.state == CURRENT_BINDING)):
         current.setdefault(binding.project_id, []).append(binding)
-    for project_id, project in projects.items():
-        bindings = current.get(project_id, [])
-        if len(bindings) != 1:
-            raise BindingStateError(f"Project P{project_id} does not have exactly one current Root Binding")
-        initial = bindings[0]
-        if initial.version == 1 and initial.root_path != project.registration_root_path:
-            raise BindingStateError(f"Project P{project_id} initial Root Binding disagrees with its registration root")
+    validated = [validate_project_identity(project) for project in projects.values()]
     if set(current) - set(projects):
         raise BindingStateError("A Root Binding refers to a Project that does not exist")
-    return [binding.root_path for bindings in current.values() for binding in bindings]
+    return [binding.root_path for binding in validated]
 
 
 class Task(Base):

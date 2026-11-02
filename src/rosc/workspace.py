@@ -12,7 +12,7 @@ from pathlib import Path
 
 import yaml
 
-from .models import Project, Task
+from .models import Project, Task, validate_project_uuid
 
 MAX_MANIFEST_BYTES = 1_048_576
 
@@ -74,7 +74,8 @@ def project_payload(project: Project) -> dict:
 
     SQLite stays authoritative for name, docs_entrypoint and mode.
     """
-    return {"format": "rosc.project.v3", "project_id": f"P{project.id:04d}", "project_uuid": project.project_uuid}
+    project_uuid = validate_project_uuid(project.project_uuid)
+    return {"format": "rosc.project.v3", "project_id": f"P{project.id:04d}", "project_uuid": project_uuid}
 
 
 def task_payload(task: Task) -> dict:
@@ -90,8 +91,9 @@ def project_identity(project: Project) -> dict[str, dict]:
     the legacy entries exist only so an existing valid legacy manifest is recognized and left untouched.
     """
     project_id = f"P{project.id:04d}"
+    project_uuid = validate_project_uuid(project.project_uuid)
     legacy = {"project_id": project_id, "root_path": project.registration_root_path}
-    return {"rosc.project.v3": {"project_id": project_id, "project_uuid": project.project_uuid},
+    return {"rosc.project.v3": {"project_id": project_id, "project_uuid": project_uuid},
             "rosc.project.v2": dict(legacy), "rosc.project.v1": dict(legacy)}
 
 
@@ -264,10 +266,12 @@ def _provision(path: Path, payload: dict, expected: dict[str, dict], unattribute
 
 
 def provision_project(workspace_root: Path, project: Project) -> None:
+    payload = project_payload(project)
+    identity = project_identity(project)
     directory = project_directory(workspace_root, project.id)
     for part in (workspace_root, workspace_root / "projects", directory, directory / "architect", directory / "tasks"):
         _ensure_directory(part)
-    _provision(project_manifest_path(workspace_root, project.id), project_payload(project), project_identity(project),
+    _provision(project_manifest_path(workspace_root, project.id), payload, identity,
                PROJECT_UNATTRIBUTED, workspace_root)
 
 

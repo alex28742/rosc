@@ -12,7 +12,8 @@ from sqlalchemy.exc import IntegrityError, OperationalError
 
 from .config import data_dir
 from .db import make_session_factory
-from .models import BindingStateError, CURRENT_BINDING, Project, ProjectRootBinding, Task, reserved_roots
+from .models import (CURRENT_BINDING, Project, ProjectIdentityError, ProjectRootBinding, Task, reserved_roots,
+                     validate_project_identity)
 from .workspace import (MAX_MANIFEST_BYTES, READY, WorkspaceConflict, WorkspaceError, WorkspaceUncertain, inspect_project, inspect_task, provision_project,
                         provision_task, repair_project, repair_task)
 
@@ -73,11 +74,15 @@ def project_identity_problem() -> HTTPException:
     return HTTPException(503, "Project identity records are inconsistent; manual reconciliation is required")
 
 
-def project_view(project: Project, workspace_root: Path) -> dict:
+def require_project_identity(project: Project) -> ProjectRootBinding:
     try:
-        binding = project.current_binding
-    except BindingStateError as exc:
+        return validate_project_identity(project)
+    except ProjectIdentityError as exc:
         raise project_identity_problem() from exc
+
+
+def project_view(project: Project, workspace_root: Path) -> dict:
+    binding = require_project_identity(project)
     state, problem = workspace_status(project.workspace_state, inspect_project(workspace_root, project).problem)
     return {
         "id": f"P{project.id:04d}", "name": project.name, "description": project.description,
@@ -157,7 +162,7 @@ def check_overlap(root: str, session) -> None:
     candidate = Path(root)
     try:
         reservations = reserved_roots(session)
-    except BindingStateError as exc:
+    except ProjectIdentityError as exc:
         raise project_identity_problem() from exc
     for other in reservations:
         path = Path(other)
@@ -224,6 +229,7 @@ def create_app(db_path: Path | None = None, workspace_root: Path | None = None, 
     def reconcile_project(project_id: str) -> dict:
         with sessions() as session:
             project = load_project(session, project_id)
+            require_project_identity(project)
             try:
                 provision_project(workspace_root, project)  # rebuilds a missing manifest only; never replaces one
             except WorkspaceConflict as exc:
@@ -239,6 +245,7 @@ def create_app(db_path: Path | None = None, workspace_root: Path | None = None, 
         require_confirmation(data)
         with sessions() as session:
             project = load_project(session, project_id)
+            require_project_identity(project)
             try:
                 record = repair_project(workspace_root, project)
             except WorkspaceConflict as exc:
@@ -266,6 +273,7 @@ def create_app(db_path: Path | None = None, workspace_root: Path | None = None, 
             project = session.get(Project, pid)
             if not project:
                 raise HTTPException(404, "Project not found")
+            require_project_identity(project)
             if project.workspace_state != "ready" or inspect_project(workspace_root, project).problem != READY:
                 raise HTTPException(409, "Project Workspace requires reconciliation")
             task = Task(project_id=pid, title=data.title, description=data.description,
@@ -293,6 +301,7 @@ def create_app(db_path: Path | None = None, workspace_root: Path | None = None, 
     def reconcile_task(project_id: str, task_id: str) -> dict:
         with sessions() as session:
             task = load_task(session, project_id, task_id)
+            require_project_identity(session.get(Project, task.project_id))
             try:
                 provision_task(workspace_root, task)
             except WorkspaceConflict as exc:
@@ -308,6 +317,7 @@ def create_app(db_path: Path | None = None, workspace_root: Path | None = None, 
         require_confirmation(data)
         with sessions() as session:
             task = load_task(session, project_id, task_id)
+            require_project_identity(session.get(Project, task.project_id))
             try:
                 record = repair_task(workspace_root, task)
             except WorkspaceConflict as exc:

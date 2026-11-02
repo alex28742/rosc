@@ -606,10 +606,19 @@ class HardeningTests(StageCase):
         self.assertEqual(self.client.get("/api/projects/P10000/tasks").status_code, 404)
 
     def test_ids_above_9999_round_trip_as_emitted(self) -> None:
-        from rosc.models import Project
+        import uuid
+        from rosc.models import Project, ProjectRootBinding
         from rosc.app import numeric_id, project_view
-        project = Project(id=12345, name="n", description="d", root_path="/x", mode="new", workspace_state="ready",
-                          created_at=__import__("datetime").datetime(2026, 1, 1))
+        created = __import__("datetime").datetime(2026, 1, 1)
+        project_uuid = str(uuid.uuid4())
+        project = Project(id=12345, name="n", description="d", root_path="/x", registration_root_path="/x",
+                          project_uuid=project_uuid, mode="new", workspace_state="ready", created_at=created)
+        project.bindings = [ProjectRootBinding(version=1, root_path="/x", mode="new", state="current",
+                                               created_at=created)]
+        manifest = self.data / "workspace/projects/P12345/project.yaml"
+        manifest.parent.mkdir(parents=True)
+        manifest.write_text(yaml.safe_dump({"format": "rosc.project.v3", "project_id": "P12345",
+                                            "project_uuid": project_uuid}))
         emitted = project_view(project, self.data / "workspace")["id"]
         self.assertEqual(emitted, "P12345")
         self.assertEqual(numeric_id(emitted, "P"), 12345)

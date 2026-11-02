@@ -11,9 +11,11 @@ from fastapi.testclient import TestClient
 
 import test_slice01 as base
 from rosc.app import create_app
-from rosc.architect_store import ActorContext, ArchitectDocumentService
+from rosc.architect_store import ActorContext, ArchitectDocumentService, UnsafeStore
 from rosc.db import make_session_factory
-from rosc.models import BindingStateError, Project, ProjectRootBinding
+from rosc.models import (BindingStateError, Project, ProjectRootBinding, ProjectUUIDError,
+                         validate_project_uuid)
+from rosc.workspace import provision_project
 
 ACTOR = ActorContext("p009-test-actor")
 
@@ -174,6 +176,144 @@ class RootAvailabilityTests(IdentityCase):
         self.assertEqual(self.register(self.make_root("bound", "a.txt"), "existing").status_code, 201)
         self.sql("UPDATE project_root_bindings SET root_path = ? WHERE project_id = 1", str(self.base / "tampered"))
         self.assertEqual(self.register(self.make_root("unbound", "a.txt"), "existing").status_code, 503)
+
+
+class ExistingProjectIntegrityTests(IdentityCase):
+    task = {"title": "Must not land", "description": "d", "acceptance_criteria": "a"}
+
+    def project_files(self) -> dict[str, bytes]:
+        directory = self.data / "workspace/projects/P0001"
+        return {str(path.relative_to(directory)): path.read_bytes()
+                for path in directory.rglob("*") if path.is_file()}
+
+    def service(self) -> ArchitectDocumentService:
+        return ArchitectDocumentService(make_session_factory(self.data / "rosc.db"),
+                                         self.data / "workspace", AllowAll())
+
+    def assert_identity_error(self, response) -> None:
+        self.assertEqual(response.status_code, 503, response.text)
+        self.assertEqual(response.json()["detail"],
+                         "Project identity records are inconsistent; manual reconciliation is required")
+
+    def assert_mutations_rejected_without_side_effects(self, before: dict[str, bytes]) -> None:
+        api = self.api()
+        self.assertEqual(api.post("/api/projects/P0001/tasks", json=self.task).status_code, 503)
+        self.assertEqual(api.post("/api/projects/P0001/reconcile-workspace").status_code, 503)
+        self.assertEqual(api.post("/api/projects/P0001/repair-workspace",
+                                  json={"confirm_repair": True}).status_code, 503)
+        with self.assertRaises(UnsafeStore):
+            self.service().write_document(ACTOR, 1, "blocked", "must not land")
+        self.assertEqual(self.fetch("SELECT id FROM tasks"), [])
+        self.assertEqual(self.project_files(), before)
+        self.assertFalse((self.data / "workspace/projects/P0001/architect/documents").exists())
+        self.assertFalse((self.data / "workspace/quarantine").exists())
+
+    def test_missing_current_binding_fails_closed_everywhere(self) -> None:
+        self.assertEqual(self.register(self.new_root()).status_code, 201)
+        before = self.project_files()
+        self.sql("DELETE FROM project_root_bindings WHERE project_id = 1")
+        response = self.api().get("/api/projects")
+        self.assert_identity_error(response)
+        self.assert_mutations_rejected_without_side_effects(before)
+        self.assertEqual(self.binding_rows(), [], "Workspace recovery must not manufacture a binding")
+
+    def test_contradictory_initial_binding_fails_closed_everywhere(self) -> None:
+        self.assertEqual(self.register(self.new_root()).status_code, 201)
+        before = self.project_files()
+        original_manifest = self.manifest().read_bytes()
+        self.sql("UPDATE project_root_bindings SET root_path = ? WHERE project_id = 1",
+                 str(self.base / "contradictory-root"))
+        response = self.api().get("/api/projects")
+        self.assert_identity_error(response)
+        self.assert_mutations_rejected_without_side_effects(before)
+        self.assertEqual(self.manifest().read_bytes(), original_manifest)
+
+    def test_invalid_db_uuid_is_never_an_operational_identity(self) -> None:
+        self.assertEqual(self.register(self.new_root()).status_code, 201)
+        before = self.project_files()
+        invalid_values = ("not-a-uuid", str(uuid.uuid1()), str(uuid.uuid4()).upper(), uuid.uuid4().hex)
+        for value in invalid_values:
+            with self.subTest(value=value):
+                self.sql("UPDATE projects SET project_uuid = ? WHERE id = 1", value)
+                self.assert_identity_error(self.api().get("/api/projects"))
+                self.assert_mutations_rejected_without_side_effects(before)
+
+    def test_invalid_uuid_cannot_rebuild_a_missing_manifest(self) -> None:
+        self.assertEqual(self.register(self.new_root()).status_code, 201)
+        self.sql("UPDATE projects SET project_uuid = 'not-a-uuid' WHERE id = 1")
+        self.manifest().unlink()
+        before = self.project_files()
+        api = self.api()
+        self.assertEqual(api.post("/api/projects/P0001/reconcile-workspace").status_code, 503)
+        self.assertEqual(api.post("/api/projects/P0001/repair-workspace",
+                                  json={"confirm_repair": True}).status_code, 503)
+        self.assertFalse(self.manifest().exists())
+        self.assertEqual(self.project_files(), before)
+        self.assertFalse((self.data / "workspace/quarantine").exists())
+
+    def test_invalid_uuid_guard_precedes_workspace_directory_publication(self) -> None:
+        self.assertEqual(self.register(self.new_root()).status_code, 201)
+        self.sql("UPDATE projects SET project_uuid = 'not-a-uuid' WHERE id = 1")
+        isolated = self.data / "isolated-workspace"
+        sessions = make_session_factory(self.data / "rosc.db")
+        with sessions() as session:
+            with self.assertRaises(ProjectUUIDError):
+                provision_project(isolated, session.get(Project, 1))
+        self.assertFalse(isolated.exists())
+
+    def test_matching_malformed_v3_manifest_does_not_validate_corrupt_db_identity(self) -> None:
+        self.assertEqual(self.register(self.new_root()).status_code, 201)
+        self.sql("UPDATE projects SET project_uuid = 'not-a-uuid' WHERE id = 1")
+        malformed = yaml.safe_dump({"format": "rosc.project.v3", "project_id": "P0001",
+                                    "project_uuid": "not-a-uuid"}).encode()
+        self.manifest().write_bytes(malformed)
+        self.assert_identity_error(self.api().get("/api/projects"))
+        self.assert_mutations_rejected_without_side_effects(self.project_files())
+        self.assertEqual(self.manifest().read_bytes(), malformed)
+
+    def test_invalid_uuid_preserves_legacy_manifests_until_db_identity_is_restored(self) -> None:
+        root_path = self.new_root()
+        self.assertEqual(self.register(root_path).status_code, 201)
+        original_uuid = self.fetch("SELECT project_uuid FROM projects WHERE id = 1")[0][0]
+        root = str(root_path.resolve())
+        candidates = (
+            {"format": "rosc.project.v1", "project_id": "P0001", "name": "Legacy", "root_path": root,
+             "mode": "new", "docs_entrypoint": None},
+            {"format": "rosc.project.v2", "project_id": "P0001", "root_path": root},
+        )
+        for payload in candidates:
+            with self.subTest(format=payload["format"]):
+                raw = yaml.safe_dump(payload).encode()
+                self.manifest().write_bytes(raw)
+                self.sql("UPDATE projects SET project_uuid = 'not-a-uuid' WHERE id = 1")
+                self.assert_identity_error(self.api().get("/api/projects"))
+                self.assertEqual(self.api().post("/api/projects/P0001/reconcile-workspace").status_code, 503)
+                self.assertEqual(self.api().post("/api/projects/P0001/repair-workspace",
+                                                 json={"confirm_repair": True}).status_code, 503)
+                self.assertEqual(self.manifest().read_bytes(), raw)
+                self.sql("UPDATE projects SET project_uuid = ? WHERE id = 1", original_uuid)
+                self.assertEqual(self.api().get("/api/projects").json()[0]["workspace_state"], "ready")
+                self.assertEqual(self.manifest().read_bytes(), raw)
+
+    def test_task_workspace_mutations_require_valid_parent_identity(self) -> None:
+        self.assertEqual(self.register(self.new_root()).status_code, 201)
+        created = self.api().post("/api/projects/P0001/tasks", json=self.task)
+        self.assertEqual(created.status_code, 201, created.text)
+        task_manifest = self.data / "workspace/projects/P0001/tasks/T0001/task.yaml"
+        before = task_manifest.read_bytes()
+        self.sql("UPDATE projects SET project_uuid = 'not-a-uuid' WHERE id = 1")
+        self.assertEqual(self.api().post("/api/projects/P0001/tasks/T0001/reconcile-workspace").status_code, 503)
+        self.assertEqual(self.api().post("/api/projects/P0001/tasks/T0001/repair-workspace",
+                                         json={"confirm_repair": True}).status_code, 503)
+        self.assertEqual(task_manifest.read_bytes(), before)
+
+    def test_uuid_validator_accepts_only_canonical_rfc4122_v4(self) -> None:
+        valid = str(uuid.uuid4())
+        self.assertEqual(validate_project_uuid(valid), valid)
+        for value in (None, 1, "", "not-a-uuid", str(uuid.uuid1()), str(uuid.uuid3(uuid.NAMESPACE_DNS, "x")),
+                      str(uuid.uuid5(uuid.NAMESPACE_DNS, "x")), valid.upper(), uuid.UUID(valid).hex):
+            with self.subTest(value=value), self.assertRaises(ProjectUUIDError):
+                validate_project_uuid(value)
 
 
 class LegacyUpgradeTests(IdentityCase):
