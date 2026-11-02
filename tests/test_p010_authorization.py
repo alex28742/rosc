@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import sqlite3
 import unittest
 from pathlib import Path
@@ -223,7 +224,148 @@ class DeniedApiTests(ApiCase):
         self.assertEqual(self.app(auth_provider=Broken()).get("/api/projects").status_code, 403)
 
 
+class RaisingProvider:
+    """Realistic custom failure carrying a distinctive secret-like string."""
+    SECRET = "SECRET-token-9f8e7d /home/als/private/path"
+
+    def __init__(self) -> None:
+        self.calls = 0
+
+    def actor(self):
+        self.calls += 1
+        raise RuntimeError(self.SECRET)
+
+
+class FlakyProvider:
+    """Owner on the first call, then failing: a privileged actor must never be cached."""
+    def __init__(self) -> None:
+        self.calls = 0
+
+    def actor(self):
+        self.calls += 1
+        if self.calls == 1:
+            return OWNER
+        raise ConnectionError("backend gone")
+
+
+def raw_get(app, path: str, host_headers: list[bytes]) -> tuple[int, bytes]:
+    """Drive the ASGI app directly so that repeated Host headers are represented exactly."""
+    scope = {"type": "http", "asgi": {"version": "3.0"}, "http_version": "1.1", "method": "GET", "scheme": "http",
+             "path": path, "raw_path": path.encode(), "query_string": b"", "server": ("127.0.0.1", 8000),
+             "client": ("127.0.0.1", 50000), "root_path": "",
+             "headers": [(b"host", h) for h in host_headers]}
+    out: dict = {"status": None, "body": b""}
+
+    async def receive():
+        return {"type": "http.request", "body": b"", "more_body": False}
+
+    async def send(message):
+        if message["type"] == "http.response.start":
+            out["status"] = message["status"]
+        elif message["type"] == "http.response.body":
+            out["body"] += message.get("body", b"")
+
+    asyncio.run(app(scope, receive, send))
+    return out["status"], out["body"]
+
+
+class ProviderFailureTests(ApiCase):
+    def test_raising_provider_is_a_safe_503_on_every_route_without_side_effects(self) -> None:
+        self.seed()
+        provider = RaisingProvider()
+        client = self.app(auth_provider=provider)
+        before = self.state()
+        new_root = self.base / "never-registered-503"
+        new_root.mkdir()
+        body = {"name": "x", "description": "x", "root_path": str(new_root), "mode": "new"}
+        for method, url, payload in DeniedApiTests.ROUTES + (("post", "/api/projects", body),):
+            response = getattr(client, method)(url, **({"json": payload} if method == "post" else {}))
+            self.assertEqual(response.status_code, 503, (url, response.text))
+            self.assertEqual(response.json(), {"detail": "Actor context unavailable"})
+            for leaked in ("SECRET", "token", "/home/", "RuntimeError", "Traceback"):
+                self.assertNotIn(leaked, response.text)
+        self.assertGreater(provider.calls, 0)
+        self.assertEqual(self.state(), before)
+        self.assertEqual(list(new_root.iterdir()), [])
+
+    def test_health_does_not_consult_the_provider(self) -> None:
+        provider = RaisingProvider()
+        self.assertEqual(self.app(auth_provider=provider).get("/api/health").status_code, 200)
+        self.assertEqual(provider.calls, 0)
+
+    def test_no_privileged_actor_is_cached_between_requests(self) -> None:
+        self.seed()
+        provider = FlakyProvider()
+        client = self.app(auth_provider=provider)
+        self.assertEqual(client.get("/api/projects").status_code, 200)
+        before = self.state()
+        self.assertEqual(client.get("/api/projects").status_code, 503)
+        self.assertEqual(client.post("/api/projects/P0001/tasks", json=TASK).status_code, 503)
+        self.assertEqual(self.state(), before)
+
+    def test_malformed_provider_returns_stay_a_403_without_side_effects(self) -> None:
+        self.seed()
+        before = self.state()
+        for value in ("local-owner", None, {"actor_kind": "owner"}, 7, object()):
+            class Odd:
+                def actor(self, value=value):
+                    return value
+            client = self.app(auth_provider=Odd())
+            self.assertEqual(client.get("/api/projects").status_code, 403, value)
+            self.assertEqual(client.post("/api/projects/P0001/tasks", json=TASK).status_code, 403, value)
+        self.assertEqual(self.state(), before)
+
+
 class LocalRequestGuardTests(ApiCase):
+    VALID_HOSTS = ("localhost", "127.0.0.1", "[::1]", "LOCALHOST", "LocalHost:5173", "localhost:5173", "localhost:4173",
+                   "127.0.0.1:8000", "[::1]:8000", "[::1]:1", "localhost:65535")
+    MALFORMED_HOSTS = ("[::1]evil", "[::1]:8000evil", "[::1", "::1", "::1:8000", "[::1]:", "[::1]:abc", "localhost:", "localhost:abc",
+                       "localhost:65536", "localhost:0", "localhost:-1", "localhost:+80", "localhost:8000:evil",
+                       "user@localhost", "user:pw@localhost:8000", "localhost/path", "localhost?x", "localhost#f", "localhost,evil.example",
+                       "localhost evil", " localhost", "localhost ", "localhost\t", "localhost\r\n", "localhost.evil.example", "localhost.",
+                       "0.0.0.0", "*", "*.localhost", "[::]", "[::ffff:127.0.0.1]", "[127.0.0.1]", "[localhost]", "[::1]:8000:1",
+                       "127.0.0.1.evil.example", "evil.example", "")
+
+    def test_valid_authorities_work(self) -> None:
+        for host in self.VALID_HOSTS:
+            self.assertEqual(self.client.get("/api/health", headers={"Host": host}).status_code, 200, host)
+
+    def test_malformed_or_foreign_authorities_are_rejected_before_any_effect(self) -> None:
+        self.seed()
+        before = self.state()
+        for host in self.MALFORMED_HOSTS:
+            for method, url in (("get", "/api/health"), ("get", "/api/projects"), ("get", "/api/projects/P0001/tasks")):
+                response = getattr(self.client, method)(url, headers={"Host": host})
+                self.assertEqual(response.status_code, 403, (host, url))
+                self.assertEqual(response.json(), {"detail": "Host is not allowed"})
+            self.assertEqual(self.client.post("/api/projects/P0001/tasks", json=TASK, headers={"Host": host}).status_code, 403, host)
+            self.assertEqual(self.client.post("/api/projects/P0001/reconcile-workspace", headers={"Host": host}).status_code, 403, host)
+        self.assertEqual(self.state(), before)
+
+    def test_parser_rejects_what_a_client_cannot_send(self) -> None:
+        from rosc.app import host_name
+        for value in ("localhost:\u0661\u0662\u0663", "localhost\n", None, 7, b"localhost"):
+            self.assertIsNone(host_name(value), value)  # type: ignore[arg-type]
+        self.assertEqual(host_name("[::1]:8000"), "::1")
+        self.assertEqual(host_name("LocalHost:5173"), "localhost")
+
+    def test_missing_and_duplicate_host_headers_are_rejected(self) -> None:
+        app = create_app(self.data / "rosc.db", self.data / "workspace")
+        self.assertEqual(raw_get(app, "/api/health", [b"localhost"])[0], 200)
+        for hosts in ([], [b"localhost", b"localhost"], [b"localhost", b"evil.example"], [b"evil.example", b"localhost"]):
+            status, body = raw_get(app, "/api/health", hosts)
+            self.assertEqual(status, 403, hosts)
+            self.assertIn(b"Host is not allowed", body)
+
+    def test_explicit_overrides_are_validated_as_strictly_as_defaults(self) -> None:
+        extra = TestClient(create_app(self.data / "rosc.db", self.data / "workspace", extra_allowed_hosts=frozenset({"testserver"})))
+        self.assertEqual(extra.get("/api/health", headers={"Host": "testserver:8000"}).status_code, 200)
+        for host in ("testserver:", "testserver:x", "testserver evil", "testserver]", "testserver:99999"):
+            self.assertEqual(extra.get("/api/health", headers={"Host": host}).status_code, 403, host)
+        for bad in ("local host", "a:b", "[::1]", "host\n", "user@h", "h:80"):
+            with self.assertRaises(ValueError):
+                create_app(self.data / "rosc.db", self.data / "workspace", extra_allowed_hosts=frozenset({bad}))
+
     def test_hostile_host_is_rejected_for_every_method(self) -> None:
         self.seed()
         before = self.state()

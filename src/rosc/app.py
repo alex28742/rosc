@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import ipaddress
+import logging
 import re
 import uuid
 from datetime import datetime, timezone
@@ -18,6 +20,9 @@ from .models import (CURRENT_BINDING, Project, ProjectIdentityError, ProjectRoot
                      validate_project_identity)
 from .workspace import (MAX_MANIFEST_BYTES, READY, WorkspaceConflict, WorkspaceError, WorkspaceUncertain, inspect_project, inspect_task, provision_project,
                         provision_task, repair_project, repair_task)
+
+
+log = logging.getLogger(__name__)
 
 
 class ProjectInput(BaseModel):
@@ -180,18 +185,33 @@ DEFAULT_ALLOWED_ORIGINS = frozenset(f"http://{host}:{port}" for host in ("localh
 SAFE_METHODS = frozenset({"GET", "HEAD", "OPTIONS"})
 
 
-def host_name(header: str) -> str:
-    """Hostname of a Host header value without port; IPv6 literals keep their brackets stripped."""
-    value = header.strip().lower()
-    if value.startswith("["):
-        end = value.find("]")
-        return value[1:end] if end > 0 else ""
-    return value.rsplit(":", 1)[0] if value.count(":") == 1 else value
+HOST_AUTHORITY = re.compile(r"(?:(?P<v6>\[[0-9A-Fa-f:]+\])|(?P<name>[A-Za-z0-9](?:[A-Za-z0-9.-]*[A-Za-z0-9])?))(?::(?P<port>[0-9]{1,5}))?")
+HOST_NAME = re.compile(r"[A-Za-z0-9](?:[A-Za-z0-9.-]*[A-Za-z0-9])?")
+
+
+def host_name(header: str | None) -> str | None:
+    """Lower-cased host of ONE well-formed HTTP Host authority (``host[:port]``), or None when any part is invalid.
+
+    The whole value must match: a hostname or a bracketed IPv6 literal, optionally followed by a decimal port in
+    1..65535. Userinfo, paths, whitespace, suffix text, empty/odd ports and bare IPv6 are all invalid."""
+    if not isinstance(header, str):
+        return None
+    match = HOST_AUTHORITY.fullmatch(header)
+    if match is None:
+        return None
+    if match["port"] is not None and not 1 <= int(match["port"]) <= 65535:
+        return None
+    if match["v6"] is not None:
+        try:
+            return ipaddress.IPv6Address(match["v6"][1:-1]).compressed
+        except ValueError:
+            return None
+    return match["name"].lower()
 
 
 def checked_hosts(extra: frozenset[str]) -> frozenset[str]:
-    if any(not isinstance(h, str) or not h or "*" in h or "/" in h for h in extra):
-        raise ValueError("Test host overrides must be explicit host names, never wildcards")
+    if any(not isinstance(h, str) or HOST_NAME.fullmatch(h) is None for h in extra):
+        raise ValueError("Test host overrides must be explicit plain host names, never wildcards or authorities")
     return LOOPBACK_HOSTS | frozenset(h.lower() for h in extra)
 
 
@@ -225,7 +245,8 @@ def create_app(db_path: Path | None = None, workspace_root: Path | None = None, 
         a direct non-browser local caller sends no Origin and is accepted, and it still only ever receives the
         ``local_unverified`` Owner context. Forwarded/X-Forwarded-* headers are never consulted."""
         problem = None
-        if host_name(request.headers.get("host", "")) not in allowed_hosts:
+        hosts = request.headers.getlist("host")
+        if len(hosts) != 1 or host_name(hosts[0]) not in allowed_hosts:
             problem = "Host is not allowed"
         elif request.headers.get("sec-fetch-site", "").lower() == "cross-site":
             problem = "Cross-site requests are not allowed"
@@ -239,7 +260,12 @@ def create_app(db_path: Path | None = None, workspace_root: Path | None = None, 
 
     def authorize(action: str, **scope) -> None:
         """Application-owned actor resolution + policy check; runs before any lookup, SQL write or Workspace access."""
-        decision = authz.evaluate(policy, provider.actor(), action, authz.ResourceScope(**scope))
+        try:
+            actor = provider.actor()
+        except Exception as exc:  # fail closed: no policy allow, no Core read or mutation
+            log.warning("Authentication provider failed: %s", type(exc).__name__)
+            raise HTTPException(503, "Actor context unavailable") from None
+        decision = authz.evaluate(policy, actor, action, authz.ResourceScope(**scope))
         if not decision.allowed:
             raise HTTPException(403, "Not authorized for this operation")
 
