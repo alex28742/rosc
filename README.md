@@ -45,28 +45,34 @@ npm run dev
 
 Open the Vite URL on localhost. API requests are proxied to `127.0.0.1:8000`; set `ROSC_API_TARGET` (localhost hosts only) to use another backend port, e.g. `ROSC_API_TARGET=http://127.0.0.1:8010 npm run dev`. `frontend/package.json` declares `engines.node >= 24`; Vite 7 refuses to start its dev server on Node 18. Keep `.local-data/` and `.venv/` out of Git. To run backend checks: `python -m unittest discover -s tests -v`.
 
-### Local development launcher (`make local-up` / `local-down` / `local-status` / `local-logs`)
+### Local development launcher (`local-app`)
 
-A small Linux-only convenience launcher (`scripts/local_app.py`, Python standard library + Makefile) starts the ROSC **developer web pair**: uvicorn on `127.0.0.1:8010` (with `--reload` limited to `src/`) and the Vite dev server on `127.0.0.1:5173` (`--strictPort`) proxying `/api` to the backend. It starts no Worker or agent and is not a persistent service. macOS/Windows are unsupported (it relies on `/proc` and process groups). The manual commands above remain the fallback.
+A small Linux-only convenience CLI (`scripts/local_app.py`, Python standard library) starts the ROSC **developer web pair**: uvicorn on `127.0.0.1:8010` (with `--reload` limited to `src/`) **and** the Vite dev server on `127.0.0.1:5173` (`--strictPort`) proxying `/api` to the backend. It starts no Worker, agent or Run and is not a persistent service. macOS/Windows are unsupported (it relies on `/proc` and process groups). The manual commands above remain the fallback.
 
-Prerequisites (never installed or migrated automatically): Python 3.11+ with `.venv` containing `pip install -e '.[dev]'`, Node.js 24+, npm, `cd frontend && npm install`, and an **existing** database at the Alembic head.
+Prerequisites (never installed or migrated automatically): Python 3.11+ with `.venv` containing `pip install -e '.[dev]'` (this also installs the `local-app` command), Node.js 24+, npm, `cd frontend && npm install`, and an **existing** database at the Alembic head. After `. .venv/bin/activate`, `local-app` works from any directory; without activating, use `.venv/bin/local-app`, `make local-*` or `python scripts/local_app.py ...`.
+
+```bash
+local-app --help              # grouped command overview (no DB or running servers needed)
+local-app up                  # backend 8010 + frontend 5173; returns when both and the proxied /api/health are ready
+local-app up -p 8050          # same, backend on 8050 (aliases: --port, --backend-port, env ROSC_BACKEND_PORT)
+local-app status              # RUNNING | STOPPED | DEGRADED | UNKNOWN for the RECORDED pair (read-only)
+local-app logs backend -n 100 -f
+local-app down                # stop only processes this launcher started and can still prove are its own
+local-app check backend|launcher|sync|read-path   # run the existing test suites, exit code propagated
+local-app help up             # same as: local-app up --help
+```
+
+Make shortcuts remain: `make local-up`, `local-down`, `local-status`, `local-logs`, `local-app-check`; pass options with `ARGS=`, e.g. `make local-up ARGS="-p 8050"`.
 
 The launcher uses the same data directory rule as the backend: `ROSC_DATA_DIR`, else `~/.local/share/rosc` (the database is `<dir>/rosc.db`). It prints the resolved path before starting and never silently substitutes another. If the database is missing or not at head it refuses and prints the command to run yourself, e.g. `ROSC_DATA_DIR=<dir> .venv/bin/alembic upgrade head` (back up first). It only reads the schema version read-only.
 
-```bash
-make local-up        # checks prerequisites + DB, starts both, returns after backend, Vite and proxied /api/health are ready
-make local-status    # RUNNING | STOPPED | DEGRADED | UNKNOWN, pids, ports, data dir
-make local-logs      # tail .local-dev/{backend,frontend}.log;  make local-logs ARGS="backend -n 200 -f"
-make local-down      # stop only the processes this launcher started and can still prove are its own
-```
+Exit codes: `0` success/RUNNING, `1` failure, `2` usage, `3` STOPPED, `4` DEGRADED, `5` UNKNOWN. `up` is idempotent: a healthy managed pair is reported, not restarted, and a plain `local-app up` accepts a pair that was started with `-p 8050`. An explicit different port or data dir while a pair is running is refused without changing anything (run `down` first). `status` and `down` always use the ports and data dir recorded when the pair was started, not the current shell's defaults.
 
-Exit codes: `0` success/RUNNING, `1` failure, `2` usage, `3` STOPPED, `4` DEGRADED, `5` UNKNOWN. `local-up` is idempotent (a healthy managed pair is not restarted).
-
-Ports: backend default `8010` (override `ROSC_BACKEND_PORT=8011 make local-up` or `make local-up ARGS="--backend-port 8011"`; `8000` is deliberately refused). The frontend port can only be `5173` or `4173` because the backend Origin allowlist accepts only those; the launcher does not weaken Host/Origin policy. If a required port is held by a process the launcher does not own, it fails without killing or reusing it.
+Ports: the backend port is flexible (any free port 1024..65535, including 8000 when genuinely free). The frontend port can only be `5173` or `4173` (`--frontend-port`) because the backend Origin allowlist accepts only those; the launcher does not weaken Host/Origin policy. If a required port is held by any other process, `up` fails naming the port and a retry command; it never kills, adopts or reuses the holder and never starts a half pair.
 
 State, pid identities and logs live in the git-ignored `.local-dev/`. Stopping signals a process group only while the leader's recorded identity (pid, `/proc` start time, command line, working directory, own process group) still matches; the identity check narrows but cannot fully eliminate OS races.
 
-Recovering from UNKNOWN/stale state: `make local-status` shows which service is unproven. If a recorded process is gone, `make local-down` clears the stale record. If a process group is alive but its leader cannot be proven (for example the leader exited and descendants remain), the launcher leaves it alone: inspect it with `ps -eo pid,pgid,cmd | grep <pgid>`, stop what is verifiably yours manually, then run `make local-down` (or delete `.local-dev/state.json` once nothing owned remains). Launcher tests: `make local-app-check` (includes a live smoke against a disposable temporary database).
+Recovering from UNKNOWN/stale state: `local-app status` shows which service is unproven. If a recorded process is gone, `local-app down` clears the stale record. If a process group is alive but its leader cannot be proven (for example the leader exited and descendants remain), the launcher leaves it alone: inspect it with `ps -eo pid,pgid,cmd | grep <pgid>`, stop what is verifiably yours manually, then run `local-app down` (or delete `.local-dev/state.json` once nothing owned remains). `local-app check launcher` includes a live smoke against a disposable temporary database.
 
 Workspace manifests (`project.yaml`, `task.yaml`) are projections of SQLite. Ordinary reconciliation only rebuilds a *missing* manifest and never replaces an existing file. A corrupt or drifted manifest needs the separate, Owner-confirmed repair action, which first copies the exact old bytes into `workspace/quarantine/`; a manifest that belongs to another record is never overwritten and needs manual resolution.
 

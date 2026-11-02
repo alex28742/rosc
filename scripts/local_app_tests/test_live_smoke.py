@@ -41,14 +41,15 @@ class LiveSmoke(unittest.TestCase):
             self.bport = s.getsockname()[1]
         self.data = Path(self.tmp.name) / "data"
         self.data.mkdir()
-        self.env = {**os.environ, "ROSC_DATA_DIR": str(self.data), "ROSC_BACKEND_PORT": str(self.bport)}
+        self.env = {**os.environ, "ROSC_DATA_DIR": str(self.data)}
+        self.plain_env = {k: v for k, v in os.environ.items() if not k.startswith("ROSC_")}  # fresh shell, defaults
         subprocess.run([str(la.ROOT / ".venv/bin/alembic"), "upgrade", "head"], env=self.env, cwd=la.ROOT, check=True,
                        capture_output=True)  # test-only fixture DB in the temp dir
         self.addCleanup(lambda: run(self.env, "down"))
 
     def test_full_cycle(self):
         before_8000 = listening(8000)
-        up = run(self.env, "up")
+        up = run(self.env, "up", "-p", str(self.bport))
         self.assertEqual(up.returncode, 0, up.stdout + up.stderr)
         self.assertIn(str(self.data), up.stdout)
         self.assertIn("http://127.0.0.1:5173", up.stdout)
@@ -63,12 +64,21 @@ class LiveSmoke(unittest.TestCase):
         self.assertIn("already up", again.stdout)
         self.assertEqual(pids, {k: v["pid"] for k, v in la.load_state(la.Config())["services"].items()})
 
-        status = run(self.env, "status")
+        status = run(self.env, "status")  # P012.1: also from a FRESH default environment (recorded ports win)
         self.assertEqual(status.returncode, 0, status.stdout)
         self.assertTrue(status.stdout.startswith("RUNNING"))
+        fresh = run(self.plain_env, "status")
+        self.assertEqual(fresh.returncode, 0, fresh.stdout + fresh.stderr)
+        self.assertIn(f"127.0.0.1:{self.bport}", fresh.stdout)
+        plain_up = run(self.plain_env, "up")  # implicit defaults must not conflict with the running pair
+        self.assertEqual(plain_up.returncode, 0, plain_up.stdout + plain_up.stderr)
+        self.assertIn("already up", plain_up.stdout)
+        clash = run(self.plain_env, "up", "-p", str(self.bport + 1 if self.bport < 65000 else self.bport - 1))
+        self.assertEqual(clash.returncode, 1)
+        self.assertEqual(run(self.plain_env, "status").returncode, 0)
 
         # foreign listener on the (now free after down) frontend port must be refused and survive
-        down = run(self.env, "down")
+        down = run(self.plain_env, "down")  # default invocation stops the recorded pair
         self.assertEqual(down.returncode, 0, down.stdout + down.stderr)
         for group in groups.values():
             self.assertEqual(la.group_members(group), [], "owned descendants remain")
@@ -81,7 +91,7 @@ class LiveSmoke(unittest.TestCase):
             deadline = time.time() + 5
             while not listening(5173) and time.time() < deadline:
                 time.sleep(0.1)
-            refused = run(self.env, "up")
+            refused = run(self.env, "up", "-p", str(self.bport))
             self.assertEqual(refused.returncode, la.EXIT_FAIL, refused.stdout)
             self.assertIn("not own", refused.stderr)
             self.assertIsNone(foreign.poll(), "foreign listener must survive")

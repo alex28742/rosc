@@ -29,7 +29,7 @@ import sys
 import time
 import urllib.error
 import urllib.request
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -38,7 +38,6 @@ DEFAULT_BACKEND_PORT = 8010
 DEFAULT_FRONTEND_PORT = 5173
 # Frontend ports the backend Origin allowlist (src/rosc/app.py LOOPBACK_PORTS) accepts. Do not widen here.
 ALLOWED_FRONTEND_PORTS = (5173, 4173)
-AVOIDED_BACKEND_PORTS = (8000,)  # a foreign uvicorn has occupied it before; never touch it
 MIN_NODE_MAJOR = 24
 
 EXIT_OK, EXIT_FAIL, EXIT_USAGE = 0, 1, 2
@@ -72,6 +71,10 @@ class Config:
     frontend_port: int = DEFAULT_FRONTEND_PORT
     ready_timeout: float = 45.0
     stop_timeout: float = 10.0
+    # Which values the user asked for explicitly (flag or env). Implicit defaults never conflict with a running pair.
+    backend_explicit: bool = False
+    frontend_explicit: bool = False
+    data_dir_explicit: bool = False
 
     @property
     def state_dir(self) -> Path:
@@ -110,17 +113,50 @@ class Config:
 
 
 def validate_ports(backend: int, frontend: int) -> None:
+    """The backend port is free-form (unprivileged range); the frontend port is restricted by the Origin allowlist."""
     if not 1024 <= backend <= 65535:
-        raise LauncherError(f"Backend port {backend} is outside 1024..65535", EXIT_USAGE)
-    if backend in AVOIDED_BACKEND_PORTS:
-        raise LauncherError(f"Backend port {backend} is deliberately avoided (a foreign uvicorn may own it). "
-                            f"Use the default {DEFAULT_BACKEND_PORT} or another loopback port.", EXIT_USAGE)
+        raise LauncherError(f"Backend port {backend} is outside the allowed range 1024..65535. "
+                            f"Example: local-app up -p {DEFAULT_BACKEND_PORT}", EXIT_USAGE)
     if frontend not in ALLOWED_FRONTEND_PORTS:
         raise LauncherError(f"Frontend port {frontend} is not allowed: the backend Origin allowlist only accepts "
                             f"{' or '.join(map(str, ALLOWED_FRONTEND_PORTS))}. The launcher will not weaken that policy.",
                             EXIT_USAGE)
     if backend == frontend:
-        raise LauncherError("Backend and frontend ports must differ", EXIT_USAGE)
+        raise LauncherError(f"Backend port {backend} collides with the frontend port {frontend}. "
+                            f"Choose another backend port, e.g. local-app up -p {DEFAULT_BACKEND_PORT}", EXIT_USAGE)
+
+
+def parse_port(value: str, what: str = "port") -> int:
+    try:
+        port = int(value)
+    except (TypeError, ValueError):
+        raise LauncherError(f"Invalid {what} {value!r}: expected an integer 1024..65535", EXIT_USAGE) from None
+    if not 1024 <= port <= 65535:
+        raise LauncherError(f"Invalid {what} {port}: expected 1024..65535", EXIT_USAGE)
+    return port
+
+
+def effective_config(cfg: Config, state: dict) -> Config:
+    """The managed pair's RECORDED ports/data dir win over the invoking shell's defaults (status/down/idempotent up)."""
+    rec = state.get("config") if isinstance(state, dict) else None
+    if not isinstance(rec, dict):
+        return cfg
+    b, f, d = rec.get("backend_port"), rec.get("frontend_port"), rec.get("data_dir")
+    if not (isinstance(b, int) and isinstance(f, int) and isinstance(d, str)):
+        return cfg
+    return replace(cfg, backend_port=b, frontend_port=f, data_dir=Path(d))
+
+
+def occupied_message(label: str, port: int) -> str:
+    if label == "backend":
+        retry = f"local-app up -p {'8051' if port == 8050 else '8050'}   (any free port 1024..65535)"
+    else:
+        other = [p for p in ALLOWED_FRONTEND_PORTS if p != port]
+        allowed = ", ".join(map(str, ALLOWED_FRONTEND_PORTS))
+        retry = (f"local-app up --frontend-port {other[0]}   (allowed frontend ports: {allowed})" if other
+                 else f"free port {port} (the only allowed frontend port: {allowed})")
+    return (f"The {label} port {port} is already in use by a process this launcher does not own. It was not touched "
+            f"and nothing was started.\n  Retry with: {retry}")
 
 
 def service_commands(cfg: Config) -> dict[str, dict]:
@@ -490,31 +526,37 @@ def evaluate(cfg: Config, state: dict) -> tuple[str, dict[str, dict]]:
 
 def cmd_up(cfg: Config) -> int:
     validate_ports(cfg.backend_port, cfg.frontend_port)
-    print("\n".join(describe(cfg)))
     with state_lock(cfg):
         state = load_state(cfg)
-        overall, _ = evaluate(cfg, state)
+        running_cfg = effective_config(cfg, state)
+        overall, _ = evaluate(running_cfg, state)
         if overall == RUNNING:
-            recorded = state.get("config", {})
-            if (recorded.get("backend_port"), recorded.get("frontend_port"), recorded.get("data_dir")) != (
-                    cfg.backend_port, cfg.frontend_port, str(cfg.data_dir)):
-                raise LauncherError("A managed pair is already running with different ports/data dir "
-                                    f"({recorded}). Run `make local-down` first.")
-            print(f"RUNNING (already up, not restarted)\nopen     : {cfg.url}")
+            conflicts = []
+            if cfg.backend_explicit and cfg.backend_port != running_cfg.backend_port:
+                conflicts.append(f"backend port {cfg.backend_port} (running: {running_cfg.backend_port})")
+            if cfg.frontend_explicit and cfg.frontend_port != running_cfg.frontend_port:
+                conflicts.append(f"frontend port {cfg.frontend_port} (running: {running_cfg.frontend_port})")
+            if cfg.data_dir_explicit and cfg.data_dir != running_cfg.data_dir:
+                conflicts.append(f"data dir {cfg.data_dir} (running: {running_cfg.data_dir})")
+            if conflicts:
+                raise LauncherError("A managed pair is already running with a different configuration: "
+                                    + "; ".join(conflicts) + ". Nothing was changed. Run `local-app down` first.")
+            print("\n".join(describe(running_cfg)))
+            print(f"RUNNING (already up, not restarted)\nbackend  : {running_cfg.backend_url}\n"
+                  f"frontend : {running_cfg.url}\nopen     : {running_cfg.url}")
             return EXIT_OK
+        print("\n".join(describe(cfg)))
         if overall == UNKNOWN:
             raise LauncherError("State is UNKNOWN: a recorded process group is alive but its identity cannot be "
                                 "proven. Not touching it. See README 'Recovering from UNKNOWN'.", EXIT_UNKNOWN)
         if overall == DEGRADED:
             raise LauncherError("A managed service is running but the pair is not healthy (DEGRADED). "
-                                "Run `make local-down`, then `make local-up`.", EXIT_DEGRADED)
+                                "Run `local-app down`, then `local-app up`.", EXIT_DEGRADED)
         clear_state(cfg)  # STOPPED: any record was stale (nothing alive)
         check_prerequisites(cfg)
         for label, port in (("backend", cfg.backend_port), ("frontend", cfg.frontend_port)):
             if port_in_use(port):
-                raise LauncherError(f"{label} port {port} is already in use by a process this launcher does not own. "
-                                    f"It was not touched. Free it or choose another "
-                                    f"{'--backend-port/ROSC_BACKEND_PORT' if label == 'backend' else 'allowed frontend port'}.")
+                raise LauncherError(occupied_message(label, port))
         commands = service_commands(cfg)
         state = {"config": {"backend_port": cfg.backend_port, "frontend_port": cfg.frontend_port,
                             "data_dir": str(cfg.data_dir)}, "services": {}}
@@ -558,22 +600,21 @@ def cmd_down(cfg: Config) -> int:
 
 
 def cmd_status(cfg: Config) -> int:
+    """Read-only: probes the RECORDED pair (not this shell's defaults) and writes nothing."""
     state = load_state(cfg)
-    overall, detail = evaluate(cfg, state)
+    eff = effective_config(cfg, state)
+    overall, detail = evaluate(eff, state)
     print(overall)
-    recorded = state.get("config", {})
-    data_dir = recorded.get("data_dir", str(cfg.data_dir))
-    print(f"data dir : {data_dir}\ndatabase : {Path(data_dir) / 'rosc.db'}")
-    ports = {"backend": recorded.get("backend_port", cfg.backend_port),
-             "frontend": recorded.get("frontend_port", cfg.frontend_port)}
+    print(f"data dir : {eff.data_dir}\ndatabase : {eff.db_path}")
+    ports = {"backend": eff.backend_port, "frontend": eff.frontend_port}
     for name, info in detail.items():
         extra = ""
-        if info["identity"] == "absent":
-            extra = " (port in use by another process)" if port_in_use(ports[name]) else ""
+        if info["identity"] == "absent" and port_in_use(ports[name]):
+            extra = " (port held by another process)"
         pid = f" pid {info['rec']['pid']}" if info["rec"] else ""
         print(f"{name:9}: {LOOPBACK}:{ports[name]} {info['identity']}{pid} ready={info['ready']}{extra}")
     if overall == RUNNING:
-        print(f"open     : http://{LOOPBACK}:{ports['frontend']}")
+        print(f"open     : {eff.url}")
     return STATUS_EXIT[overall]
 
 
@@ -604,37 +645,172 @@ def cmd_logs(cfg: Config, which: str, lines: int, follow: bool) -> int:
     return EXIT_OK
 
 
-def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(prog="local_app", description="ROSC local developer app launcher (Linux).")
-    sub = parser.add_subparsers(dest="command", required=True)
-    for name in ("up", "down", "status", "logs"):
-        p = sub.add_parser(name)
-        if name in ("up", "status"):
-            p.add_argument("--backend-port", type=int)
-            p.add_argument("--frontend-port", type=int)
-        if name == "logs":
-            p.add_argument("service", nargs="?", choices=["backend", "frontend", "all"], default="all")
-            p.add_argument("-n", "--lines", type=int, default=50)
-            p.add_argument("-f", "--follow", action="store_true")
-    args = parser.parse_args(argv)
+# ------------------------------------------------------------------------------------ command registry / CLI
+
+PROG = "local-app"
+GROUPS = ("APPLICATION", "DIAGNOSTICS", "DEVELOPMENT CHECKS", "GENERAL")
+
+
+@dataclass(frozen=True)
+class Check:
+    summary: str
+    unittest_args: tuple[str, ...]
+
+
+# `local-app check <name>` runs the already established suites; same commands as the Makefile targets.
+CHECKS: dict[str, Check] = {
+    "backend": Check("Backend unit tests (tests/)", ("-s", "tests", "-v")),
+    "launcher": Check("This launcher's tests, incl. a live smoke on a temp DB",
+                      ("-s", "scripts/local_app_tests", "-t", ".", "-p", "test_*.py")),
+    "sync": Check("Managed prompt/report transport tests (offline)",
+                  ("-s", "scripts/agent_sync/tests", "-t", ".", "-p", "test_*.py")),
+    "read-path": Check("Documentation read-path telemetry tests",
+                       ("-s", "scripts/read_path/tests", "-t", ".", "-p", "test_*.py")),
+}
+
+
+@dataclass(frozen=True)
+class Command:
+    name: str
+    group: str
+    summary: str
+    configure: "callable"   # (argparse.ArgumentParser) -> None
+    run: "callable"         # (argparse.Namespace, Config) -> int
+
+
+def _configure_up(p: argparse.ArgumentParser) -> None:
+    p.add_argument("-p", "--port", "--backend-port", dest="backend_port", metavar="PORT",
+                   help=f"backend port on 127.0.0.1 (default {DEFAULT_BACKEND_PORT}, env ROSC_BACKEND_PORT; any free "
+                        f"port 1024..65535)")
+    p.add_argument("--frontend-port", metavar="PORT",
+                   help=f"Vite port (default {DEFAULT_FRONTEND_PORT}; only {' or '.join(map(str, ALLOWED_FRONTEND_PORTS))} "
+                        f"are accepted by the backend Origin allowlist)")
+    p.epilog = ("Starts BOTH the backend and the Vite frontend. Uses the existing database in ROSC_DATA_DIR "
+                "(default ~/.local/share/rosc); never creates or migrates it.")
+
+
+def _configure_logs(p: argparse.ArgumentParser) -> None:
+    p.add_argument("service", nargs="?", choices=["backend", "frontend", "all"], default="all")
+    p.add_argument("-n", "--lines", type=int, default=50, help="lines to show (default 50)")
+    p.add_argument("-f", "--follow", action="store_true", help="keep following new output (Ctrl-C to stop)")
+
+
+def _configure_help(p: argparse.ArgumentParser) -> None:
+    p.add_argument("topic", nargs="*", help="command (and sub-command), e.g. `up` or `check backend`")
+
+
+def run_check(name: str, cfg: Config) -> int:
+    check = CHECKS[name]
+    python = str(cfg.python) if cfg.python.exists() else sys.executable
+    argv = [python, "-m", "unittest", "discover", *check.unittest_args]
+    print(f"check {name}: {check.summary}\n$ {' '.join(argv)}", flush=True)
+    return subprocess.call(argv, cwd=cfg.root)
+
+
+COMMANDS: tuple[Command, ...] = (
+    Command("up", "APPLICATION", "Start backend + frontend dev servers (use -p PORT for the backend port)",
+            _configure_up, lambda a, cfg: cmd_up(cfg)),
+    Command("down", "APPLICATION", "Stop the managed pair (only provably owned processes)",
+            lambda p: None, lambda a, cfg: cmd_down(cfg)),
+    Command("status", "DIAGNOSTICS", "Show RUNNING/STOPPED/DEGRADED/UNKNOWN, ports, data dir (read-only)",
+            lambda p: None, lambda a, cfg: cmd_status(cfg)),
+    Command("logs", "DIAGNOSTICS", "Show persisted backend/frontend logs",
+            _configure_logs, lambda a, cfg: cmd_logs(cfg, a.service, a.lines, a.follow)),
+    Command("check", "DEVELOPMENT CHECKS", "Run an existing test suite (see the list above)",
+            lambda p: None, None),  # sub-commands come from CHECKS
+    Command("help", "GENERAL", "Show help for a command: `help up`, `help check backend`",
+            _configure_help, None),
+)
+
+
+def package_version() -> str:
+    try:
+        text = (ROOT / "pyproject.toml").read_text()
+        match = re.search(r'^version\s*=\s*"([^"]+)"', text, re.M)
+        if match:
+            return match.group(1)
+    except OSError:
+        pass
+    try:
+        from importlib.metadata import version
+        return version("rosc")
+    except Exception:  # noqa: BLE001
+        return "unknown"
+
+
+def grouped_help() -> str:
+    lines = []
+    for group in GROUPS:
+        lines.append(f"{group}")
+        for cmd in COMMANDS:
+            if cmd.group != group:
+                continue
+            if cmd.name == "check":
+                lines.extend(f"  check {n:<10}{c.summary}" for n, c in CHECKS.items())
+            elif cmd.name != "help":
+                lines.append(f"  {cmd.name:<16}{cmd.summary}")
+        if group == "GENERAL":
+            lines.append(f"  {'help [command]':<16}Show help for a command: `help up`, `help check backend`")
+            lines.append(f"  {'--help':<16}This overview")
+            lines.append(f"  {'--version':<16}Print the version")
+        lines.append("")
+    return "\n".join(lines).rstrip()
+
+
+class _Parser(argparse.ArgumentParser):
+    def error(self, message):  # usage errors exit 2 with a hint instead of a bare argparse dump
+        self.print_usage(sys.stderr)
+        sys.stderr.write(f"{self.prog}: error: {message}\nTry `{PROG} --help`.\n")
+        raise SystemExit(EXIT_USAGE)
+
+
+def build_parser() -> argparse.ArgumentParser:
+    parser = _Parser(prog=PROG, usage=f"{PROG} [--help] [--version] <command> [options]",
+                     description="ROSC local developer app launcher (Linux). Manages only the local dev web pair; "
+                                 "never starts agents or runs.",
+                     epilog=grouped_help(), formatter_class=argparse.RawDescriptionHelpFormatter)
+    parser.add_argument("--version", action="version", version=f"{PROG} {package_version()}")
+    sub = parser.add_subparsers(dest="command", metavar="<command>", parser_class=_Parser)
+    for cmd in COMMANDS:
+        p = sub.add_parser(cmd.name, description=cmd.summary, prog=f"{PROG} {cmd.name}")
+        cmd.configure(p)
+        if cmd.name == "check":
+            csub = p.add_subparsers(dest="check", metavar="<suite>", required=True, parser_class=_Parser)
+            for name, check in CHECKS.items():
+                csub.add_parser(name, description=check.summary, prog=f"{PROG} check {name}")
+    return parser
+
+
+def build_config(args: argparse.Namespace, environ: dict[str, str], root: Path) -> Config:
+    backend_raw = getattr(args, "backend_port", None) or environ.get("ROSC_BACKEND_PORT")
+    frontend_raw = getattr(args, "frontend_port", None) or environ.get("ROSC_FRONTEND_PORT")
+    return Config(
+        root=root, data_dir=resolve_data_dir(environ),
+        backend_port=parse_port(backend_raw, "backend port") if backend_raw else DEFAULT_BACKEND_PORT,
+        frontend_port=parse_port(frontend_raw, "frontend port") if frontend_raw else DEFAULT_FRONTEND_PORT,
+        backend_explicit=bool(backend_raw), frontend_explicit=bool(frontend_raw),
+        data_dir_explicit="ROSC_DATA_DIR" in environ)
+
+
+def main(argv: list[str] | None = None, *, root: Path = ROOT, environ: dict[str, str] | None = None) -> int:
+    env = dict(os.environ if environ is None else environ)
+    parser = build_parser()
+    args = parser.parse_args(argv)  # --help/--version exit here, before any filesystem or process activity
+    if args.command is None:
+        parser.print_help()
+        return EXIT_USAGE
+    if args.command == "help":
+        parser.parse_args([*args.topic, "--help"])  # prints that command's help and exits 0
+        return EXIT_OK
     if not sys.platform.startswith("linux"):
         print("Unsupported platform: the launcher relies on Linux /proc and process groups.", file=sys.stderr)
         return EXIT_FAIL
     try:
-        backend = getattr(args, "backend_port", None) or int(os.environ.get("ROSC_BACKEND_PORT", DEFAULT_BACKEND_PORT))
-        frontend = getattr(args, "frontend_port", None) or int(os.environ.get("ROSC_FRONTEND_PORT", DEFAULT_FRONTEND_PORT))
-    except ValueError:
-        print("ROSC_BACKEND_PORT / ROSC_FRONTEND_PORT must be integers", file=sys.stderr)
-        return EXIT_USAGE
-    cfg = Config(backend_port=backend, frontend_port=frontend)
-    try:
-        if args.command == "up":
-            return cmd_up(cfg)
-        if args.command == "down":
-            return cmd_down(cfg)
-        if args.command == "status":
-            return cmd_status(cfg)
-        return cmd_logs(cfg, args.service, args.lines, args.follow)
+        cfg = build_config(args, env, root)
+        if args.command == "check":
+            return run_check(args.check, cfg)
+        command = next(c for c in COMMANDS if c.name == args.command)
+        return command.run(args, cfg)
     except LauncherError as exc:
         print(f"ERROR: {exc}", file=sys.stderr)
         return exc.code

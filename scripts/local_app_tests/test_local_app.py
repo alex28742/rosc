@@ -60,7 +60,8 @@ class Base(unittest.TestCase):
                                  "cwd": str(self.root), "env": {}}}
         patches = [mock.patch.object(la, "service_commands", commands),
                    mock.patch.object(la, "check_prerequisites", lambda cfg: None),
-                   mock.patch.object(la, "ALLOWED_FRONTEND_PORTS", (self.cfg.frontend_port,))]
+                   mock.patch.object(la, "ALLOWED_FRONTEND_PORTS", (self.cfg.frontend_port,)),
+                   mock.patch.object(la, "DEFAULT_FRONTEND_PORT", self.cfg.frontend_port)]
         for p in patches:
             p.start()
             self.addCleanup(p.stop)
@@ -75,7 +76,8 @@ class ConfigTests(Base):
     def test_ports(self):
         la.validate_ports(8010, 5173)
         la.validate_ports(8011, 4173)
-        for backend, frontend in ((8000, 5173), (8010, 3000), (8010, 8010), (80, 5173), (70000, 5173)):
+        la.validate_ports(8000, 5173)  # 8000 is allowed when genuinely free; occupancy is checked at bind time
+        for backend, frontend in ((8010, 3000), (8010, 8010), (80, 5173), (70000, 5173)):
             with self.assertRaises(la.LauncherError, msg=(backend, frontend)):
                 la.validate_ports(backend, frontend)
 
