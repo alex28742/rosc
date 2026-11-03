@@ -1,6 +1,6 @@
 import { cleanup, fireEvent, render, screen, within } from '@testing-library/react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { project, task } from '../../app/testing';
+import { architectStatus, project, task } from '../../app/testing';
 import { DashboardView } from './views/DashboardView';
 import { ProjectView } from './views/ProjectView';
 import { TaskView } from './views/TaskView';
@@ -17,6 +17,9 @@ const workspace = { busy: false, onReconcile: vi.fn(), onRepair: vi.fn() };
 const conversation = () => ({
   state: { status: 'ready' as const, conversationId: null, messages: [], hasMore: false, nextBefore: null,
     error: '', sending: false, olderLoading: false },
+  architect: { status: 'ready' as const, info: architectStatus(), busy: false, error: '' },
+  onActivate: vi.fn(async () => null), onDeactivate: vi.fn(async () => null),
+  onReconcile: vi.fn(async () => null), onRetryDelivery: vi.fn(async () => null),
   onReload: vi.fn(), onLoadOlder: vi.fn(), onSend: vi.fn(async () => null),
 });
 const P1 = project('P0001', { name: 'ROSC Platform', description: 'Ядро платформы', root_path: '/tmp/rosc', docs_entrypoint: 'README.md' });

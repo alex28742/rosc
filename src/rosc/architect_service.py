@@ -1,0 +1,503 @@
+"""Project Architect activation, liveness and durable first-reply delivery (P015 / M3-B).
+
+Contract: ``Owner action -> AuthorizationPolicy -> explicit activation -> verified runtime session -> new Owner message
+-> bounded request -> reply persisted as Architect participant in the canonical Project Conversation``.
+
+Trust limits:
+
+* Activation is a distinct Owner action (``architect.activate``). Opening a Project, assigning an Agent or saving a
+  message never starts a process. A registry ``unverified`` readiness or a database row is never liveness: ``ready`` is
+  reported only after the runtime has just been probed.
+* The Architect gets no ROSC authority and no tools. It cannot reach ROSC Core; the only write that carries its words
+  is ``_commit_reply``, an internal operation that re-verifies project, assignment, agent, live session and delivery
+  inside one write transaction and authorizes as the Owner who activated the session. No request body can name a
+  sender, participant, role or session.
+* A provider call never holds a SQLite write transaction. One turn per Project runs at a time. An ambiguous attempt
+  becomes ``unknown`` and is never silently re-sent, after a timeout or after a restart.
+"""
+from __future__ import annotations
+
+import logging
+import threading
+import uuid
+from concurrent.futures import Future, ThreadPoolExecutor
+from datetime import datetime, timezone
+
+from sqlalchemy import func, select
+from sqlalchemy.exc import IntegrityError, OperationalError
+from sqlalchemy.orm import Session, sessionmaker
+
+from .architect_runtime import (ADAPTER_NAME, ArchitectRuntime, RuntimeAmbiguous, RuntimeHandle, RuntimeProblem)
+from .authorization import (ARCHITECT_ACTIVATE, ARCHITECT_DEACTIVATE, ARCHITECT_REPLY_COMMIT, ARCHITECT_STATUS,
+                            CONVERSATION_DELIVERY_RECONCILE, ActorContext, AuthorizationPolicy, ResourceScope,
+                            evaluate)
+from .conversation import (SAFE_RETRY_CODES, ConversationConflict, ConversationDenied, ConversationNotFound, ConversationStoreError, InvalidConversationInput, UnsafeProjectIdentity, _body, _utc_iso, delivery_state_view)
+from .models import (ASSIGNMENT_ACTIVE, ASSURANCE_ADAPTER_VERIFIED, CONVERSATION_KIND_PROJECT, DELIVERY_DELIVERED,
+                     DELIVERY_FAILED, DELIVERY_PENDING, DELIVERY_UNKNOWN, PARTICIPANT_ARCHITECT, PARTICIPANT_OWNER,
+                     ROLE_ARCHITECT, SESSION_ERROR, SESSION_READY, SESSION_STARTING, SESSION_STOPPED, AgentDefinition,
+                     ArchitectSession, Conversation, ConversationDelivery, ConversationMessage,
+                     ConversationParticipant, Project, ProjectIdentityError, RoleAssignment, validate_project_identity)
+
+log = logging.getLogger(__name__)
+
+STATE_NOT_CONFIGURED = "not_configured"
+REPLY_TIMEOUT = 120.0
+CONTEXT_MESSAGES = 10
+CONTEXT_MESSAGE_CHARS = 1500
+CONTEXT_TOTAL_CHARS = 10000
+# Failure codes after which nothing can have reached the provider, so an explicit retry cannot duplicate a turn.
+CATEGORY_IDENTITY = "project_identity"
+CATEGORY_RECENT = "recent_messages"
+
+
+class ArchitectDenied(ConversationDenied):
+    """Reuses the conversation boundary's HTTP mapping (403)."""
+
+
+class ArchitectNotFound(ConversationNotFound):
+    """404; the same answer for an unknown Project or another Project's message."""
+
+
+class ArchitectConflict(ConversationConflict):
+    """409."""
+
+
+def _now() -> datetime:
+    return datetime.now(timezone.utc)
+
+
+def runtime_message_id(message_id: str) -> str:
+    """Deterministic provider-side correlation id derived from the canonical Owner message id."""
+    return "msg_rosc" + message_id.replace("-", "")
+
+
+delivery_view = delivery_state_view
+
+
+class ArchitectService:
+    def __init__(self, session_factory: sessionmaker[Session], policy: AuthorizationPolicy,
+                 runtime: ArchitectRuntime, *, reply_timeout: float = REPLY_TIMEOUT, workers: int = 2) -> None:
+        self._sessions = session_factory
+        self._policy = policy
+        self._runtime = runtime
+        self._timeout = reply_timeout
+        self._pool = ThreadPoolExecutor(max_workers=workers, thread_name_prefix="architect")
+        self._project_locks: dict[tuple[int, str], threading.Lock] = {}
+        self._guard = threading.Lock()
+        self._futures: list[Future] = []
+
+    # -- helpers --------------------------------------------------------------------------------------------------
+    def _authorize(self, actor: ActorContext, action: str, project_id: object) -> None:
+        if not evaluate(self._policy, actor, action, ResourceScope(project_id=project_id)).allowed:  # type: ignore[arg-type]
+            raise ArchitectDenied("Not authorized for this operation")
+
+    def _lock(self, project_id: int, kind: str = "lifecycle") -> threading.Lock:
+        """``lifecycle`` serializes status/activation; ``turn`` serializes provider turns (one per Project). Separate
+        so a status poll never waits for a model call."""
+        with self._guard:
+            return self._project_locks.setdefault((project_id, kind), threading.Lock())
+
+    @staticmethod
+    def _project(session: Session, project_id: int) -> Project:
+        project = session.get(Project, project_id)
+        if project is None:
+            raise ArchitectNotFound("Project not found")
+        try:
+            validate_project_identity(project)
+        except ProjectIdentityError:
+            raise UnsafeProjectIdentity("Project identity records are inconsistent") from None
+        return project
+
+    @staticmethod
+    def _assignment(session: Session, project_id: int) -> tuple[RoleAssignment, AgentDefinition] | None:
+        assignment = session.scalars(select(RoleAssignment).where(
+            RoleAssignment.project_id == project_id, RoleAssignment.role == ROLE_ARCHITECT,
+            RoleAssignment.state == ASSIGNMENT_ACTIVE)).first()
+        if assignment is None:
+            return None
+        agent = session.get(AgentDefinition, assignment.agent_id)
+        return (assignment, agent) if agent is not None else None
+
+    @staticmethod
+    def _live(session: Session, project_id: int) -> ArchitectSession | None:
+        return session.scalars(select(ArchitectSession).where(
+            ArchitectSession.project_id == project_id,
+            ArchitectSession.state.in_((SESSION_STARTING, SESSION_READY)))).first()
+
+    @staticmethod
+    def _latest(session: Session, project_id: int) -> ArchitectSession | None:
+        return session.scalars(select(ArchitectSession).where(ArchitectSession.project_id == project_id)
+                               .order_by(ArchitectSession.created_at.desc())).first()
+
+    @staticmethod
+    def _handle(row: ArchitectSession) -> RuntimeHandle | None:
+        if None in (row.process_pid, row.process_ticks, row.port, row.runtime_session_id):
+            return None
+        return RuntimeHandle(row.process_pid, row.process_ticks, row.port, row.runtime_session_id)  # type: ignore[arg-type]
+
+    def _configuration(self, pair: tuple[RoleAssignment, AgentDefinition] | None) -> str | None:
+        if pair is None:
+            return "no_active_architect_assignment"
+        agent = pair[1]
+        if agent.runtime_adapter != ADAPTER_NAME:
+            return "unsupported_runtime_adapter"
+        return self._runtime.configuration_problem(agent.provider_id, agent.model_id)
+
+    # -- status / reconcile ----------------------------------------------------------------------------------------
+    def status(self, actor: ActorContext, project_id: object) -> dict:
+        self._authorize(actor, ARCHITECT_STATUS, project_id)
+        with self._lock(project_id):  # type: ignore[arg-type]
+            return self._reconciled_status(project_id)  # type: ignore[arg-type]
+
+    def _reconciled_status(self, project_id: int) -> dict:
+        with self._sessions() as session:
+            project = self._project(session, project_id)
+            live = self._live(session, project.id)
+            if live is not None:
+                pair = self._assignment(session, project.id)
+                still_assigned = pair is not None and pair[0].assignment_id == live.assignment_id
+                if live.state == SESSION_STARTING:
+                    # A starting row seen outside an in-flight activation belongs to a dead ROSC process.
+                    self._finish(session, live, SESSION_ERROR, "interrupted")
+                else:
+                    handle = self._handle(live)
+                    if not still_assigned:
+                        self._stop_owned(live, handle)
+                        self._finish(session, live, SESSION_STOPPED, "assignment_changed")
+                    elif handle is None or not self._runtime.probe(live.session_id, handle):
+                        self._finish(session, live, SESSION_ERROR, "runtime_not_alive")
+                    else:
+                        live.verified_at = _now()
+                        session.commit()
+            return self._view(session, project.id)
+
+    def _view(self, session: Session, project_id: int) -> dict:
+        pair = self._assignment(session, project_id)
+        live = self._live(session, project_id)
+        latest = live or self._latest(session, project_id)
+        problem = self._configuration(pair)
+        if live is not None:
+            state, detail = live.state, live.error_code
+        elif latest is not None and latest.state == SESSION_ERROR and problem is None:
+            state, detail = SESSION_ERROR, latest.error_code
+        elif problem is not None:
+            state, detail = STATE_NOT_CONFIGURED, problem
+        else:
+            state, detail = SESSION_STOPPED, latest.error_code if latest is not None else None
+        agent = pair[1] if pair is not None else None
+        return {
+            "project_id": f"P{project_id:04d}", "state": state, "detail": detail,
+            "can_activate": live is None and problem is None, "can_deactivate": live is not None,
+            "agent": None if agent is None else {"agent_id": agent.agent_id, "display_name": agent.display_name,
+                                                 "provider_id": agent.provider_id, "model_id": agent.model_id},
+            "session": None if latest is None else {
+                "session_id": latest.session_id, "state": latest.state,
+                "verified_at": None if latest.verified_at is None else _utc_iso(latest.verified_at)},
+        }
+
+    def _finish(self, session: Session, row: ArchitectSession, state: str, code: str | None) -> None:
+        row.state, row.error_code, row.updated_at = state, code, _now()
+        session.commit()
+
+    def _stop_owned(self, row: ArchitectSession, handle: RuntimeHandle | None) -> None:
+        if handle is not None:
+            self._runtime.stop(row.session_id, handle)
+
+    # -- activation -----------------------------------------------------------------------------------------------
+    def activate(self, actor: ActorContext, project_id: object) -> dict:
+        """Explicit Owner activation. Starts a runtime only for a valid active Architect assignment."""
+        self._authorize(actor, ARCHITECT_ACTIVATE, project_id)
+        pid: int = project_id  # type: ignore[assignment]
+        with self._lock(pid):
+            with self._sessions() as session:
+                self._project(session, pid)
+                existing = self._live(session, pid)
+                if existing is not None:
+                    return self._reconciled_status(pid)
+                pair = self._assignment(session, pid)
+                problem = self._configuration(pair)
+                if problem is not None:
+                    return self._view(session, pid)
+                assignment, agent = pair  # type: ignore[misc]
+                row = ArchitectSession(session_id=str(uuid.uuid4()), project_id=pid, agent_id=agent.agent_id,
+                                       assignment_id=assignment.assignment_id, state=SESSION_STARTING,
+                                       activated_by=actor.actor_id, activated_by_assurance=actor.assurance,
+                                       created_at=_now(), updated_at=_now())
+                session.add(row)
+                try:
+                    session.commit()
+                except IntegrityError:
+                    session.rollback()
+                    raise ArchitectConflict("Architect activation is already in progress") from None
+                except OperationalError:
+                    session.rollback()
+                    raise ConversationStoreError("Another change is in progress; retry shortly") from None
+                provider_id, model_id, session_id = agent.provider_id, agent.model_id, row.session_id
+            handle: RuntimeHandle | None = None
+            code: str | None = None
+            try:
+                handle = self._runtime.start(session_id, provider_id, model_id)
+            except RuntimeProblem as exc:
+                code = exc.code
+            except Exception:  # an adapter bug must still leave an honest, non-secret state
+                log.warning("Architect runtime start failed unexpectedly")
+                code = "runtime_failure"
+            with self._sessions() as session:
+                row = session.get(ArchitectSession, session_id)
+                if handle is None:
+                    self._finish(session, row, SESSION_ERROR, code)
+                else:
+                    if not self._runtime.probe(session_id, handle):
+                        self._runtime.stop(session_id, handle)
+                        self._finish(session, row, SESSION_ERROR, "runtime_not_alive")
+                    else:
+                        row.process_pid, row.process_ticks, row.port = handle.pid, handle.ticks, handle.port
+                        row.runtime_session_id = handle.runtime_session_id
+                        row.verified_at = _now()
+                        self._finish(session, row, SESSION_READY, None)
+                return self._view(session, pid)
+
+    def deactivate(self, actor: ActorContext, project_id: object) -> dict:
+        self._authorize(actor, ARCHITECT_DEACTIVATE, project_id)
+        pid: int = project_id  # type: ignore[assignment]
+        with self._lock(pid):
+            with self._sessions() as session:
+                self._project(session, pid)
+                live = self._live(session, pid)
+                if live is not None:
+                    stopped = live.state != SESSION_READY or self._handle(live) is None or self._runtime.stop(
+                        live.session_id, self._handle(live))  # type: ignore[arg-type]
+                    # An unprovable process is left alone and reported; it is never adopted or signalled.
+                    self._finish(session, live, SESSION_STOPPED if stopped else SESSION_ERROR,
+                                 None if stopped else "process_not_owned")
+                return self._view(session, pid)
+
+    # -- delivery -------------------------------------------------------------------------------------------------
+    def submit(self, actor: ActorContext, project_id: int, message_id: str) -> dict:
+        """Called after a NEW Owner message was stored. Creates a pending delivery only for a live verified session;
+        otherwise the message stays an Owner-only save (no delivery row). Never replays older messages."""
+        with self._sessions() as session:
+            if session.get(ConversationDelivery, message_id) is not None:
+                return delivery_view(session.get(ConversationDelivery, message_id))
+            live = self._live(session, project_id)
+            if live is None or live.state != SESSION_READY:
+                return delivery_view(None)
+            session.add(ConversationDelivery(message_id=message_id, architect_session_id=live.session_id,
+                                             state=DELIVERY_PENDING, attempts=0, runtime_message_id=runtime_message_id(
+                                                 message_id), created_at=_now(), updated_at=_now()))
+            try:
+                session.commit()
+            except IntegrityError:
+                session.rollback()
+                return delivery_view(session.get(ConversationDelivery, message_id))
+            view = delivery_view(session.get(ConversationDelivery, message_id))
+        self._futures.append(self._pool.submit(self._deliver, actor, project_id, message_id))
+        return view
+
+    def drain(self, timeout: float = 30.0) -> None:
+        """Wait for in-flight deliveries (tests and orderly shutdown)."""
+        for future in list(self._futures):
+            future.result(timeout=timeout)
+        self._futures.clear()
+
+    def _set(self, message_id: str, state: str, code: str | None = None, **fields) -> None:
+        with self._sessions() as session:
+            row = session.get(ConversationDelivery, message_id)
+            row.state, row.error_code, row.updated_at = state, code, _now()
+            for key, value in fields.items():
+                setattr(row, key, value)
+            session.commit()
+
+    def _build_context(self, session: Session, project: Project, message: ConversationMessage) -> tuple[str, str]:
+        senders = {p.participant_id: p.kind for p in session.scalars(select(ConversationParticipant).where(
+            ConversationParticipant.conversation_id == message.conversation_id))}
+        recent = list(reversed(session.scalars(select(ConversationMessage).where(
+            ConversationMessage.conversation_id == message.conversation_id,
+            ConversationMessage.ordinal <= message.ordinal).order_by(
+                ConversationMessage.ordinal.desc()).limit(CONTEXT_MESSAGES)).all()))
+        lines, budget = [], CONTEXT_TOTAL_CHARS
+        for item in reversed(recent):  # newest first so the budget never drops the message being answered
+            label = "Owner" if senders.get(item.sender_participant_id) == PARTICIPANT_OWNER else "Architect"
+            line = f"[{label}] {item.body[:CONTEXT_MESSAGE_CHARS]}"
+            if budget - len(line) < 0 and lines:
+                break
+            budget -= len(line)
+            lines.append(line)
+        lines.reverse()
+        text = (f"You are the Project Architect for ROSC project P{project.id:04d} \"{project.name}\".\n"
+                f"Project description: {project.description[:600]}\n"
+                "Reply in plain text only. You have no tools, no file access and no ability to change anything; "
+                "do not claim to have done so. Answer the Owner's latest message.\n\nConversation:\n"
+                + "\n".join(lines))
+        return text, f"{CATEGORY_IDENTITY},{CATEGORY_RECENT}:{len(lines)}"
+
+    def _deliver(self, actor: ActorContext, project_id: int, message_id: str) -> None:
+        try:
+            with self._lock(project_id, "turn"):
+                self._deliver_locked(actor, project_id, message_id)
+        except Exception:  # never leave a delivery pending without a truthful outcome
+            log.warning("Architect delivery failed unexpectedly")
+            try:
+                self._set(message_id, DELIVERY_UNKNOWN, "internal_error")
+            except Exception:
+                pass
+
+    def _deliver_locked(self, actor: ActorContext, project_id: int, message_id: str) -> None:
+        with self._sessions() as session:
+            delivery = session.get(ConversationDelivery, message_id)
+            if delivery is None or delivery.state != DELIVERY_PENDING:
+                return
+            live = self._live(session, project_id)
+            pair = self._assignment(session, project_id)
+            if (live is None or live.state != SESSION_READY or live.session_id != delivery.architect_session_id
+                    or pair is None or pair[0].assignment_id != live.assignment_id or pair[1].agent_id != live.agent_id):
+                code = "assignment_changed" if live is not None else "session_not_ready"
+                self._set(message_id, DELIVERY_FAILED, code)
+                return
+            handle = self._handle(live)
+            message = session.get(ConversationMessage, message_id)
+            conversation = session.get(Conversation, message.conversation_id)
+            project = self._project(session, project_id)
+            if handle is None or conversation.project_id != project.id or not self._runtime.probe(live.session_id, handle):
+                self._set(message_id, DELIVERY_FAILED, "session_not_ready")
+                return
+            text, categories = self._build_context(session, project, message)
+            delivery.attempts += 1
+            delivery.context_categories = categories
+            delivery.updated_at = _now()
+            session.commit()
+            runtime_id = delivery.runtime_message_id or runtime_message_id(message_id)
+            live_session_id = live.session_id
+        try:
+            reply = self._runtime.ask(handle, runtime_id, text, self._timeout)
+        except RuntimeAmbiguous as exc:
+            self._set(message_id, DELIVERY_UNKNOWN, exc.code)
+            return
+        except RuntimeProblem as exc:
+            self._set(message_id, DELIVERY_FAILED, exc.code)
+            return
+        self._commit_reply(actor, project_id, message_id, live_session_id, reply)
+
+    def _commit_reply(self, actor: ActorContext, project_id: int, message_id: str, live_session_id: str,
+                      reply: str) -> bool:
+        try:
+            self._authorize(actor, ARCHITECT_REPLY_COMMIT, project_id)
+            text = _body(reply)
+        except ArchitectDenied:
+            self._set(message_id, DELIVERY_FAILED, "not_authorized")
+            return False
+        except InvalidConversationInput:
+            self._set(message_id, DELIVERY_FAILED, "malformed_reply")
+            return False
+        with self._sessions() as session:
+            try:
+                session.connection().exec_driver_sql("BEGIN IMMEDIATE")
+                delivery = session.get(ConversationDelivery, message_id)
+                if delivery is None or delivery.reply_message_id is not None:
+                    session.rollback()
+                    return False  # already persisted: never a second reply
+                live = self._live(session, project_id)
+                pair = self._assignment(session, project_id)
+                message = session.get(ConversationMessage, message_id)
+                conversation = session.get(Conversation, message.conversation_id)
+                if (live is None or live.session_id != live_session_id or live.state != SESSION_READY
+                        or live.session_id != delivery.architect_session_id or pair is None
+                        or pair[0].assignment_id != live.assignment_id or pair[1].agent_id != live.agent_id
+                        or conversation.project_id != project_id or conversation.kind != CONVERSATION_KIND_PROJECT):
+                    session.rollback()
+                    self._set(message_id, DELIVERY_UNKNOWN, "session_changed")
+                    return False
+                participant = session.scalars(select(ConversationParticipant).where(
+                    ConversationParticipant.conversation_id == conversation.conversation_id,
+                    ConversationParticipant.kind == PARTICIPANT_ARCHITECT,
+                    ConversationParticipant.agent_id == live.agent_id)).first()
+                if participant is None:
+                    participant = ConversationParticipant(
+                        participant_id=str(uuid.uuid4()), conversation_id=conversation.conversation_id,
+                        kind=PARTICIPANT_ARCHITECT, actor_id=live.agent_id,
+                        actor_assurance=ASSURANCE_ADAPTER_VERIFIED, agent_id=live.agent_id, created_at=_now())
+                    session.add(participant)
+                    session.flush()
+                ordinal = (session.scalar(select(func.max(ConversationMessage.ordinal)).where(
+                    ConversationMessage.conversation_id == conversation.conversation_id)) or 0) + 1
+                reply_row = ConversationMessage(
+                    message_id=str(uuid.uuid4()), conversation_id=conversation.conversation_id,
+                    sender_participant_id=participant.participant_id, ordinal=ordinal, body=text,
+                    client_key=f"architect-reply:{message_id}", created_at=_now())
+                session.add(reply_row)
+                session.flush()
+                delivery.state, delivery.error_code = DELIVERY_DELIVERED, None
+                delivery.reply_message_id, delivery.updated_at = reply_row.message_id, _now()
+                session.commit()
+                return True
+            except (OperationalError, IntegrityError):
+                session.rollback()
+        self._set(message_id, DELIVERY_UNKNOWN, "persist_failed")
+        return False
+
+    # -- reconciliation / retry --------------------------------------------------------------------------------------
+    def reconcile(self, actor: ActorContext, project_id: object, message_id: str) -> dict:
+        """Look an ambiguous attempt up again at the provider by its correlation id. Never re-sends."""
+        self._authorize(actor, CONVERSATION_DELIVERY_RECONCILE, project_id)
+        pid: int = project_id  # type: ignore[assignment]
+        with self._lock(pid, "turn"):
+            with self._sessions() as session:
+                row = self._owned_delivery(session, pid, message_id)
+                if row.state not in (DELIVERY_UNKNOWN, DELIVERY_PENDING):
+                    return delivery_view(row)
+                live = self._live(session, pid)
+                handle = self._handle(live) if live is not None else None
+                if (live is None or handle is None or live.session_id != row.architect_session_id
+                        or not self._runtime.probe(live.session_id, handle)):
+                    return delivery_view(row)  # cannot ask the provider: stays unknown (human recovery)
+                runtime_id, live_id = row.runtime_message_id, live.session_id
+            try:
+                found = self._runtime.lookup(handle, runtime_id)  # type: ignore[arg-type]
+            except RuntimeProblem:
+                found = None
+            if found is not None and found.status == "reply" and found.text:
+                self._commit_reply(actor, pid, message_id, live_id, found.text)
+            elif found is not None and found.status == "absent":
+                self._set(message_id, DELIVERY_FAILED, "not_received")
+            with self._sessions() as session:
+                return delivery_view(session.get(ConversationDelivery, message_id))
+
+    def retry(self, actor: ActorContext, project_id: object, message_id: str) -> dict:
+        """Re-send only when the previous attempt provably never reached the provider."""
+        self._authorize(actor, CONVERSATION_DELIVERY_RECONCILE, project_id)
+        pid: int = project_id  # type: ignore[assignment]
+        with self._lock(pid, "turn"):
+            with self._sessions() as session:
+                row = self._owned_delivery(session, pid, message_id)
+                if row.state != DELIVERY_FAILED or row.error_code not in SAFE_RETRY_CODES:
+                    raise ArchitectConflict("This delivery cannot be retried safely")
+                live = self._live(session, pid)
+                if live is None or live.state != SESSION_READY:
+                    raise ArchitectConflict("Activate the Architect before retrying")
+                row.state, row.error_code, row.architect_session_id = DELIVERY_PENDING, None, live.session_id
+                row.updated_at = _now()
+                session.commit()
+                view = delivery_view(row)
+        self._futures.append(self._pool.submit(self._deliver, actor, pid, message_id))
+        return view
+
+    def _owned_delivery(self, session: Session, project_id: int, message_id: str) -> ConversationDelivery:
+        self._project(session, project_id)
+        row = session.get(ConversationDelivery, message_id)
+        message = session.get(ConversationMessage, message_id) if row is not None else None
+        conversation = session.get(Conversation, message.conversation_id) if message is not None else None
+        if row is None or conversation is None or conversation.project_id != project_id:
+            raise ArchitectNotFound("Delivery not found")  # same answer for another Project's message
+        return row
+
+    # -- restart recovery -------------------------------------------------------------------------------------------
+    def recover(self) -> None:
+        """Database-only repair at startup: in-flight work of a dead process becomes ``unknown``/``error``. Nothing is
+        re-sent and no process is started or signalled here."""
+        with self._sessions() as session:
+            for row in session.scalars(select(ConversationDelivery).where(
+                    ConversationDelivery.state == DELIVERY_PENDING)):
+                row.state, row.error_code, row.updated_at = DELIVERY_UNKNOWN, "interrupted", _now()
+            for row in session.scalars(select(ArchitectSession).where(ArchitectSession.state == SESSION_STARTING)):
+                row.state, row.error_code, row.updated_at = SESSION_ERROR, "interrupted", _now()
+            session.commit()

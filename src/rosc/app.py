@@ -4,6 +4,7 @@ import ipaddress
 import logging
 import re
 import uuid
+from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -19,6 +20,8 @@ from . import authorization as authz
 from .agent_registry import (AgentNotFound, AgentRegistryService, AssignmentNotFound, InvalidRegistryInput, ProjectNotFound,
                              RegistryConflict, RegistryDenied, RegistryError, RegistryStoreError, UnsafeProjectIdentity,
                              canonical_agent_id)
+from .architect_runtime import ArchitectRuntime, OpenCodeRuntime
+from .architect_service import ArchitectService
 from .config import data_dir
 from .conversation import (DEFAULT_PAGE_SIZE, ConversationConflict, ConversationDenied, ConversationError,
                            ConversationNotFound, ConversationStoreError, InvalidConversationInput,
@@ -208,7 +211,7 @@ class ConversationMessageInput(BaseModel):
     body: str = Field(min_length=1, max_length=4000)
 
 
-CONVERSATION_PATH = re.compile(r"^/api/projects/[^/]+/conversation(/messages)?$")
+CONVERSATION_PATH = re.compile(r"^/api/projects/[^/]+/(conversation(/messages(/[^/]+/(reconcile|retry))?)?|architect/(activate|deactivate)|architect)$")
 
 
 def sanitized_validation_response(exc: RequestValidationError) -> JSONResponse:
@@ -328,7 +331,8 @@ def create_app(db_path: Path | None = None, workspace_root: Path | None = None, 
                auth_provider: authz.AuthenticationProvider | None = None,
                authorization_policy: authz.AuthorizationPolicy | None = None,
                extra_allowed_hosts: frozenset[str] = frozenset(),
-               extra_allowed_origins: frozenset[str] = frozenset()) -> FastAPI:
+               extra_allowed_origins: frozenset[str] = frozenset(),
+               architect_runtime: ArchitectRuntime | None = None) -> FastAPI:
     """``auth_provider``/``authorization_policy`` and the ``extra_allowed_*`` sets are Python-level composition and
     test seams only. Nothing in a request (body, query, header, cookie) can select an actor, a role or these values,
     and there is deliberately no environment knob."""
@@ -342,7 +346,19 @@ def create_app(db_path: Path | None = None, workspace_root: Path | None = None, 
     sessions = make_session_factory(db_path, busy_timeout_ms)
     registry = AgentRegistryService(sessions, policy)
     conversation = ProjectConversationService(sessions, policy)
-    app = FastAPI(title="ROSC Core", version="0.1.0")
+    # The runtime is a Python-level composition seam like the policy: no request can select or configure it.
+    architect = ArchitectService(sessions, policy, architect_runtime or OpenCodeRuntime(db_path.parent))
+
+    @asynccontextmanager
+    async def lifespan(_app: FastAPI):
+        try:
+            architect.recover()  # database-only: pending work of a dead process becomes unknown, nothing is re-sent
+        except OperationalError:
+            log.warning("Architect recovery skipped: database is not migrated")
+        yield
+
+    app = FastAPI(title="ROSC Core", version="0.1.0", lifespan=lifespan)
+    app.state.architect = architect
 
     @app.exception_handler(RequestValidationError)
     async def validation_failed(request: Request, exc: RequestValidationError):
@@ -622,7 +638,33 @@ def create_app(db_path: Path | None = None, workspace_root: Path | None = None, 
                                    client_key=data.client_key, body=data.body)
         if result["replayed"]:
             response.status_code = 200
+            return result
+        # Only a NEW message may be delivered, and only to a live verified session; history is never replayed.
+        result["message"]["delivery"] = architect.submit(current_actor(), pid, result["message"]["message_id"])
         return result
+
+    # -- M3-B explicit Project Architect activation, liveness and delivery recovery ----------------------------
+    @app.get("/api/projects/{project_id}/architect")
+    def architect_status(project_id: str) -> dict:
+        return conversation_call(architect.status, current_actor(), numeric_id(project_id, "P"))
+
+    @app.post("/api/projects/{project_id}/architect/activate")
+    def architect_activate(project_id: str) -> dict:
+        return conversation_call(architect.activate, current_actor(), numeric_id(project_id, "P"))
+
+    @app.post("/api/projects/{project_id}/architect/deactivate")
+    def architect_deactivate(project_id: str) -> dict:
+        return conversation_call(architect.deactivate, current_actor(), numeric_id(project_id, "P"))
+
+    @app.post("/api/projects/{project_id}/conversation/messages/{message_id}/reconcile")
+    def reconcile_delivery(project_id: str, message_id: str) -> dict:
+        return {"delivery": conversation_call(architect.reconcile, current_actor(),
+                                              numeric_id(project_id, "P"), message_id)}
+
+    @app.post("/api/projects/{project_id}/conversation/messages/{message_id}/retry")
+    def retry_delivery(project_id: str, message_id: str) -> dict:
+        return {"delivery": conversation_call(architect.retry, current_actor(), numeric_id(project_id, "P"),
+                                              message_id)}
 
     return app
 

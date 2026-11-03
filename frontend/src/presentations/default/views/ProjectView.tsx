@@ -59,7 +59,7 @@ function ProjectWorkArea({ project, tasks, tasksStatus, feedback, scroll, worksp
             </button>)}
       </div>
     </section>
-    <ConversationPanel key={project.id} projectId={project.id} architectActive={project.architect !== 'not_active'}
+    <ConversationPanel key={project.id} projectId={project.id}
       conversation={conversation} collapsed={collapsed} onCollapsedChange={setCollapsed} />
   </div>;
 }

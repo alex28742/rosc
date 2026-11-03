@@ -1473,6 +1473,17 @@ class BootstrapParityTests(unittest.TestCase):
         text = (_repo_root() / "AGENTS.md").read_text(encoding="utf-8")
         self.assertIn("prompt-pull", text)
 
+    def test_single_checkout_and_review_push_rules_are_documented(self):
+        agents = (_repo_root() / "AGENTS.md").read_text(encoding="utf-8")
+        workflow = (_repo_root() / "docs" / "development_workflow.md").read_text(encoding="utf-8")
+        self.assertIn("/home/als/Документы/ROSC", agents)
+        self.assertIn("do not create a second Git worktree", agents)
+        self.assertIn("## Single local checkout", workflow)
+        section = workflow.split("### Guarded review-branch push", 1)[1]
+        for required in ("`review/*`", "exact source base", "fast-forward", "git ls-remote", "push=pushed:<full SHA>",
+                         "push=not-pushed", "never `main`", "`--force`", "does not authorize integration into `main`"):
+            self.assertIn(required, section)
+
 
 class TrackedLocalSafetyTests(unittest.TestCase):
     def test_gitignore_covers_private_and_runtime_paths(self):

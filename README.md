@@ -9,7 +9,8 @@ The working architecture and [implementation pipeline](https://drive.google.com/
 - Register a new or existing local Project without starting an agent.
 - Create a Draft Task with a title, description and acceptance criteria.
 - Register a provider-neutral Agent and record scoped `architect`/`worker` assignments for a Project or Task; neither action starts a runtime, session or Run, and neither grants an Agent Core authority.
-- Read and add to a durable Owner-only Project Conversation in the Project Work Area. Messages are plain text stored in SQLite, keep their order across restart, and are never delivered to an Agent (none is active).
+- Read and add to a durable Owner-only Project Conversation in the Project Work Area. Messages are plain text stored in SQLite and keep their order across restart. A message is delivered to the Project Architect only if the Owner explicitly activated a verified Architect session before sending it; otherwise it is an Owner-only save.
+- Explicitly activate a Project Architect (OpenCode adapter, see below) from the Project Conversation header. Opening a Project, assigning an Agent or saving a message never starts a process. The Architect has no tools and no ROSC authority; its text reply is stored in the same conversation as an Architect participant.
 - Persist both in SQLite and provision a separate ROSC Workspace manifest.
 - Inspect and create them in a small React UI; closing and reopening the UI does not change agent state.
 
@@ -79,9 +80,19 @@ Workspace manifests (`project.yaml`, `task.yaml`) are projections of SQLite. Ord
 
 `alembic downgrade` drops tables together with their data. Back up `rosc.db` and the `workspace/` directory first and never run it against a real data directory.
 
+### Project Architect (OpenCode) configuration
+
+Verified against OpenCode 2.2.5 offline (no model call). Offline tests use a test-only fake server; **a live provider reply has not been verified**. To enable activation the Owner sets, in the environment of the ROSC backend process (never in Git, argv or a URL):
+
+- `OPENCODE_PASSWORD`: at least 16 characters; ROSC passes it to its own `opencode serve` child and uses it for HTTP Basic auth (user `opencode`).
+- `ROSC_OPENCODE_APPROVED_MODEL=<provider>/<model>`: the model the Owner approves for outbound conversation content. It must equal the assigned Agent's `provider_id/model_id`, otherwise the state is `not_configured`.
+- Optionally `ROSC_OPENCODE_BIN`: absolute path of the `opencode` executable (otherwise found on `PATH`).
+
+Then register an Agent with `runtime_adapter: "opencode"` and assign it the Project `architect` role via the existing API. ROSC never connects to, reconfigures or stops the OpenCode background service of the Owner and never reads OpenCode's own credentials. Each activation starts a separate server on a free `127.0.0.1` port; ROSC stops only a process whose pid, start time and per-session marker it can prove. Back up `rosc.db`, then run `alembic upgrade head` (migration `0006` is additive) before starting the backend.
+
 ## Current limits
 
-There is no Worker launch, Architect session, Run approval, event import, attachment service or Agent conversation/delivery yet. No UI action in this slice starts an agent. The Project Conversation records Owner text only; it does not send, queue or receive anything. Existing Project registration assumes no external agent currently writes the checkout; it does not adopt external sessions. ROSC Workspace artifacts are separate from the project's application source.
+There is no Worker launch, Run approval, event import, attachment service, Task Conversation or Architect tool/context access yet. The only UI action that starts a process is the explicit Architect activation; it starts a loopback `opencode serve` restricted to deny-all permissions in an empty ROSC-owned directory, and previously saved messages are never replayed to it. Existing Project registration assumes no external agent currently writes the checkout; it does not adopt external sessions. ROSC Workspace artifacts are separate from the project's application source.
 
 Registered Agents and role assignments are administrative records only. A registered Agent is not a session, credential or runtime; an assignment is bounded intent, not activation or an effective permission. Capability readiness is reported as `declared`/`unverified` or `blocked` and is never `verified`; agent actors remain denied by the Core policy until a later authorized Run slice exists.
 

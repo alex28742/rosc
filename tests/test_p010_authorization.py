@@ -57,13 +57,13 @@ class ActorAndPolicyTests(unittest.TestCase):
 
     def test_owner_is_allowed_exactly_the_implemented_actions(self) -> None:
         # The 12 M2-B actions are frozen here; P011 adds Owner-only registry administration, P013 external Run
-        # provenance and P014 the Owner-only Project Conversation to the same default-deny policy without changing
-        # how those 12 behave.
+        # provenance, P014 the Owner-only Project Conversation and P015 the Owner-only Architect activation actions to the
+        # same default-deny policy without changing how those 12 behave (agents are still denied all of them).
         m2b_actions = frozenset({"project.list", "project.register", "project.reconcile", "project.repair", "task.list",
                                  "task.create", "task.reconcile", "task.repair", "architect_document.list",
                                  "architect_document.read", "architect_document.write", "architect_document.reconcile"})
         self.assertTrue(m2b_actions <= authz.IMPLEMENTED_ACTIONS)
-        self.assertEqual(len(authz.IMPLEMENTED_ACTIONS), 27)
+        self.assertEqual(len(authz.IMPLEMENTED_ACTIONS), 32)
         policy = LocalOwnerPolicy()
         for action in sorted(authz.IMPLEMENTED_ACTIONS):
             self.assertTrue(evaluate(policy, OWNER, action, scope_for(action)).allowed, action)

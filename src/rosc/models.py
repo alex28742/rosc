@@ -512,6 +512,75 @@ class ConversationMessage(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
 
 
+# M3-B Project Architect runtime (P015). A session row is ROSC's record of one explicitly activated runtime process and
+# provider session. It is NOT canonical memory (the Project Conversation is) and a row never proves liveness: every
+# ``ready`` claim is re-probed. Deliveries are mutable bookkeeping about one Owner message, kept apart from the
+# immutable message rows.
+SESSION_STARTING = "starting"
+SESSION_READY = "ready"
+SESSION_ERROR = "error"
+SESSION_STOPPED = "stopped"
+DELIVERY_NOT_SENT = "not_sent"
+DELIVERY_PENDING = "pending"
+DELIVERY_DELIVERED = "delivered"
+DELIVERY_FAILED = "failed"
+DELIVERY_UNKNOWN = "unknown"
+ASSURANCE_ADAPTER_VERIFIED = "adapter_verified"
+
+
+class ArchitectSession(Base):
+    __tablename__ = "architect_sessions"
+    __table_args__ = (
+        CheckConstraint("state IN ('starting', 'ready', 'error', 'stopped')", name="ck_architect_sessions_state"),
+        Index("ix_architect_sessions_project_id", "project_id"),
+        # At most one live (starting/ready) session per Project: a concurrent second activation loses at INSERT.
+        Index("ux_architect_sessions_live", "project_id", unique=True,
+              sqlite_where=text("state IN ('starting', 'ready')")),
+    )
+
+    session_id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    project_id: Mapped[int] = mapped_column(ForeignKey("projects.id", ondelete="RESTRICT"))
+    agent_id: Mapped[str] = mapped_column(ForeignKey("agent_definitions.agent_id", ondelete="RESTRICT"))
+    assignment_id: Mapped[str] = mapped_column(ForeignKey("role_assignments.assignment_id", ondelete="RESTRICT"))
+    state: Mapped[str] = mapped_column(String(16))
+    error_code: Mapped[str | None] = mapped_column(String(48), nullable=True)
+    # Opaque provider-side identifiers; never a credential. ``process_ticks`` is the /proc start time that, with the
+    # pid and a per-session marker, lets a later ROSC process prove it launched the process before touching it.
+    runtime_session_id: Mapped[str | None] = mapped_column(String(96), nullable=True)
+    process_pid: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    process_ticks: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    port: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    activated_by: Mapped[str] = mapped_column(String(64))
+    activated_by_assurance: Mapped[str] = mapped_column(String(32))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
+    verified_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
+class ConversationDelivery(Base):
+    __tablename__ = "conversation_deliveries"
+    __table_args__ = (
+        CheckConstraint("state IN ('not_sent', 'pending', 'delivered', 'failed', 'unknown')",
+                        name="ck_conversation_deliveries_state"),
+        CheckConstraint("attempts >= 0", name="ck_conversation_deliveries_attempts"),
+    )
+
+    message_id: Mapped[str] = mapped_column(ForeignKey("conversation_messages.message_id", ondelete="RESTRICT"),
+                                            primary_key=True)
+    architect_session_id: Mapped[str | None] = mapped_column(
+        ForeignKey("architect_sessions.session_id", ondelete="RESTRICT"), nullable=True)
+    state: Mapped[str] = mapped_column(String(16))
+    error_code: Mapped[str | None] = mapped_column(String(48), nullable=True)
+    # Deterministic id sent to the provider so the attempt can be located again without re-sending.
+    runtime_message_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    reply_message_id: Mapped[str | None] = mapped_column(
+        ForeignKey("conversation_messages.message_id", ondelete="RESTRICT"), nullable=True)
+    attempts: Mapped[int] = mapped_column(Integer, default=0)
+    context_categories: Mapped[str | None] = mapped_column(String(160), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
+
+
 class Task(Base):
     __tablename__ = "tasks"
 

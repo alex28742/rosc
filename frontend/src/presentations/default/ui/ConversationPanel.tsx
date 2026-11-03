@@ -1,11 +1,9 @@
 import { useEffect, useMemo, useRef, useState, type FormEvent, type ReactNode } from 'react';
 import type { ConversationControls } from '../../../app/presentation/contracts';
-import type { ConversationMessage } from '../../../core/models';
+import type { ArchitectStatus, ConversationMessage } from '../../../core/models';
 
 type Props = {
   projectId: string;
-  /** Read-only Core fact: P014 never activates an Architect, so this stays false and is labelled truthfully. */
-  architectActive: boolean;
   conversation: ConversationControls;
   collapsed: boolean;
   onCollapsedChange: (collapsed: boolean) => void;
@@ -52,6 +50,45 @@ function renderBody(body: string, matches: Match[], currentId: string | null): R
   return nodes;
 }
 
+/** Human wording for a non-secret Core reason code; unknown codes are shown as-is rather than guessed at. */
+const REASONS: Record<string, string> = {
+  no_active_architect_assignment: 'Для проекта не назначен активный Architect.',
+  unsupported_runtime_adapter: 'Назначенный агент использует не поддерживаемый runtime.',
+  runtime_binary_missing: 'Исполняемый файл OpenCode не найден.',
+  runtime_credential_missing: 'Не задан локальный пароль OpenCode (OPENCODE_PASSWORD).',
+  model_not_approved: 'Модель агента не утверждена Owner для передачи данных.',
+  runtime_not_alive: 'Runtime перестал отвечать.',
+  restricted_mode_unconfirmed: 'Ограниченный режим runtime не подтверждён — запрос к модели не отправлялся.',
+  model_unavailable: 'Модель недоступна в runtime.',
+  start_timeout: 'Runtime не запустился вовремя.',
+  interrupted: 'Запуск был прерван перезапуском ROSC.',
+  assignment_changed: 'Назначение Architect изменилось.',
+  process_not_owned: 'Процесс не принадлежит ROSC и не был остановлен.',
+};
+const reason = (code: string | null) => (code ? REASONS[code] ?? `Код: ${code}` : '');
+
+type ArchitectView = { label: string; live: boolean; hint: string };
+
+/** Never shows anything as active unless Core reported a freshly verified `ready` session. */
+function describeArchitect(info: ArchitectStatus | null, loaded: boolean, busy: boolean): ArchitectView {
+  if (busy) return { label: 'Architect: запускается…', live: false, hint: 'Идёт активация и проверка runtime.' };
+  if (!loaded || info === null) return { label: 'Architect: проверка…', live: false, hint: '' };
+  switch (info.state) {
+    case 'ready': return { label: 'Architect: активен (проверен)', live: true, hint: '' };
+    case 'starting': return { label: 'Architect: запускается…', live: false, hint: '' };
+    case 'error': return { label: 'Architect: ошибка', live: false, hint: reason(info.detail) };
+    case 'not_configured': return { label: 'Architect: не настроен', live: false, hint: reason(info.detail) };
+    default: return { label: 'Architect: не активирован', live: false, hint: reason(info.detail) };
+  }
+}
+
+const DELIVERY_TEXT: Record<string, string> = {
+  pending: 'Передано Architect, ожидается ответ…',
+  delivered: 'Architect ответил',
+  failed: 'Не доставлено Architect',
+  unknown: 'Результат доставки неизвестен — повторная отправка не выполнялась',
+};
+
 function formatTime(iso: string): string {
   const date = new Date(iso);
   return Number.isNaN(date.getTime()) ? '' : date.toLocaleTimeString('ru-RU', { hour: '2-digit', minute: '2-digit' });
@@ -67,10 +104,16 @@ function newClientKey(): string {
 
 /**
  * Persistent right-hand Project Conversation: ordered Owner messages, a truthful empty state, a bounded composer,
- * collapse/restore and client-local search. It records text in ROSC only and never claims delivery or a reply.
+ * collapse/restore and client-local search. It shows delivery and an Architect reply only when Core reports them,
+ * and an Architect as active only after Core's verified `ready` state.
  */
-export function ConversationPanel({ projectId, architectActive, conversation, collapsed, onCollapsedChange }: Props) {
+export function ConversationPanel({ projectId, conversation, collapsed, onCollapsedChange }: Props) {
   const state = conversation.state;
+  const architect = conversation.architect;
+  const view = describeArchitect(architect.info, architect.status === 'ready', architect.busy);
+  const live = view.live && architect.info?.state === 'ready';
+  const [architectFailure, setArchitectFailure] = useState('');
+  const [deliveryFailure, setDeliveryFailure] = useState('');
   const [draft, setDraft] = useState('');
   const [failure, setFailure] = useState('');
   const [searchOpen, setSearchOpen] = useState(false);
@@ -162,17 +205,28 @@ export function ConversationPanel({ projectId, architectActive, conversation, co
     <header className="rosc-conversation__head">
       <div>
         <h3>Project Conversation</h3>
-        <p>История сохраняется в ROSC · ответы агентов не подключены</p>
+        <p>{live ? 'История сохраняется в ROSC · новые сообщения передаются Architect' : 'История сохраняется в ROSC · Architect не активирован'}</p>
       </div>
       <div className="rosc-conversation__head-actions">
         <button type="button" className={searchOpen ? 'rosc-chat-icon rosc-chat-icon--on' : 'rosc-chat-icon'}
           aria-label="Поиск по сообщениям" aria-expanded={searchOpen} title="Поиск по Project Conversation"
           onClick={toggleSearch}>⌕</button>
-        <span className={architectActive ? 'rosc-chip rosc-chip--live' : 'rosc-chip'}>
-          {architectActive ? 'Architect: активен' : 'Architect: не активирован'}
-        </span>
+        <span className={live ? 'rosc-chip rosc-chip--live' : 'rosc-chip'} aria-live="polite">{view.label}</span>
       </div>
     </header>
+    <div className="rosc-conversation__architect">
+      {architect.info?.can_activate && !architect.busy && <button type="button" className="rosc-btn rosc-btn--small"
+        onClick={async () => setArchitectFailure(await conversation.onActivate() ?? '')}>
+        {architect.info.state === 'error' ? 'Повторить активацию Architect' : 'Активировать Architect'}
+      </button>}
+      {architect.info?.can_deactivate && !architect.busy && <button type="button" className="rosc-btn rosc-btn--small"
+        onClick={async () => setArchitectFailure(await conversation.onDeactivate() ?? '')}>Остановить Architect</button>}
+      {architect.status === 'failed' && <button type="button" className="rosc-btn rosc-btn--small"
+        onClick={conversation.onReload}>Проверить статус</button>}
+      {(view.hint || architect.error || architectFailure) && <p className="rosc-conversation__hint" role="alert">
+        {[view.hint, architect.error, architectFailure].filter(Boolean).join(' ')}
+      </p>}
+    </div>
     {searchOpen && <div className="rosc-conversation__search">
       <input type="search" aria-label="Поиск по сообщениям" placeholder="Найти в переписке…"
         value={searchTerm} autoFocus
@@ -204,20 +258,36 @@ export function ConversationPanel({ projectId, architectActive, conversation, co
       </div>}
       {state.status === 'ready' && state.messages.length === 0 && <div className="rosc-state">
         <p>Сообщений пока нет.</p>
-        <p>Первое сообщение Owner сохранится в ROSC. Architect не активирован, поэтому ответа не будет.</p>
+        <p>{live ? 'Новое сообщение Owner будет передано Architect, ответ сохранится в этой переписке.'
+          : 'Первое сообщение Owner сохранится в ROSC. Architect не активирован, поэтому ответа не будет.'}</p>
       </div>}
-      {state.messages.map(message => <article key={message.message_id}
-        className="rosc-chat-message rosc-chat-message--owner" data-message-id={message.message_id}>
-        <span className="rosc-chat-avatar" aria-hidden="true">O</span>
-        <div className="rosc-chat-bubble">
-          <div className="rosc-chat-meta">
-            <span>{message.sender.display_name}</span>
-            <time dateTime={message.created_at}>{formatTime(message.created_at)}</time>
+      {state.messages.map(message => {
+        const fromArchitect = message.sender.kind === 'architect';
+        const delivery = message.delivery;
+        return <article key={message.message_id}
+          className={fromArchitect ? 'rosc-chat-message rosc-chat-message--architect' : 'rosc-chat-message rosc-chat-message--owner'}
+          data-message-id={message.message_id}>
+          <span className="rosc-chat-avatar" aria-hidden="true">{fromArchitect ? 'A' : 'O'}</span>
+          <div className="rosc-chat-bubble">
+            <div className="rosc-chat-meta">
+              <span>{message.sender.display_name}</span>
+              <time dateTime={message.created_at}>{formatTime(message.created_at)}</time>
+            </div>
+            <p className="rosc-chat-body">{renderBody(message.body,
+              matches.filter(match => match.messageId === message.message_id), currentId)}</p>
+            {delivery && delivery.state !== 'not_sent' && <p className={`rosc-chat-delivery rosc-chat-delivery--${delivery.state}`}
+              aria-live="polite">
+              {DELIVERY_TEXT[delivery.state]}{delivery.error_code ? ` (${reason(delivery.error_code) || delivery.error_code})` : ''}
+              {delivery.can_retry && <button type="button" className="rosc-btn rosc-btn--small"
+                onClick={async () => setDeliveryFailure(await conversation.onRetryDelivery(message.message_id) ?? '')}>
+                Повторить отправку</button>}
+              {delivery.can_reconcile && delivery.state === 'unknown' && <button type="button" className="rosc-btn rosc-btn--small"
+                onClick={async () => setDeliveryFailure(await conversation.onReconcile(message.message_id) ?? '')}>
+                Проверить результат</button>}
+            </p>}
           </div>
-          <p className="rosc-chat-body">{renderBody(message.body,
-            matches.filter(match => match.messageId === message.message_id), currentId)}</p>
-        </div>
-      </article>)}
+        </article>;
+      })}
     </div>
     <form className="rosc-conversation__compose" onSubmit={submit}>
       <textarea aria-label="Сообщение в Project Conversation" placeholder="Обсудить задачу, задать вопрос…" rows={3}
@@ -239,8 +309,10 @@ export function ConversationPanel({ projectId, architectActive, conversation, co
         Предыдущая попытка могла сохраниться в ROSC. Проверьте историю: изменённый текст будет отправлен как новое сообщение.
       </p>}
       {!ready && <p className="rosc-conversation__hint">Отправка станет доступна после загрузки истории.</p>}
+      {deliveryFailure && <p className="rosc-conversation__error" role="alert">{deliveryFailure}</p>}
       <p className="rosc-conversation__hint">
-        Сообщение сохраняется только в ROSC. Architect не активирован — доставки и ответа не будет.
+        {live ? 'Новое сообщение сохраняется в ROSC и передаётся Architect. Ранее сохранённые сообщения не пересылаются.'
+          : 'Сообщение сохраняется только в ROSC. Architect не активирован — доставки и ответа не будет.'}
       </p>
     </form>
     <button type="button" className="rosc-conversation__rail" aria-label="Развернуть Project Conversation"

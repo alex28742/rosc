@@ -1,7 +1,7 @@
 // Test fixtures shared by the application tests. Not imported by production code.
 import { vi } from 'vitest';
 import type { CoreApi } from '../core/api';
-import type { ConversationMessage, ConversationPage, ConversationParticipant, ConversationMessageInput, Project, Task } from '../core/models';
+import type { ArchitectStatus, ConversationMessage, ConversationPage, ConversationParticipant, ConversationMessageInput, Project, Task } from '../core/models';
 
 export const project = (id: string, over: Partial<Project> = {}): Project => ({
   id, name: `Project ${id}`, description: `About ${id}`, root_path: `/tmp/${id}`, mode: 'existing', docs_entrypoint: null,
@@ -33,6 +33,12 @@ export const conversationPage = (over: Partial<ConversationPage> = {}): Conversa
   page: { limit: 50, has_more: false, next_before: null }, ...over,
 });
 
+export const architectStatus = (over: Partial<ArchitectStatus> = {}): ArchitectStatus => ({
+  project_id: 'P0001', state: 'stopped', detail: null, can_activate: true, can_deactivate: false,
+  agent: { agent_id: 'agent-1', display_name: 'Architect One', provider_id: 'prov', model_id: 'model-a' },
+  session: null, ...over,
+});
+
 export function stubApi(over: Partial<{ [K in keyof CoreApi]: ReturnType<typeof vi.fn> }> = {}) {
   const api = {
     listProjects: vi.fn(async () => [] as Project[]),
@@ -44,6 +50,11 @@ export function stubApi(over: Partial<{ [K in keyof CoreApi]: ReturnType<typeof 
     reconcileTask: vi.fn(async () => task('T0001', 'P0001')),
     repairTask: vi.fn(async () => ({ ...task('T0001', 'P0001'), repair: null })),
     getConversation: vi.fn(async () => conversationPage()),
+    getArchitect: vi.fn(async () => architectStatus()),
+    activateArchitect: vi.fn(async () => architectStatus({ state: 'ready', can_activate: false, can_deactivate: true })),
+    deactivateArchitect: vi.fn(async () => architectStatus()),
+    reconcileDelivery: vi.fn(async () => ({ delivery: { state: 'unknown', error_code: null, reply_message_id: null, can_retry: false, can_reconcile: true } })),
+    retryDelivery: vi.fn(async () => ({ delivery: { state: 'pending', error_code: null, reply_message_id: null, can_retry: false, can_reconcile: true } })),
     sendConversationMessage: vi.fn(async (_projectId: string, input: ConversationMessageInput) => ({
       message: conversationMessage(input.body), replayed: false,
     })),

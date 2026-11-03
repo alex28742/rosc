@@ -650,7 +650,8 @@ class HardeningTests(StageCase):
         self.assertEqual(tables, {"projects", "tasks", "project_root_bindings", "agent_definitions", "agent_capabilities",
                                   "role_assignments", "assignment_capabilities", "run_records", "run_agent_links",
                                   "report_records", "evidence_records", "conversations", "conversation_participants",
-                                  "conversation_messages", "alembic_version"})
+                                  "conversation_messages", "architect_sessions", "conversation_deliveries",
+                                  "alembic_version"})
 
 
 if __name__ == "__main__":

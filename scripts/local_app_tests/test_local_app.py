@@ -122,7 +122,7 @@ class DatabaseTests(Base):
         conn.commit()
         conn.close()
         la.check_database(self.cfg)  # at head: no error
-        self.assertEqual(la.alembic_head(la.ROOT), "0003_agent_registry_assignments")
+        self.assertEqual(la.alembic_head(la.ROOT), "0006_architect_runtime_sessions")  # was a stale 0003 pin before P015
         self.assertEqual([p.name for p in self.cfg.data_dir.iterdir()], ["rosc.db"])
         self.assertNotEqual(before[0], b"")
 

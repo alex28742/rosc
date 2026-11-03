@@ -147,7 +147,88 @@ def effective_config(cfg: Config, state: dict) -> Config:
     return replace(cfg, backend_port=b, frontend_port=f, data_dir=Path(d))
 
 
-def occupied_message(label: str, port: int) -> str:
+# ----------------------------------------------------------------------------------- occupied-port diagnostics
+# Best effort, Linux /proc only, strictly read-only. It never prints environment variables or full command lines,
+# never claims ownership from a matching name, and never adopts or signals anything.
+_TCP_LISTEN = "0A"
+_LOOPBACK_OR_ANY = {"0100007F", "00000000", "00000000000000000000000001000000", "00000000000000000000000000000000"}
+_ROSC_BACKEND_MARKERS = ("uvicorn", "rosc.app:app")
+
+
+def _listener_inodes(proc: Path, port: int) -> set[str]:
+    inodes: set[str] = set()
+    for table in ("net/tcp", "net/tcp6"):
+        try:
+            lines = (proc / table).read_text().splitlines()[1:]
+        except OSError:
+            continue
+        for line in lines:
+            fields = line.split()
+            if len(fields) < 10 or fields[3] != _TCP_LISTEN:
+                continue
+            address, _, hex_port = fields[1].rpartition(":")
+            if hex_port.upper() == f"{port:04X}" and address.upper() in _LOOPBACK_OR_ANY:
+                inodes.add(fields[9])
+    return inodes
+
+
+def _pids_for_inodes(proc: Path, inodes: set[str]) -> tuple[list[int], int]:
+    """Matching pids plus how many process fd tables could not be read (other users, hidepid)."""
+    found: list[int] = []
+    unreadable = 0
+    wanted = {f"socket:[{inode}]" for inode in inodes}
+    for entry in proc.iterdir():
+        if not entry.name.isdigit():
+            continue
+        targets: set[str] = set()
+        try:
+            descriptors = list((entry / "fd").iterdir())
+        except OSError:
+            unreadable += 1
+            continue
+        for descriptor in descriptors:
+            with contextlib.suppress(OSError):  # an fd can close between listing and reading it
+                targets.add(os.readlink(descriptor))
+        if targets & wanted:
+            found.append(int(entry.name))
+    return sorted(found), unreadable
+
+
+def _describe_process(proc: Path, pid: int) -> str:
+    """Bounded identification: executable name and a coarse resemblance tag. No argv values, no environment."""
+    try:
+        comm = (proc / str(pid) / "comm").read_text().strip()[:32] or "?"
+    except OSError:
+        return f"pid {pid} (details not readable)"
+    try:
+        argv = (proc / str(pid) / "cmdline").read_bytes()[:4096].split(b"\0")
+    except OSError:
+        return f"pid {pid}, process name {comm!r}, command line not readable: identity UNKNOWN"
+    words = {part.decode(errors="replace") for part in argv}
+    if all(any(marker in word for word in words) for marker in _ROSC_BACKEND_MARKERS):
+        verdict = ("resembles a ROSC backend (uvicorn rosc.app:app) - NOT verified as launched by this launcher; "
+                   "it may be an old backend")
+    else:
+        verdict = "does not resemble a ROSC backend: identity UNKNOWN"
+    return f"pid {pid}, process name {comm!r}; {verdict}"
+
+
+def listener_diagnostics(port: int, proc: Path = Path("/proc")) -> str:
+    """Read-only explanation of who listens on ``port``; empty string when /proc offers nothing."""
+    try:
+        inodes = _listener_inodes(proc, port)
+        if not inodes:
+            return ""
+        pids, unreadable = _pids_for_inodes(proc, inodes)
+    except OSError:
+        return ""
+    if pids:
+        return "\n  Listener (read-only /proc inspection): " + "; ".join(_describe_process(proc, pid) for pid in pids)
+    note = f" ({unreadable} processes could not be inspected)" if unreadable else ""
+    return f"\n  A listener exists on port {port} but its process is not visible to this user{note}; inspect it manually."
+
+
+def occupied_message(label: str, port: int, diagnostics: str = "") -> str:
     if label == "backend":
         retry = f"local-app up -p {'8051' if port == 8050 else '8050'}   (any free port 1024..65535)"
     else:
@@ -156,7 +237,7 @@ def occupied_message(label: str, port: int) -> str:
         retry = (f"local-app up --frontend-port {other[0]}   (allowed frontend ports: {allowed})" if other
                  else f"free port {port} (the only allowed frontend port: {allowed})")
     return (f"The {label} port {port} is already in use by a process this launcher does not own. It was not touched "
-            f"and nothing was started.\n  Retry with: {retry}")
+            f"and nothing was started.{diagnostics}\n  Retry with: {retry}")
 
 
 def service_commands(cfg: Config) -> dict[str, dict]:
@@ -556,7 +637,7 @@ def cmd_up(cfg: Config) -> int:
         check_prerequisites(cfg)
         for label, port in (("backend", cfg.backend_port), ("frontend", cfg.frontend_port)):
             if port_in_use(port):
-                raise LauncherError(occupied_message(label, port))
+                raise LauncherError(occupied_message(label, port, listener_diagnostics(port)))
         commands = service_commands(cfg)
         state = {"config": {"backend_port": cfg.backend_port, "frontend_port": cfg.frontend_port,
                             "data_dir": str(cfg.data_dir)}, "services": {}}

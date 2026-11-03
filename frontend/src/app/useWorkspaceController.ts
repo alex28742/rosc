@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { coreApi, describeError, type CoreApi } from '../core/api';
-import { toProjectInput, toTaskInput, type ConversationMessage, type Project, type ProjectFormValues, type RepairConfirmation, type RepairResult, type Task, type TaskFormValues } from '../core/models';
+import { toProjectInput, toTaskInput, type ArchitectStatus, type ConversationMessage, type Project, type ProjectFormValues, type RepairConfirmation, type RepairResult, type Task, type TaskFormValues } from '../core/models';
 import type { Navigation } from './navigation';
 import type { Feedback, LoadStatus } from './presentation/contracts';
 import { projectIdOf } from './route';
@@ -35,6 +35,12 @@ const mergeMessages = (known: ConversationMessage[], incoming: ConversationMessa
   for (const message of incoming) byId.set(message.message_id, message);
   return [...byId.values()].sort((a, b) => a.ordinal - b.ordinal);
 };
+
+type ArchitectCache = { projectId: string | null; status: LoadStatus; info: ArchitectStatus | null; busy: boolean; error: string };
+const NO_ARCHITECT: ArchitectCache = { projectId: null, status: 'loading', info: null, busy: false, error: '' };
+const architectForProject = (projectId: string | null): ArchitectCache => ({ ...NO_ARCHITECT, projectId });
+/** While any Owner message awaits the Architect's reply the history is refreshed on this interval. */
+const DELIVERY_POLL_MS = 2000;
 
 const chatForProject = (projectId: string | null): ChatCache => ({ ...NO_CHAT, projectId, status: 'loading' });
 
@@ -76,6 +82,7 @@ export function useWorkspaceController({ route, routeKey, go }: Navigation, api:
   const busyRef = useRef(false);
   const chatRef = useRef(chat);
   chatRef.current = chat;
+  const architectRef = useRef<ArchitectCache>(NO_ARCHITECT);
 
   /** The list failure is owned by the Project list itself (not by whichever layer is visible) and stays until a load succeeds. */
   const loadProjects = useCallback(async () => {
@@ -164,6 +171,55 @@ export function useWorkspaceController({ route, routeKey, go }: Navigation, api:
     }
   }, [api, patchChat]);
 
+  const [architect, setArchitect] = useState<ArchitectCache>(NO_ARCHITECT);
+  const architectSeq = useRef(0);
+  architectRef.current = architect;
+
+  const patchArchitect = useCallback((id: string, patch: Partial<ArchitectCache>) => {
+    setArchitect(prev => (prev.projectId === id ? { ...prev, ...patch } : prev));
+  }, []);
+
+  /** Read-only status. Core re-probes liveness here but never starts a runtime. */
+  const loadArchitect = useCallback(async (id: string) => {
+    const seq = ++architectSeq.current;
+    try {
+      const info = await api.getArchitect(id);
+      if (seq === architectSeq.current) patchArchitect(id, { status: 'ready', info, error: '' });
+    } catch (e) {
+      if (seq === architectSeq.current) patchArchitect(id, { status: 'failed', error: describeError(e) });
+    }
+  }, [api, patchArchitect]);
+
+  const changeArchitect = useCallback(async (action: 'activate' | 'deactivate'): Promise<string | null> => {
+    const id = projectIdOf(routeRef.current);
+    if (!id) return 'Проект не открыт.';
+    if (architectRef.current.projectId === id && architectRef.current.busy) return 'Запрос уже выполняется.';
+    patchArchitect(id, { busy: true, error: '' });
+    const seq = ++architectSeq.current;
+    try {
+      const info = await (action === 'activate' ? api.activateArchitect(id) : api.deactivateArchitect(id));
+      if (seq === architectSeq.current) patchArchitect(id, { info, status: 'ready', busy: false, error: '' });
+      else patchArchitect(id, { busy: false });
+      return null;
+    } catch (e) {
+      const message = describeError(e);
+      patchArchitect(id, { busy: false, error: message });
+      return message;
+    }
+  }, [api, patchArchitect]);
+
+  const changeDelivery = useCallback(async (messageId: string, action: 'reconcile' | 'retry'): Promise<string | null> => {
+    const id = projectIdOf(routeRef.current);
+    if (!id) return 'Проект не открыт.';
+    try {
+      await (action === 'reconcile' ? api.reconcileDelivery(id, messageId) : api.retryDelivery(id, messageId));
+      await loadConversation(id);
+      return null;
+    } catch (e) {
+      return describeError(e);
+    }
+  }, [api, loadConversation]);
+
   const sendConversationMessage = useCallback(async (body: string, clientKey: string): Promise<string | null> => {
     const id = projectIdOf(routeRef.current);
     if (!id) return 'Проект не открыт.';
@@ -199,6 +255,16 @@ export function useWorkspaceController({ route, routeKey, go }: Navigation, api:
     if (projectId) { chatSeq.current++; setChat(chatForProject(projectId)); void loadConversation(projectId); }
     else { chatSeq.current++; setChat(NO_CHAT); }
   }, [projectId, loadConversation]);
+  useEffect(() => {
+    if (projectId) { architectSeq.current++; setArchitect(architectForProject(projectId)); void loadArchitect(projectId); }
+    else { architectSeq.current++; setArchitect(NO_ARCHITECT); }
+  }, [projectId, loadArchitect]);
+  const awaitingReply = chat.projectId === projectId && chat.messages.some(m => m.delivery?.state === 'pending');
+  useEffect(() => {
+    if (!projectId || !awaitingReply) return;
+    const timer = setInterval(() => { void loadConversation(projectId); }, DELIVERY_POLL_MS);
+    return () => clearInterval(timer);
+  }, [projectId, awaitingReply, loadConversation]);
 
   const project = projects.find(p => p.id === projectId) ?? null;
   const taskList = tasks.projectId === projectId && projectId ? tasks : NO_TASKS;
@@ -211,6 +277,16 @@ export function useWorkspaceController({ route, routeKey, go }: Navigation, api:
       hasMore: chatCache.hasMore, nextBefore: chatCache.nextBefore, error: chatCache.error,
       sending: chatCache.sending, olderLoading: chatCache.olderLoading,
     },
+    architect: {
+      status: architect.projectId === projectId ? architect.status : 'loading' as LoadStatus,
+      info: architect.projectId === projectId ? architect.info : null,
+      busy: architect.projectId === projectId && architect.busy,
+      error: architect.projectId === projectId ? architect.error : '',
+    },
+    onActivate: () => changeArchitect('activate'),
+    onDeactivate: () => changeArchitect('deactivate'),
+    onReconcile: (messageId: string) => changeDelivery(messageId, 'reconcile'),
+    onRetryDelivery: (messageId: string) => changeDelivery(messageId, 'retry'),
     onReload: reloadConversation,
     onLoadOlder: () => void loadOlderMessages(),
     onSend: sendConversationMessage,

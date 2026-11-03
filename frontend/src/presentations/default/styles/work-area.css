@@ -956,3 +956,36 @@
     max-width: none;
   }
 }
+
+/* P015 / M3-B: explicit Architect activation row and per-message delivery status. Composition is unchanged. */
+.rosc-conversation__architect {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px 8px;
+  margin: 0 0 8px;
+}
+
+.rosc-conversation__architect .rosc-conversation__hint {
+  flex: 1 0 100%;
+  margin: 0;
+}
+
+.rosc-chat-message--architect {
+  margin-right: auto;
+}
+
+.rosc-chat-delivery {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px 8px;
+  margin: 6px 0 0;
+  color: var(--rosc-muted);
+  font-size: 10px;
+}
+
+.rosc-chat-delivery--failed,
+.rosc-chat-delivery--unknown {
+  font-weight: 700;
+}

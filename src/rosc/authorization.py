@@ -66,6 +66,14 @@ RUN_LINK_AGENT = "run.link_agent"
 # activates an Agent, creates a Run or grants an Agent participant any authority.
 CONVERSATION_READ = "conversation.read"
 CONVERSATION_MESSAGE_CREATE = "conversation.message.create"
+# M3-B Project Architect (P015). Activation is a distinct Owner action; status is Owner-readable. The reply commit and
+# delivery reconciliation are internal Core operations performed by the service on behalf of the Owner who activated
+# the session. None of these is ever granted to an ``agent`` actor.
+ARCHITECT_STATUS = "architect.status"
+ARCHITECT_ACTIVATE = "architect.activate"
+ARCHITECT_DEACTIVATE = "architect.deactivate"
+ARCHITECT_REPLY_COMMIT = "conversation.architect_reply.commit"
+CONVERSATION_DELIVERY_RECONCILE = "conversation.delivery.reconcile"
 
 # Resource shapes: which identifiers an action must carry and which it may carry.
 # (required fields, optional fields); every other field must be absent.
@@ -99,6 +107,11 @@ _SHAPES: dict[str, tuple[frozenset[str], frozenset[str]]] = {
     RUN_LINK_AGENT: (frozenset({"project_id", "run_id", "agent_id"}), frozenset()),
     CONVERSATION_READ: (frozenset({"project_id"}), frozenset()),
     CONVERSATION_MESSAGE_CREATE: (frozenset({"project_id"}), frozenset()),
+    ARCHITECT_STATUS: (frozenset({"project_id"}), frozenset()),
+    ARCHITECT_ACTIVATE: (frozenset({"project_id"}), frozenset()),
+    ARCHITECT_DEACTIVATE: (frozenset({"project_id"}), frozenset()),
+    ARCHITECT_REPLY_COMMIT: (frozenset({"project_id"}), frozenset()),
+    CONVERSATION_DELIVERY_RECONCILE: (frozenset({"project_id"}), frozenset()),
 }
 IMPLEMENTED_ACTIONS = frozenset(_SHAPES)
 

@@ -1,7 +1,7 @@
 // The only surface a presentation package sees. Presentations render these typed view models and call these
 // callbacks; they never reach the API client, the router or Core persistence.
 import type { ComponentType, ReactNode } from 'react';
-import type { ConversationMessage, Project, ProjectFormValues, RepairConfirmation, Task, TaskFormValues } from '../../core/models';
+import type { ArchitectStatus, ConversationMessage, Project, ProjectFormValues, RepairConfirmation, Task, TaskFormValues } from '../../core/models';
 import type { ScrollRegions } from '../scroll';
 
 export type LoadStatus = 'loading' | 'ready' | 'failed';
@@ -49,8 +49,23 @@ export type ConversationState = {
  * Conversation actions owned by the application controller. `onSend` resolves to `null` once the message is
  * persisted and to an error message otherwise, so a view can keep the draft and report failure truthfully.
  */
+export type ArchitectControlState = {
+  status: LoadStatus;
+  info: ArchitectStatus | null;
+  /** True while an explicit activate/deactivate request is in flight ("activating"). */
+  busy: boolean;
+  error: string;
+};
+
 export type ConversationControls = {
   state: ConversationState;
+  architect: ArchitectControlState;
+  /** Explicit Owner activation of the Project Architect. Resolves to an error message or null. */
+  onActivate: () => Promise<string | null>;
+  onDeactivate: () => Promise<string | null>;
+  /** Uncertain delivery lookup (never re-sends) and safe retry (only after a provable non-delivery). */
+  onReconcile: (messageId: string) => Promise<string | null>;
+  onRetryDelivery: (messageId: string) => Promise<string | null>;
   onReload: () => void;
   onLoadOlder: () => void;
   onSend: (body: string, clientKey: string) => Promise<string | null>;

@@ -28,9 +28,11 @@ from sqlalchemy.orm import Session, sessionmaker
 from .authorization import (CONVERSATION_MESSAGE_CREATE, CONVERSATION_READ, ActorContext, AuthorizationPolicy,
                             ResourceScope, evaluate)
 from .models import (CONVERSATION_KIND_PROJECT, MAX_CLIENT_KEY, MAX_MESSAGE_BODY, PARTICIPANT_ARCHITECT,
-                     PARTICIPANT_OWNER, PARTICIPANT_WORKER, Conversation, ConversationMessage, ConversationParticipant,
+                     PARTICIPANT_OWNER, PARTICIPANT_WORKER, Conversation, ConversationMessage, ConversationDelivery, ConversationParticipant,
                      Project, ProjectIdentityError, validate_project_identity)
 
+# Failure codes after which nothing can have reached the provider, so an explicit retry cannot duplicate a turn.
+SAFE_RETRY_CODES = frozenset({"session_not_ready", "connection_failed", "not_received", "assignment_changed"})
 DEFAULT_PAGE_SIZE = 50
 MAX_PAGE_SIZE = 100
 MIN_CLIENT_KEY = 8
@@ -141,8 +143,19 @@ def conversation_view(conversation: Conversation) -> dict:
     }
 
 
-def message_view(message: ConversationMessage, sender: ConversationParticipant) -> dict:
-    return {
+def delivery_state_view(row: ConversationDelivery | None) -> dict:
+    """Delivery of one Owner message. No row means only stored: nothing was ever sent (see P015 / M3-B)."""
+    if row is None:
+        return {"state": "not_sent", "error_code": None, "reply_message_id": None, "can_retry": False,
+                "can_reconcile": False}
+    return {"state": row.state, "error_code": row.error_code, "reply_message_id": row.reply_message_id,
+            "can_retry": row.state == "failed" and row.error_code in SAFE_RETRY_CODES,
+            "can_reconcile": row.state in ("unknown", "pending")}
+
+
+def message_view(message: ConversationMessage, sender: ConversationParticipant,
+                 delivery: ConversationDelivery | None = None) -> dict:
+    view = {
         "message_id": message.message_id,
         "conversation_id": message.conversation_id,
         "ordinal": message.ordinal,
@@ -150,6 +163,9 @@ def message_view(message: ConversationMessage, sender: ConversationParticipant) 
         "created_at": _utc_iso(message.created_at),
         "sender": participant_view(sender),
     }
+    if sender.kind == PARTICIPANT_OWNER:
+        view["delivery"] = delivery_state_view(delivery)
+    return view
 
 
 def _empty_page(project_id: int, limit: int) -> dict:
@@ -225,12 +241,14 @@ class ProjectConversationService:
         has_more = len(rows) > limit
         window = list(reversed(rows[:limit]))
         senders = {participant.participant_id: participant for participant in conversation.participants}
+        deliveries = {d.message_id: d for d in session.scalars(select(ConversationDelivery).where(
+            ConversationDelivery.message_id.in_([row.message_id for row in window])))}
         messages = []
         for row in window:
             sender = senders.get(row.sender_participant_id)
             if sender is None:
                 raise ConversationStoreError("Conversation records are inconsistent")
-            messages.append(message_view(row, sender))
+            messages.append(message_view(row, sender, deliveries.get(row.message_id)))
         return {
             "project_id": _project_label(conversation.project_id),
             "conversation": conversation_view(conversation),
@@ -278,7 +296,7 @@ class ProjectConversationService:
                         session.rollback()
                         raise ConversationConflict(
                             "This message key was already used for different content; reload the conversation")
-                    replay = message_view(existing, owner)
+                    replay = message_view(existing, owner, session.get(ConversationDelivery, existing.message_id))
                     session.rollback()  # a replay writes nothing, not even the conversation it may have ensured
                     return {"message": replay, "replayed": True}
                 ordinal = (session.scalar(select(func.max(ConversationMessage.ordinal)).where(

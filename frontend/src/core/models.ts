@@ -63,6 +63,16 @@ export type ConversationParticipant = {
   agent_id: string | null;
 };
 
+/** Delivery of one Owner message to the Project Architect (P015). `not_sent` means it was only stored in ROSC. */
+export type DeliveryState = 'not_sent' | 'pending' | 'delivered' | 'failed' | 'unknown';
+export type MessageDelivery = {
+  state: DeliveryState;
+  error_code: string | null;
+  reply_message_id: string | null;
+  can_retry: boolean;
+  can_reconcile: boolean;
+};
+
 export type ConversationMessage = {
   message_id: string;
   conversation_id: string;
@@ -70,6 +80,20 @@ export type ConversationMessage = {
   body: string;
   created_at: string;
   sender: ConversationParticipant;
+  /** Present on Owner messages only. */
+  delivery?: MessageDelivery;
+};
+
+/** Verified Project Architect runtime state. `ready` is reported by Core only after a fresh liveness probe. */
+export type ArchitectState = 'not_configured' | 'stopped' | 'starting' | 'ready' | 'error';
+export type ArchitectStatus = {
+  project_id: string;
+  state: ArchitectState;
+  detail: string | null;
+  can_activate: boolean;
+  can_deactivate: boolean;
+  agent: { agent_id: string; display_name: string; provider_id: string; model_id: string } | null;
+  session: { session_id: string; state: string; verified_at: string | null } | null;
 };
 
 export type ProjectConversation = {
@@ -90,6 +114,7 @@ export type ConversationPage = {
 
 export type ConversationMessageInput = { client_key: string; body: string };
 export type ConversationMessageResult = { message: ConversationMessage; replayed: boolean };
+export type DeliveryResult = { delivery: MessageDelivery };
 
 /** Can only be produced by an explicit user confirmation; the repair endpoint requires it. */
 export type RepairConfirmation = { readonly confirmed: true };

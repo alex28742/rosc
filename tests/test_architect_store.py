@@ -600,8 +600,12 @@ class AuthorizationSlotTests(ArchitectStoreCase):
             self.service.read_document("agent-7", 1, "notes")  # a bare caller-supplied id is not an ActorContext
 
     def test_no_http_surface_is_exposed(self) -> None:
+        # The document store has no HTTP surface. P015 adds only the Owner activation/status routes of the Project
+        # Architect runtime; none of them reads or writes a document.
         paths = {getattr(route, "path", "") for route in self.client.app.routes}
-        self.assertFalse([p for p in paths if "architect" in p.lower() or "document" in p.lower()], paths)
+        activation = {"/api/projects/{project_id}/architect", "/api/projects/{project_id}/architect/activate",
+                      "/api/projects/{project_id}/architect/deactivate"}
+        self.assertFalse([p for p in paths - activation if "architect" in p.lower() or "document" in p.lower()], paths)
 
     def test_requires_a_ready_project_workspace(self) -> None:
         (self.workspace / "projects/P0002/project.yaml").write_text("garbage: [")

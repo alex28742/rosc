@@ -84,7 +84,7 @@ class FreshRegistrationTests(IdentityCase):
 
     def test_single_migration_head(self) -> None:
         from alembic.script import ScriptDirectory
-        self.assertEqual(ScriptDirectory.from_config(self.alembic).get_heads(), ["0005_project_conversation_foundation"])
+        self.assertEqual(ScriptDirectory.from_config(self.alembic).get_heads(), ["0006_architect_runtime_sessions"])
 
     def test_read_model_adds_identity_and_keeps_legacy_root_path(self) -> None:
         root = self.new_root()

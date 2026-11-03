@@ -1,0 +1,99 @@
+"""Test-only stand-in for ``opencode serve``. NOT a product runtime and never imported by ``src/``.
+
+It speaks only the small subset of the OpenCode 2.2.5 HTTP surface the ROSC adapter uses, enforces the Basic-auth
+contract (user ``opencode``, password from ``OPENCODE_PASSWORD``) and never calls a model. Behaviour is selected by the
+file ``mode`` beside the launcher so a test can simulate refusal, an unrestricted session or no reply.
+"""
+from __future__ import annotations
+
+import base64
+import json
+import os
+import sys
+from http.server import BaseHTTPRequestHandler, HTTPServer
+
+PASSWORD = os.environ.get("OPENCODE_PASSWORD", "")
+
+
+def mode() -> str:
+    """Read per request from a ``mode`` file beside the launcher: ROSC passes the child only an allowlisted
+    environment, so a test cannot steer it through variables."""
+    try:
+        with open(os.path.join(os.path.dirname(os.path.realpath(sys.argv[0])), "mode")) as handle:
+            return handle.read().strip() or "ok"
+    except OSError:
+        return "ok"
+
+
+STATE: dict = {"session": None, "messages": []}
+
+
+class Handler(BaseHTTPRequestHandler):
+    def log_message(self, *args) -> None:  # silence
+        pass
+
+    def _send(self, payload, status: int = 200) -> None:
+        raw = json.dumps(payload).encode()
+        self.send_response(status)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(raw)))
+        self.end_headers()
+        self.wfile.write(raw)
+
+    def _authorized(self) -> bool:
+        expected = "Basic " + base64.b64encode(f"opencode:{PASSWORD}".encode()).decode()
+        return self.headers.get("Authorization") == expected
+
+    def _body(self):
+        length = int(self.headers.get("Content-Length") or 0)
+        return json.loads(self.rfile.read(length) or b"{}")
+
+    def do_GET(self) -> None:
+        if not self._authorized():
+            return self._send({"_tag": "UnauthorizedError"}, 401)
+        path = self.path.split("?")[0]
+        if path == "/api/info":
+            return self._send({"version": "2.2.5", "pid": os.getpid(), "urls": []})
+        if path == "/api/model":
+            return self._send({"data": [{"providerID": "prov", "id": "model-a"}]})
+        if path == "/api/session/ses_fake":
+            return self._send({"data": STATE["session"]})
+        if path == "/api/session/ses_fake/message":
+            return self._send({"data": STATE["messages"]})
+        self._send({}, 404)
+
+    def do_POST(self) -> None:
+        if not self._authorized():
+            return self._send({"_tag": "UnauthorizedError"}, 401)
+        path, body = self.path.split("?")[0], self._body()
+        if path == "/api/session":
+            permissions = [] if mode() == "unrestricted" else body.get("permissions")
+            STATE["session"] = {"id": "ses_fake", "permissions": permissions}
+            return self._send({"data": STATE["session"]})
+        if path == "/api/session/ses_fake/permission":
+            return self._send({"data": {"id": "per_1", "effect": "deny"}})
+        if path == "/api/session/ses_fake/prompt":
+            STATE["messages"].append({"id": body["id"], "type": "user", "text": body["text"]})
+            if mode() == "ok":
+                STATE["messages"].append({"id": "msg_a1", "type": "assistant", "finish": "stop",
+                                          "time": {"completed": 1},
+                                          "content": [{"type": "text", "text": "Fake architect reply"}]})
+            elif mode() == "refuse":
+                STATE["messages"].append({"id": "msg_a1", "type": "assistant", "finish": "error",
+                                          "error": {"name": "x"}, "time": {"completed": 1}, "content": []})
+            return self._send({"data": {"id": body["id"]}})
+        if path == "/api/experimental/session/ses_fake/wait":
+            self.send_response(204)
+            self.end_headers()
+            return
+        self._send({}, 404)
+
+
+def main() -> None:
+    args = sys.argv[1:]
+    port = int(args[args.index("--port") + 1])
+    HTTPServer(("127.0.0.1", port), Handler).serve_forever()
+
+
+if __name__ == "__main__":
+    main()
