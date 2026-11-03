@@ -452,7 +452,10 @@ class StartHeadAudit(Base):
         super().setUp()
         (self.root / ".agent-telemetry" / "reports").mkdir(parents=True)
 
-    def run_with(self, *, head, base=BASE_SHA, result="none", report=True, name="p1__run__r01"):
+    def run_with(
+        self, *, head, base=BASE_SHA, result="none", report=True,
+        name="p1__run__r01", origin=None,
+    ):
         if report:
             (self.root / f"{name}.md").write_text(
                 f"# R\n\n- Base commit: {base}\n- Result commit: {result}\n", encoding="utf-8"
@@ -460,6 +463,7 @@ class StartHeadAudit(Base):
         file = trace.init_run(
             repo_root=self.root, runs_dir=self.runs, run_id=name, prompt_id="1",
             report=f"{name}.md", context_mode="COLD", owners=[], head=head, branch="b",
+            origin=origin,
         )
         self.read(file, "docs/README.md", "BOOTSTRAP")
         self.read(file, "docs/development_workflow.md", "BOOTSTRAP")
@@ -488,13 +492,27 @@ class StartHeadAudit(Base):
         self.assertEqual(result["verdict"], "ATTENTION")
 
     def test_missing_or_legacy_report_degrades_without_fabricating(self):
-        result = self.run_with(head=RESULT_SHA, report=False)
+        result = self.run_with(head=RESULT_SHA, report=False, origin="managed-start")
         self.assertEqual(result["start_check"]["status"], "unavailable")
         self.assertEqual(result["findings"]["late_init"], [])
-        self.assertEqual(result["verdict"], "NO-FINDINGS")
+        self.assertEqual(result["verdict"], "INCONCLUSIVE")
         self.assertIn("Start check unavailable", cli.render_summary(result, "raw"))
-        legacy = self.run_with(head=BASE_SHA, name="p1__legacy__r01", report=False, base="x")
+        self.assertIn("cannot be NO-FINDINGS", cli.render_summary(result, "raw"))
+        legacy = self.run_with(
+            head=BASE_SHA, name="p1__legacy__r01", report=False, base="x"
+        )
         self.assertEqual(legacy["start_check"]["status"], "unavailable")
+        self.assertEqual(legacy["verdict"], "NO-FINDINGS")
+        self.assertIn("Start check unavailable", cli.render_summary(legacy, "raw"))
+
+    def test_managed_start_with_invalid_base_is_not_clean(self):
+        result = self.run_with(head=BASE_SHA, base="not-a-sha", origin="managed-start")
+        self.assertEqual(result["start_check"]["status"], "unavailable")
+        self.assertEqual(result["verdict"], "INCONCLUSIVE")
+
+    def test_managed_matching_base_remains_eligible_for_no_findings(self):
+        result = self.run_with(head=BASE_SHA, origin="managed-start")
+        self.assertEqual((result["start_check"]["status"], result["verdict"]), ("match", "NO-FINDINGS"))
 
     def test_prior_events_are_not_mutated_by_analysis(self):
         file = self.start()

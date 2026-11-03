@@ -255,7 +255,11 @@ def cmd_finalize_report(args: argparse.Namespace) -> int:
         finalized_text = artifacts.apply_terminal_metadata(
             text, now=datetime.now(timezone.utc).isoformat()
         )
-        artifacts.parse_owner_attention(finalized_text)
+        attention = artifacts.parse_owner_attention(finalized_text)
+        if artifacts.is_managed_report(finalized_text) and attention is None:
+            raise artifacts.ReportMetadataError(
+                "new managed report requires a '## Owner attention' section"
+            )
     except artifacts.ReportMetadataError as exc:
         print(f"Refusing to finalize {local_path}: invalid report metadata ({exc}).", file=sys.stderr)
         return 1

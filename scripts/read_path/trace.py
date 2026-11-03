@@ -365,6 +365,11 @@ def analyze(*, repo_root: Path, file: Path) -> dict:
     uncertainties = {
         "route_uncertain": uncertain,
         "obligation_citation_uncertain": [p for p, i in obligations.items() if i["router_cited"] is None],
+        "managed_start_unverified": (
+            [start_check.get("reason", "start verification unavailable")]
+            if start.get("origin") == "managed-start" and start_check["status"] == "unavailable"
+            else []
+        ),
         "corrupt_lines": corrupt,
     }
     ended = any(e.get("type") == "run_end" for e in events)

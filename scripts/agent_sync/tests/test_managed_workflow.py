@@ -68,6 +68,20 @@ class Repo:
         subprocess.run(["git", "-C", str(self.root), "commit", "-qm", name], check=True)
         return artifacts.resolve_head_sha(self.root)
 
+    def use_second_prompt_revision(self) -> None:
+        self.snapshot = artifacts.create_frozen_prompt(
+            "9.1", "wf", "# frozen revision two\n", directory=self.root / "prompts"
+        )
+        state_mod.record_artifact(
+            self.state, local_path=self.rel(self.snapshot), artifact_type="prompt",
+            sha256=artifacts.sha256_file(self.snapshot), created_at="now",
+        )
+        self.assert_snapshot_revision(2)
+
+    def assert_snapshot_revision(self, revision: int) -> None:
+        parsed = artifacts.parse_frozen_prompt_filename(self.snapshot.name)
+        assert parsed is not None and parsed.run == revision
+
     def start_args(self, **over) -> list[str]:
         args = {
             "--prompt": "9.1", "--snapshot": str(self.snapshot), "--model": "test-model",
@@ -152,6 +166,33 @@ class ManagedStartTests(unittest.TestCase):
         self.assertEqual((self.repo.reports(), self.repo.runs()), ([report], [raw]))
         self.assertEqual((report.read_bytes(), raw.read_bytes()), before)
 
+    def test_r02_prompt_first_report_r01_still_blocks_duplicate_start(self):
+        self.repo.use_second_prompt_revision()
+        self.assertEqual(_run_cli(self.repo.root, self.repo.start_args())[0], 0)
+        (report,) = self.repo.reports()
+        self.assertTrue(report.name.endswith("__r01.md"))
+        self.assertIn("- Prompt revision/run: r02", report.read_text(encoding="utf-8"))
+        code, _, err = _run_cli(self.repo.root, self.repo.start_args())
+        self.assertEqual((code, "ALREADY_STARTED" in err), (1, True))
+        self.assertEqual(len(self.repo.reports()), 1)
+
+    def test_report_collision_counter_is_independent_and_unrelated_report_does_not_block(self):
+        self.repo.use_second_prompt_revision()
+        fixed = datetime(2026, 1, 2, 3, 4)
+        collision = artifacts.create_report(
+            "9.1", model_slug="test-model", content="# unrelated\n",
+            when=fixed, directory=self.repo.root / "reports",
+        )
+        with mock.patch.object(artifacts, "datetime") as clock:
+            clock.now.return_value = fixed
+            code, _, err = _run_cli(self.repo.root, self.repo.start_args())
+        self.assertEqual(code, 0, err)
+        reports = self.repo.reports()
+        self.assertEqual(len(reports), 2)
+        managed = next(path for path in reports if path != collision)
+        self.assertTrue(managed.name.endswith("__r02.md"))
+        self.assertIn("- Prompt revision/run: r02", managed.read_text(encoding="utf-8"))
+
     def test_failed_partial_start_is_recoverable_and_intact(self):
         with mock.patch.object(trace, "init_run", side_effect=OSError("disk")):
             code, _, err = _run_cli(self.repo.root, self.repo.start_args())
@@ -175,6 +216,84 @@ class ManagedStartTests(unittest.TestCase):
         self.assertIn("resumed", out)
         self.assertEqual(report.read_bytes(), before)
         self.assertEqual(self.repo.runs(), [self.repo.root / "read-path" / f"{report.stem}.jsonl"])
+        code, _, err = _run_cli(
+            self.repo.root, self.repo.start_args(**{"--resume-report": str(report)})
+        )
+        self.assertEqual((code, "RESUME_INVALID" in err), (1, True))
+        self.assertEqual(len(self.repo.runs()), 1)
+
+    def test_manifest_write_failure_can_be_reregistered_then_finalized(self):
+        self.repo.use_second_prompt_revision()
+        original = state_mod.record_artifact
+        with mock.patch.object(managed_start.state_mod, "record_artifact", side_effect=OSError("state")):
+            code, _, err = _run_cli(self.repo.root, self.repo.start_args())
+        self.assertEqual((code, "INCOMPLETE_START" in err), (1, True))
+        (report,) = self.repo.reports()
+        local = self.repo.rel(report)
+        self.assertIsNone(state_mod.artifact_entry(self.repo.state, local))
+        self.assertEqual(self.repo.runs(), [])
+        before = report.read_bytes()
+        with mock.patch.object(managed_start.state_mod, "record_artifact", wraps=original):
+            code, _, err = _run_cli(
+                self.repo.root, self.repo.start_args(**{"--resume-report": str(report)})
+            )
+        self.assertEqual(code, 0, err)
+        entry = state_mod.artifact_entry(self.repo.state, local)
+        self.assertEqual((entry["type"], entry["sha256"]), ("report", artifacts.sha256_file(report)))
+        self.assertEqual(report.read_bytes(), before)
+        self.assertEqual(len(trace.read_events(self.repo.runs()[0])[0]), 1)
+        text = report.read_text(encoding="utf-8")
+        text = text.replace("- Status: IN PROGRESS", "- Status: COMPLETED")
+        text = text.replace("- Result commit: none", f"- Result commit: {self.repo.base}")
+        report.write_text(text, encoding="utf-8")
+        self.assertEqual(_run_cli(self.repo.root, ["finalize-report", str(report)])[0], 0)
+        self.assertIsNotNone(state_mod.finalized_at(self.repo.state, local))
+
+    def test_persistent_reregistration_failure_creates_no_run_and_preserves_report(self):
+        with mock.patch.object(managed_start.state_mod, "record_artifact", side_effect=OSError("state")):
+            self.assertEqual(_run_cli(self.repo.root, self.repo.start_args())[0], 1)
+        (report,) = self.repo.reports()
+        before = report.read_bytes()
+        with mock.patch.object(managed_start.state_mod, "record_artifact", side_effect=OSError("state")):
+            code, _, err = _run_cli(
+                self.repo.root, self.repo.start_args(**{"--resume-report": str(report)})
+            )
+        self.assertEqual((code, "RESUME_INVALID" in err), (1, True))
+        self.assertEqual((report.read_bytes(), self.repo.runs()), (before, []))
+
+    def test_resume_does_not_enrol_modified_untracked_report(self):
+        with mock.patch.object(managed_start.state_mod, "record_artifact", side_effect=OSError("state")):
+            self.assertEqual(_run_cli(self.repo.root, self.repo.start_args())[0], 1)
+        (report,) = self.repo.reports()
+        report.write_text(
+            report.read_text(encoding="utf-8").replace(
+                "(concise summary of work completed)", "premature edit"
+            ),
+            encoding="utf-8",
+        )
+        before = report.read_bytes()
+        code, _, err = _run_cli(
+            self.repo.root, self.repo.start_args(**{"--resume-report": str(report)})
+        )
+        self.assertEqual((code, "RESUME_INVALID" in err), (1, True))
+        self.assertIsNone(state_mod.artifact_entry(self.repo.state, self.repo.rel(report)))
+        self.assertEqual((report.read_bytes(), self.repo.runs()), (before, []))
+
+    def test_resume_refuses_contradictory_manifest_entry(self):
+        with mock.patch.object(trace, "init_run", side_effect=OSError("disk")):
+            self.assertEqual(_run_cli(self.repo.root, self.repo.start_args())[0], 1)
+        (report,) = self.repo.reports()
+        local = self.repo.rel(report)
+        state_mod.record_artifact(
+            self.repo.state, local_path=local, artifact_type="prompt",
+            sha256=artifacts.sha256_file(report), created_at="now",
+        )
+        before = report.read_bytes()
+        code, _, err = _run_cli(
+            self.repo.root, self.repo.start_args(**{"--resume-report": str(report)})
+        )
+        self.assertEqual((code, "RESUME_INVALID" in err), (1, True))
+        self.assertEqual((report.read_bytes(), self.repo.runs()), (before, []))
 
     def test_no_drive_access(self):
         with mock.patch.object(cli.drive, "open_transport", side_effect=AssertionError("Drive used")), \
@@ -272,6 +391,15 @@ class TerminalMetadataTests(unittest.TestCase):
         self.assertEqual(code, 1)
         self.assertIn("incomplete", err)
 
+    def test_new_managed_report_requires_owner_attention_section(self):
+        report, local = _managed_report(self.repo, finalize=False)
+        text = re.sub(r"(?s)\n## Owner attention\n.*?(?=\n## Sync state)", "", report.read_text(encoding="utf-8"))
+        report.write_text(text, encoding="utf-8")
+        code, _, err = _run_cli(self.repo.root, ["finalize-report", str(report)])
+        self.assertEqual(code, 1)
+        self.assertIn("requires a '## Owner attention' section", err)
+        self.assertIsNone(state_mod.finalized_at(self.repo.state, local))
+
     def test_legacy_report_without_metadata_still_finalizes_unchanged(self):
         reports = self.repo.root / "reports"
         text = "# R\n\n## Sync state\n\nsync: pending\n\n## Telemetry\n\nnone\n"
@@ -282,6 +410,23 @@ class TerminalMetadataTests(unittest.TestCase):
         )
         self.assertEqual(_run_cli(self.repo.root, ["finalize-report", str(legacy)])[0], 0)
         self.assertEqual(legacy.read_text(encoding="utf-8"), text)
+
+    def test_historical_finalized_managed_report_without_attention_is_unchanged_noop(self):
+        report, local = _managed_report(self.repo, finalize=False)
+        text = re.sub(
+            r"(?s)\n## Owner attention\n.*?(?=\n## Sync state)", "",
+            report.read_text(encoding="utf-8"),
+        )
+        report.write_text(text, encoding="utf-8")
+        state_mod.mark_report_finalized(
+            self.repo.state, local_path=local, sha256=artifacts.sha256_file(report),
+            finalized_at="2026-01-01T00:00:00+00:00",
+        )
+        before = report.read_bytes()
+        code, out, err = _run_cli(self.repo.root, ["finalize-report", str(report)])
+        self.assertEqual((code, err), (0, ""))
+        self.assertIn("already finalized", out)
+        self.assertEqual(report.read_bytes(), before)
 
     def test_finalized_report_cannot_be_edited_or_refinalized(self):
         report, local = _managed_report(self.repo)

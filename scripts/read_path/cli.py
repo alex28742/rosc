@@ -54,6 +54,10 @@ def render_summary(analysis: dict, raw_path: str) -> str:
             f"Routing uncertain for {len(u['route_uncertain'])} read(s) and {len(u['obligation_citation_uncertain'])} "
             "obligation citation(s): a router changed since it was read or was only partly read."
         )
+    if u.get("managed_start_unverified"):
+        lines.append(
+            "Managed start verification is unavailable; the telemetry verdict cannot be NO-FINDINGS."
+        )
     if analysis["corrupt_lines"]:
         lines.append(f"Warning: {analysis['corrupt_lines']} unreadable raw line(s) ignored; verdict cannot be NO-FINDINGS.")
     return "\n".join(lines)

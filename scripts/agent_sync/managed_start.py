@@ -11,6 +11,7 @@ telemetry artifacts relative to the declared base.
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -49,8 +50,8 @@ def _rel(path: Path, root: Path) -> str:
 
 
 def _matching_unfinished_reports(
-    *, reports_dir: Path, prompt_id: str, model: str, run: int, sha256: str,
-    base_commit: str, state_path: Path, repo_root: Path,
+    *, reports_dir: Path, prompt_id: str, snapshot: str, model: str, prompt_run: int,
+    sha256: str, branch: str, base_commit: str, state_path: Path, repo_root: Path,
 ) -> list[Path]:
     """Existing unfinalized reports of this exact start (same prompt revision,
     model and base)."""
@@ -59,7 +60,7 @@ def _matching_unfinished_reports(
     slug = artifacts.slugify(model)
     for path in sorted(reports_dir.glob(f"p{prompt_id}__*.md")) if reports_dir.is_dir() else []:
         parsed = artifacts.parse_report_filename(path.name)
-        if not parsed or parsed["prompt_id"] != prompt_id or parsed["model"] != slug or parsed["run"] != run:
+        if not parsed or parsed["prompt_id"] != prompt_id or parsed["model"] != slug:
             continue
         if state_mod.finalized_at(state_path, _rel(path, repo_root)):
             continue
@@ -68,11 +69,81 @@ def _matching_unfinished_reports(
         except OSError:
             continue
         if (
-            artifacts._report_metadata_value(text, "Prompt SHA-256") == sha256
+            artifacts._report_metadata_value(text, "Prompt ID") == prompt_id
+            and artifacts._report_metadata_value(text, "Prompt snapshot") == snapshot
+            and artifacts._report_metadata_value(text, "Prompt revision/run") == f"r{prompt_run:02d}"
+            and artifacts._report_metadata_value(text, "Prompt SHA-256") == sha256
+            and artifacts._report_metadata_value(text, "Agent/model") == model
+            and artifacts._report_metadata_value(text, "Branch") == branch
             and artifacts._report_metadata_value(text, "Base commit") == base_commit
         ):
             found.append(path)
     return found
+
+
+def _ensure_resumed_report_tracked(
+    *, report: Path, state_path: Path, repo_root: Path, prompt_id: str,
+    snapshot: str, prompt_run: int, prompt_sha256: str, model: str,
+    branch: str, base_commit: str,
+) -> None:
+    """Restore a missing draft manifest entry, or validate an existing one.
+
+    Report bytes are authoritative after exclusive creation.  Registration is
+    deliberately completed before read-path initialisation so a failed recovery
+    never leaves a misleading ``run_start`` behind.
+    """
+
+    local = _rel(report, repo_root)
+    text = report.read_text(encoding="utf-8")
+    current_sha = artifacts.sha256_text(text)
+    entry = state_mod.artifact_entry(state_path, local)
+    if entry is None:
+        heading = re.match(rf"\A# Prompt {re.escape(prompt_id)} — (.+)\n", text)
+        start = artifacts._report_metadata_value(text, "Start")
+        expected = artifacts.render_report_skeleton(
+            prompt_id=prompt_id,
+            title=heading.group(1) if heading else "",
+            prompt_snapshot=snapshot,
+            prompt_run=prompt_run,
+            prompt_sha256=prompt_sha256,
+            model=model,
+            branch=branch,
+            base_commit=base_commit,
+            start=start,
+        ) if heading and start else None
+        if text != expected:
+            raise ManagedStartError(
+                "RESUME_INVALID",
+                f"untracked report {local} is not the intact managed-start draft; "
+                "nothing was overwritten",
+            )
+        try:
+            state_mod.record_artifact(
+                state_path,
+                local_path=local,
+                artifact_type="report",
+                sha256=current_sha,
+                created_at=datetime.now(timezone.utc).isoformat(),
+            )
+        except (OSError, ValueError, TypeError) as exc:
+            raise ManagedStartError(
+                "RESUME_INVALID",
+                f"report {local} is intact but could not be re-registered "
+                f"({exc.__class__.__name__}); no read-path run was created",
+            ) from exc
+        return
+    if (
+        entry.get("type") != "report"
+        or entry.get("sha256") != current_sha
+        or entry.get("finalized_at")
+        or entry.get("sync_status") not in ("pending", "failed")
+        or entry.get("drive_id") is not None
+    ):
+        raise ManagedStartError(
+            "RESUME_INVALID",
+            f"sync-state entry for {local} contradicts the intact unfinalized report; "
+            "nothing was overwritten",
+        )
 
 
 def managed_start(
@@ -104,14 +175,16 @@ def managed_start(
     if not artifacts.is_worktree_clean(repo_root):
         raise ManagedStartError("DIRTY_WORKTREE", "worktree has uncommitted changes; refusing to start")
     branch = artifacts.current_branch_name(repo_root) or "(detached)"
+    snapshot_rel = _rel(snapshot, repo_root)
     try:
         owner_rels = [trace.doc_rel(repo_root, owner) for owner in owners]
     except trace.TraceError as exc:
         raise ManagedStartError("BAD_OWNER", str(exc)) from exc
 
     existing = _matching_unfinished_reports(
-        reports_dir=reports_dir, prompt_id=prompt_id, model=model, run=parsed.run,
-        sha256=integrity.sha256, base_commit=base_commit, state_path=state_path, repo_root=repo_root,
+        reports_dir=reports_dir, prompt_id=prompt_id, snapshot=snapshot_rel,
+        model=model, prompt_run=parsed.run, sha256=integrity.sha256, branch=branch,
+        base_commit=base_commit, state_path=state_path, repo_root=repo_root,
     )
     resuming = resume_report is not None
     if resuming:
@@ -124,6 +197,12 @@ def managed_start(
                 "that has no read-path run yet",
             )
         report = target
+        _ensure_resumed_report_tracked(
+            report=report, state_path=state_path, repo_root=repo_root,
+            prompt_id=prompt_id, snapshot=snapshot_rel, prompt_run=parsed.run,
+            prompt_sha256=integrity.sha256, model=model, branch=branch,
+            base_commit=base_commit,
+        )
     else:
         for path in existing:
             raw = trace.run_path(path.stem, runs_dir)
@@ -139,7 +218,7 @@ def managed_start(
             )
         content = artifacts.render_report_skeleton(
             prompt_id=prompt_id, title=title or prompt_id,
-            prompt_snapshot=_rel(snapshot, repo_root), prompt_run=parsed.run,
+            prompt_snapshot=snapshot_rel, prompt_run=parsed.run,
             prompt_sha256=integrity.sha256, model=model, branch=branch, base_commit=base_commit,
         )
         report = artifacts.create_report(prompt_id, model_slug=model, content=content, directory=reports_dir)
