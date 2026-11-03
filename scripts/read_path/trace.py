@@ -100,7 +100,7 @@ def read_events(file: Path) -> tuple[list[dict], int]:
 
 def init_run(
     *, repo_root: Path, runs_dir: Path, run_id: str, prompt_id: str, report: str,
-    context_mode: str, owners: list[str], head: str, branch: str,
+    context_mode: str, owners: list[str], head: str, branch: str, origin: str | None = None,
 ) -> Path:
     if context_mode not in CONTEXT_MODES:
         raise TraceError(f"context mode must be one of {CONTEXT_MODES}")
@@ -112,7 +112,7 @@ def init_run(
     append(file, {
         "type": "run_start", "schema": SCHEMA, "run_id": run_id, "prompt_id": prompt_id,
         "report": report, "context_mode": context_mode, "owners": owner_rels,
-        "head": head, "branch": branch,
+        "head": head, "branch": branch, **({"origin": origin} if origin else {}),
     })
     return file
 
@@ -207,6 +207,41 @@ def links_from(repo_root: Path, rel: str) -> set[str]:
         except ValueError:
             continue
     return found
+
+
+_SHA_RE = re.compile(r"^[0-9a-f]{40}$")
+
+
+def _report_field(text: str, label: str) -> str | None:
+    match = re.search(rf"(?m)^- {re.escape(label)}: (.+)$", text)
+    return match.group(1).strip() if match else None
+
+
+def start_head_check(repo_root: Path, start: dict) -> dict:
+    """Compare the run's recorded start HEAD with the report's declared Base commit.
+
+    ``match`` is only a necessary condition (it does not prove real reading
+    chronology). ``LATE_INIT`` = started at the report's Result commit;
+    ``START_HEAD_MISMATCH`` = started at some other HEAD. A missing report or
+    legacy metadata degrades to ``unavailable`` -- never a fabricated mismatch.
+    """
+
+    head, rel = start.get("head"), start.get("report")
+    if not isinstance(rel, str) or not isinstance(head, str) or not _SHA_RE.match(head):
+        return {"status": "unavailable", "reason": "run_start lacks a full start HEAD or report"}
+    try:
+        path = (repo_root / rel).resolve()
+        path.relative_to(repo_root.resolve())
+        text = path.read_text(encoding="utf-8")
+    except (OSError, ValueError):
+        return {"status": "unavailable", "reason": "report not readable"}
+    base, result = _report_field(text, "Base commit"), _report_field(text, "Result commit")
+    if not base or not _SHA_RE.match(base):
+        return {"status": "unavailable", "reason": "report has no full Base commit"}
+    if head == base:
+        return {"status": "match", "head_start": head, "base": base}
+    status = "LATE_INIT" if result and head == result else "START_HEAD_MISMATCH"
+    return {"status": status, "head_start": head, "base": base, "result": result}
 
 
 def analyze(*, repo_root: Path, file: Path) -> dict:
@@ -314,7 +349,9 @@ def analyze(*, repo_root: Path, file: Path) -> dict:
     partial = sum(1 for i in obligations.values() if i["status"] == "partial")
     absent = sum(1 for i in obligations.values() if i["status"] == "not-recorded")
     counts = {c: sum(1 for r in done if r.get("category") == c) for c in CATEGORIES}
+    start_check = start_head_check(repo_root, start)
     findings = {
+        "late_init": [start_check] if start_check["status"] in ("LATE_INIT", "START_HEAD_MISMATCH") else [],
         "router_misses": misses,
         "detours": counts["DETOUR"],
         "unexplained_repeats": [d for d in duplicates if not d["justified"]],
@@ -351,5 +388,6 @@ def analyze(*, repo_root: Path, file: Path) -> dict:
         "coverage": f"{full} full, {reused} freshness-only reuse, {partial} partial, {absent} not-recorded of {len(obligations)} obligations",
         "confidence": "agent-recorded, hash-verified on disk; not harness-instrumented",
         "corrupt_lines": corrupt, "findings": findings, "uncertainties": uncertainties,
+        "start_check": start_check, "origin": start.get("origin"),
     }
 

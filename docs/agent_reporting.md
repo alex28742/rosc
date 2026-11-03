@@ -20,12 +20,24 @@ Only the Owner/coordinator edits a Drive draft before execution. An executed loc
 
 1. The coordinator and Owner agree on a draft; the coordinator stores `p<ID>__<slug>.md` in `Agent Prompts / Drafts` and gives the agent its exact name/ID.
 2. Agent runs `.venv/bin/python3 -m scripts.agent_sync.cli prompt-pull <ID>` before docs routing. It runs `verify-prompt` for the exact snapshot printed by pull. No manual copy or fallback to a chat paraphrase.
-3. Agent records the full base Git commit, creates a report skeleton referencing snapshot path and SHA-256, declares COLD/WARM honestly, routes through `docs/README.md`, and records actual documentation reads with `scripts.read_path.cli`.
-4. Agent works, validates, commits, records actual result HEAD and documentation impact, attaches the read-path summary, and runs `finalize-report`.
-5. Agent prints one completion line: `PROMPT <ID> <STATUS> | report=<path> | commit=<sha|none> | sync=<synced|pending|failed> [| transport=<auth_required|unavailable>]`. Full report stays in the file.
+3. Agent verifies a clean designated branch/worktree and captures the full base commit, then runs `managed-start` (below) **before any `docs/` read**. The bootstrap `AGENTS.md` exposure is an acknowledged exception, described rather than backfilled. Agent then routes through [`docs/README.md`](README.md) and records actual documentation reads with `scripts.read_path.cli read` immediately after they occur.
+4. Agent works, validates, commits, records actual result HEAD and documentation impact, attaches the read-path summary, and runs `finalize-report`. Finalization requires a terminal `Status` (`COMPLETED`, `FAILED` or `BLOCKED`) and fills a pending `End` exactly once with the actual finalization time (an explicit valid UTC `End` is kept).
+5. Agent's final answer is the output of `completion-line`: `PROMPT <ID> <STATUS> | report=<path> | commit=<sha|none> | sync=<synced|pending|failed> | push=<not-pushed|pushed:<sha>> [| transport=<auth_required|unavailable>]`, with nothing else. Only if the finalized report records `Severity: serious` under `## Owner attention`, `completion-line` prints one `OWNER ATTENTION: <issue> [Owner action: <action>]` line before it. Serious means a live-data/credential exposure, unintended change to real Owner data, source loss or unauthorized push/merge, integrity/authorization violation, unresolved critical gate failure, or a decision without which work cannot safely continue; routine warnings, passing tests, expected `sync=pending` or deferred scope are not. The author sets it in the report when such an issue is already known; the CLI does not assess severity and no extra review pass is required. Full facts, including every serious issue, stay in the report. `push=not-pushed` unless `--push pushed:<full commit SHA>` names the reported commit.
 6. `reports-push <report>` archives the finalized report in ROSC Drive. The coordinator reads that archive or the local authoritative report and reviews evidence and code. Sync failure leaves a completed local report intact and retryable.
 
 The report records prompt ID, frozen revision/hash, model, branch, base and result commits, status, dates, result, validation, outstanding items, documentation impact, historical sync state and telemetry summary. It references rather than duplicates the full prompt. Finalization seals the report hash and timestamp; later transport changes only the manifest, never the report body. Re-finalizing unchanged bytes is a no-op; mutating a finalized report is refused.
+
+## Managed start
+
+```sh
+.venv/bin/python3 -m scripts.agent_sync.cli managed-start --prompt <ID> \
+  --snapshot <snapshot printed by prompt-pull> --model <model-slug> \
+  --base-commit <full SHA> --mode COLD
+```
+
+Local only (no Drive/OAuth). It re-verifies the snapshot against the manifest, requires `HEAD == --base-commit` exactly and a clean worktree, creates the report skeleton and read-path run (once, never overwriting), and prints `MANAGED-START OK | run=<id> | report=<path> | raw=<path> ...`. Use that run ID for `read`, `end`, `attach`; use the report path for `finalize-report`. Refusals are fail-closed and printed as `MANAGED-START REFUSED | <CODE>`: `SNAPSHOT_INVALID`, `BASE_INVALID`, `LATE_START` (HEAD already moved), `DIRTY_WORKTREE`, `ALREADY_STARTED`, `INCOMPLETE_START` (report exists but the run could not start: rerun with `--resume-report <report>`, which only initialises the missing read-path run), `RESUME_INVALID`. Treat a refusal as `BLOCKED`. It does not intercept tool calls and cannot prove what the model read. The older `report-skeleton` + read-path `init` commands remain for compatibility, but a late `init` is flagged by the analyzer.
+
+The read-path summary compares the run's recorded start HEAD with the report's `Base commit`: `LATE_INIT` (started at the result commit) or `START_HEAD_MISMATCH` is an `ATTENTION` finding and never `NO-FINDINGS`; a missing report or legacy trace is `unavailable`, not a mismatch. A match is only a necessary check.
 
 ## CLI commands
 

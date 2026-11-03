@@ -417,3 +417,87 @@ class FollowUpRegressions(Base):
 if __name__ == "__main__":
     unittest.main()
 
+
+
+REAL_ROOT = Path(__file__).resolve().parents[3]
+BASE_SHA, RESULT_SHA, OTHER_SHA = "a" * 40, "b" * 40, "c" * 40
+
+
+class RealRouterLinks(Base):
+    def test_readme_markdown_links_route_agent_reporting_without_miss(self):
+        links = trace.links_from(REAL_ROOT, "docs/README.md")
+        self.assertIn("docs/agent_reporting.md", links)
+        self.assertIn("docs/development_workflow.md", links)
+        file = trace.init_run(
+            repo_root=REAL_ROOT, runs_dir=self.runs, run_id="p1__real__r01", prompt_id="1",
+            report="x.md", context_mode="COLD", owners=[], head=BASE_SHA, branch="b",
+        )
+        for path, cat in (("docs/README.md", "OWNER"), ("docs/development_workflow.md", "OWNER"),
+                          ("docs/agent_reporting.md", "DEPENDENCY")):
+            trace.record_read(repo_root=REAL_ROOT, file=file, state_path=self.ledger, path=path, category=cat)
+        trace.end_run(file=file, head=BASE_SHA)
+        result = trace.analyze(repo_root=REAL_ROOT, file=file)
+        self.assertEqual(result["findings"]["router_misses"], [])
+
+    def test_unlinked_document_is_still_a_router_miss(self):
+        file = self.start(owners=())
+        self.read(file, "docs/README.md", "BOOTSTRAP")
+        self.read(file, "docs/orphan.md", "DEPENDENCY")
+        trace.end_run(file=file, head="a" * 40)
+        self.assertEqual(self.analysis(file)["findings"]["router_misses"], ["docs/orphan.md"])
+
+
+class StartHeadAudit(Base):
+    def setUp(self):
+        super().setUp()
+        (self.root / ".agent-telemetry" / "reports").mkdir(parents=True)
+
+    def run_with(self, *, head, base=BASE_SHA, result="none", report=True, name="p1__run__r01"):
+        if report:
+            (self.root / f"{name}.md").write_text(
+                f"# R\n\n- Base commit: {base}\n- Result commit: {result}\n", encoding="utf-8"
+            )
+        file = trace.init_run(
+            repo_root=self.root, runs_dir=self.runs, run_id=name, prompt_id="1",
+            report=f"{name}.md", context_mode="COLD", owners=[], head=head, branch="b",
+        )
+        self.read(file, "docs/README.md", "BOOTSTRAP")
+        self.read(file, "docs/development_workflow.md", "BOOTSTRAP")
+        trace.end_run(file=file, head=head)
+        return self.analysis(file)
+
+    def test_early_init_at_base_has_no_late_finding(self):
+        result = self.run_with(head=BASE_SHA)
+        self.assertEqual(result["start_check"]["status"], "match")
+        self.assertEqual(result["findings"]["late_init"], [])
+        self.assertEqual(result["verdict"], "NO-FINDINGS")
+
+    def test_no_change_run_is_not_a_violation(self):
+        result = self.run_with(head=BASE_SHA, result=BASE_SHA)
+        self.assertEqual((result["start_check"]["status"], result["verdict"]), ("match", "NO-FINDINGS"))
+
+    def test_late_init_at_result_head_is_flagged_never_no_findings(self):
+        result = self.run_with(head=RESULT_SHA, result=RESULT_SHA)
+        self.assertEqual(result["start_check"]["status"], "LATE_INIT")
+        self.assertEqual(result["verdict"], "ATTENTION")
+        self.assertIn("START CHECK LATE_INIT", cli.render_summary(result, "raw"))
+
+    def test_other_head_is_start_head_mismatch(self):
+        result = self.run_with(head=OTHER_SHA, result=RESULT_SHA)
+        self.assertEqual(result["start_check"]["status"], "START_HEAD_MISMATCH")
+        self.assertEqual(result["verdict"], "ATTENTION")
+
+    def test_missing_or_legacy_report_degrades_without_fabricating(self):
+        result = self.run_with(head=RESULT_SHA, report=False)
+        self.assertEqual(result["start_check"]["status"], "unavailable")
+        self.assertEqual(result["findings"]["late_init"], [])
+        self.assertEqual(result["verdict"], "NO-FINDINGS")
+        self.assertIn("Start check unavailable", cli.render_summary(result, "raw"))
+        legacy = self.run_with(head=BASE_SHA, name="p1__legacy__r01", report=False, base="x")
+        self.assertEqual(legacy["start_check"]["status"], "unavailable")
+
+    def test_prior_events_are_not_mutated_by_analysis(self):
+        file = self.start()
+        before = file.read_bytes()
+        self.analysis(file)
+        self.assertEqual(file.read_bytes(), before)

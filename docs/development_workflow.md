@@ -12,8 +12,9 @@ This file defines stable repository-work rules for development agents. It is not
 ## Before making changes
 
 1. If the task names a managed draft `p<ID>__<slug>.md`, first use the existing `scripts.agent_sync.cli prompt-pull <ID>` and verify the exact frozen snapshot returned by the command. If retrieval or verification fails, stop. Do not substitute copied chat text or another prompt revision.
-2. Read the local repository bootstrap/routing instructions (`AGENTS.md`, `docs/README.md`, this file, and `docs/agent_reporting.md` where applicable). Follow only relevant local dependencies; do not regard a Drive URL in a routing file as an implicit permission or obligation to fetch it.
-3. Verify the intended branch, base commit, `git status --short`, recent commits and relevant source. Preserve unexpected user changes. Do not work on the wrong branch or silently reset, rebase, discard or overwrite work.
+2. Verify the intended branch/worktree, that `git status --short` is clean, and capture the full base commit (`git rev-parse HEAD`) **before** any `docs/` read. Preserve unexpected user changes. Do not work on the wrong branch or silently reset, rebase, discard or overwrite work.
+3. For a managed run, start telemetry with `scripts.agent_sync.cli managed-start` (see [`docs/agent_reporting.md`](agent_reporting.md)) **before** reading `docs/README.md`. The initial `AGENTS.md` exposure is a bootstrap exception: describe it, do not backfill it as a temporally observed read. A refused start (`LATE_START`, `SNAPSHOT_INVALID`, `DIRTY_WORKTREE`, `INCOMPLETE_START`...) is `BLOCKED`; do not bypass it by running the old commands late.
+4. Then read the local routing instructions (`docs/README.md`, this file, and [`docs/agent_reporting.md`](agent_reporting.md) where applicable), recording each read right after it happens. Follow only relevant local dependencies; do not regard a Drive URL in a routing file as an implicit permission or obligation to fetch it. Review relevant source and recent commits.
 4. Identify the task's required inputs, acceptance criteria and authorized actions. If an essential input is missing or cannot be verified, report the blocker rather than inventing it.
 
 ## Implementation boundaries
@@ -34,8 +35,8 @@ This file defines stable repository-work rules for development agents. It is not
 
 ## Managed reporting and completion
 
-Follow `docs/agent_reporting.md` for the existing prompt/report lifecycle. Record the full base commit, reference the verified frozen prompt and its SHA-256, declare COLD/WARM context accurately, and record actual documentation reads through the existing read-path tooling. Attach the read-path summary **before** report finalization.
+Follow [`docs/agent_reporting.md`](agent_reporting.md) for the existing prompt/report lifecycle. Record the full base commit, reference the verified frozen prompt and its SHA-256, declare COLD/WARM context accurately, and record actual documentation reads through the existing read-path tooling. Attach the read-path summary **before** report finalization.
 
-After implementation and validation, record the exact result commit, test evidence, known limitations and outstanding decisions. Finalize the report locally as an immutable historical artifact, then return a short completion line. The existing `reports-push` transport may archive that finalized report to Drive; transport failure does not invalidate the local report and may be retried without rewriting it.
+After implementation and validation, record the exact result commit, test evidence, known limitations and outstanding decisions. Finalize the report locally as an immutable historical artifact (finalization fills a pending `End` once and requires a terminal `Status`), then return only the standard completion receipt from `completion-line`: one plain-text line, optionally preceded by a single `OWNER ATTENTION:` line when the finalized report explicitly records `Severity: serious`. Do not reread or reassess the report to decide this; full facts live in the report. The existing `reports-push` transport may archive that finalized report to Drive; transport failure does not invalidate the local report and may be retried without rewriting it.
 
 A local commit, push, merge, force-push or other external action is permitted only to the extent explicitly authorized by the current Owner-approved prompt or a subsequent Owner instruction. If not authorized, stop at the approved boundary. Never claim Owner acceptance or integration merely because tests passed or a review branch was pushed.

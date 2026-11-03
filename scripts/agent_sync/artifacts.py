@@ -572,6 +572,155 @@ def validate_managed_report_provenance(
         )
 
 
+class ReportMetadataError(ValueError):
+    """Raised when a managed report's completion metadata (``Status``, ``End``)
+    or its ``Owner attention`` section is missing, malformed or incoherent."""
+
+
+TERMINAL_STATUSES = ("COMPLETED", "FAILED", "BLOCKED")
+PENDING_END = "(pending)"
+_END_LINE_RE = re.compile(r"(?m)^- End: (.*)$")
+_STATUS_LINE_RE = re.compile(r"(?m)^- Status: (.*)$")
+
+
+def _parse_utc_timestamp(value: str) -> datetime | None:
+    """A timezone-aware ISO-8601 timestamp with a zero UTC offset, else ``None``."""
+
+    try:
+        parsed = datetime.fromisoformat(value.strip())
+    except ValueError:
+        return None
+    offset = parsed.utcoffset()
+    if offset is None or offset.total_seconds() != 0:
+        return None
+    return parsed
+
+
+def is_managed_report(text: str) -> bool:
+    """A report with a real prompt snapshot in its run-metadata block."""
+
+    snapshot = _report_metadata_value(text, "Prompt snapshot")
+    return snapshot is not None and snapshot != "(none)"
+
+
+def apply_terminal_metadata(text: str, *, now: str) -> str:
+    """Validate a **managed** report's terminal ``Status``/``End`` and fill a
+    pending ``End`` exactly once with ``now`` (the actual finalization time).
+
+    An explicit valid UTC ``End`` is kept verbatim. A missing, unparseable or
+    non-UTC ``End`` and a non-terminal ``Status`` are rejected. Non-managed
+    (legacy/ad-hoc) reports are returned unchanged.
+    """
+
+    if not is_managed_report(text):
+        return text
+    status_match = _STATUS_LINE_RE.search(text)
+    status = status_match.group(1).strip() if status_match else None
+    if status not in TERMINAL_STATUSES:
+        raise ReportMetadataError(
+            f"report Status must be one of {', '.join(TERMINAL_STATUSES)} before "
+            f"finalization (found {status!r})"
+        )
+    end_match = _END_LINE_RE.search(text)
+    if end_match is None:
+        raise ReportMetadataError("report has no '- End:' metadata line")
+    end_value = end_match.group(1).strip()
+    if end_value == PENDING_END:
+        if _parse_utc_timestamp(now) is None:
+            raise ReportMetadataError("finalization time is not a valid UTC timestamp")
+        return text[: end_match.start()] + f"- End: {now}" + text[end_match.end():]
+    end = _parse_utc_timestamp(end_value)
+    if end is None:
+        raise ReportMetadataError(
+            f"report End must be '{PENDING_END}' or an ISO-8601 UTC timestamp "
+            f"(found {end_value!r})"
+        )
+    start_value = _report_metadata_value(text, "Start")
+    start = _parse_utc_timestamp(start_value) if start_value else None
+    if start is not None and end < start:
+        raise ReportMetadataError("report End is earlier than Start")
+    return text
+
+
+OWNER_ATTENTION_HEADING = "## Owner attention"
+OWNER_SEVERITIES = ("none", "serious")
+MAX_ATTENTION_ISSUE = 240
+MAX_ATTENTION_ACTION = 160
+_SECRET_RE = re.compile(
+    r"(?i)(-----BEGIN [A-Z ]*KEY|\bya29\.|\bsk-[A-Za-z0-9]{8,}|\bghp_[A-Za-z0-9]{8,}"
+    r"|\bbearer\s+[A-Za-z0-9._~+/-]{12,}|(?:password|secret|token)\s*[=:]\s*\S{6,})"
+)
+
+
+@dataclass(frozen=True)
+class OwnerAttention:
+    severity: str
+    issue: str | None = None
+    action: str | None = None
+
+
+def _attention_field(body: str, label: str) -> str | None:
+    match = re.search(rf"(?m)^{re.escape(label)}:[ \t]*(.*)$", body)
+    if match is None:
+        return None
+    value = match.group(1).strip()
+    return None if not value or value == "(none)" else value
+
+
+def parse_owner_attention(text: str) -> OwnerAttention | None:
+    """The report's ``## Owner attention`` fields, or ``None`` for a report
+    without that section (legacy reports stay valid).
+
+    Raises :class:`ReportMetadataError` for a malformed section: an unknown
+    severity, or ``serious`` without a usable single-line ``Issue``. Bounds and a
+    basic secret screen keep the rendered warning short and non-sensitive.
+    """
+
+    sections = [sec for sec in _h2_sections(text) if sec[0] == OWNER_ATTENTION_HEADING]
+    if not sections:
+        return None
+    if len(sections) > 1:
+        raise ReportMetadataError("report has more than one '## Owner attention' section")
+    _, start, end = sections[0]
+    body = text[start:end].split("\n", 1)[1] if "\n" in text[start:end] else ""
+    severity = _attention_field(body, "Severity")
+    if severity not in OWNER_SEVERITIES:
+        raise ReportMetadataError(
+            f"Owner attention Severity must be one of {', '.join(OWNER_SEVERITIES)} "
+            f"(found {severity!r})"
+        )
+    if severity == "none":
+        return OwnerAttention("none")
+    issue = _attention_field(body, "Issue")
+    action = _attention_field(body, "Owner action")
+    if issue is None or issue.startswith("("):
+        raise ReportMetadataError("serious Owner attention requires a one-sentence Issue")
+    for label, value, limit in (
+        ("Issue", issue, MAX_ATTENTION_ISSUE),
+        ("Owner action", action, MAX_ATTENTION_ACTION),
+    ):
+        if value is None:
+            continue
+        if len(value) > limit:
+            raise ReportMetadataError(f"Owner attention {label} exceeds {limit} characters")
+        if "`" in value or "\n" in value or "\r" in value:
+            raise ReportMetadataError(f"Owner attention {label} must be plain single-line text")
+        if _SECRET_RE.search(value):
+            raise ReportMetadataError(f"Owner attention {label} looks like it contains a secret")
+    return OwnerAttention("serious", issue, action)
+
+
+def owner_attention_line(attention: OwnerAttention | None) -> str | None:
+    """``OWNER ATTENTION: ...`` for an explicit ``serious`` classification, else ``None``."""
+
+    if attention is None or attention.severity != "serious":
+        return None
+    line = f"OWNER ATTENTION: {attention.issue}"
+    if attention.action:
+        line += f" Owner action: {attention.action}"
+    return line
+
+
 REPORT_TEMPLATE = """# Prompt {prompt_id} — {title}
 
 ## Run metadata
@@ -610,6 +759,16 @@ REPORT_TEMPLATE = """# Prompt {prompt_id} — {title}
   summary of what changed; "none" if the Reviewed outcomes required no changes.)
 - New drift/debt found (optional): (stale documentation discovered during the check
   but not caused by this task, with its likely canonical owner/path; omit if none.)
+
+## Owner attention
+
+Severity: none
+Issue: (none)
+Owner action: (none)
+
+(Set `Severity: serious` with a one-sentence `Issue:` and optional `Owner action:`
+only for an already-identified, unresolved serious issue; see
+docs/agent_reporting.md. `completion-line` renders this section verbatim.)
 
 ## Sync state
 
@@ -677,8 +836,12 @@ def completion_line(
     commit: str = "none",
     sync: str = "pending",
     transport: str | None = None,
+    push: str = "not-pushed",
 ) -> str:
     """The standard one-line completion status.
+
+    ``push`` is ``not-pushed`` unless the caller supplies validated evidence
+    (see :func:`validate_push_field`); it precedes the optional transport segment.
 
     ``transport`` is an optional trailing ``| transport=<...>`` segment using the
     same ``key=value`` pipe-delimited grammar as the rest of the line -- appended
@@ -686,8 +849,26 @@ def completion_line(
     keeps meaning "no known current transport/auth problem."
     """
 
-    line = f"PROMPT {prompt_id} {status} | report={report_path} | commit={commit} | sync={sync}"
+    line = f"PROMPT {prompt_id} {status} | report={report_path} | commit={commit} | sync={sync} | push={push}"
     if transport:
         line += f" | transport={transport}"
     return line
 
+
+
+_PUSH_RE = re.compile(r"^(?:not-pushed|pushed:(?P<sha>[0-9a-f]{40}))$")
+
+
+def validate_push_field(push: str, *, commit: str) -> str:
+    """``not-pushed``, or ``pushed:<full-sha>`` naming exactly the reported commit.
+
+    Pushing is never inferred; a ``pushed`` claim needs the pushed commit's full
+    SHA, which must equal the receipt's commit.
+    """
+
+    match = _PUSH_RE.match(push)
+    if match is None:
+        raise ReportMetadataError("push must be 'not-pushed' or 'pushed:<40-hex commit SHA>'")
+    if match.group("sha") and match.group("sha") != commit:
+        raise ReportMetadataError("pushed commit SHA does not match the reported commit")
+    return push

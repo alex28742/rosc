@@ -1385,7 +1385,7 @@ class ManagedReportProvenanceTests(unittest.TestCase):
             report.write_text(
                 report.read_text(encoding="utf-8").replace(
                     "- Result commit: none", f"- Result commit: {base}"
-                ),
+                ).replace("- Status: IN PROGRESS", "- Status: COMPLETED"),
                 encoding="utf-8",
             )
             with _patched(repo_root, state_path=state_path), contextlib.redirect_stdout(io.StringIO()):

@@ -14,7 +14,9 @@ import sys
 from datetime import datetime, timezone
 from pathlib import Path
 
-from . import artifacts, errors, sync
+from scripts.read_path import trace as read_path_trace
+
+from . import artifacts, errors, managed_start, sync
 from . import config as config_mod
 from . import drive
 from . import state as state_mod
@@ -248,7 +250,17 @@ def cmd_finalize_report(args: argparse.Namespace) -> int:
         )
         return 1
     try:
-        normalized = artifacts.normalize_report_tail(text)
+        # Fill a pending End exactly once with the actual finalization time and
+        # check terminal Status / Owner attention before the bytes are sealed.
+        finalized_text = artifacts.apply_terminal_metadata(
+            text, now=datetime.now(timezone.utc).isoformat()
+        )
+        artifacts.parse_owner_attention(finalized_text)
+    except artifacts.ReportMetadataError as exc:
+        print(f"Refusing to finalize {local_path}: invalid report metadata ({exc}).", file=sys.stderr)
+        return 1
+    try:
+        normalized = artifacts.normalize_report_tail(finalized_text)
     except artifacts.ReportTailError as exc:
         print(f"Refusing to finalize {local_path}: {exc}", file=sys.stderr)
         return 1
@@ -291,15 +303,75 @@ def cmd_completion_line(args: argparse.Namespace) -> int:
             health = state_mod.transport_health(artifacts.STATE_PATH)
             if health is not None and health.get("status") != "ok":
                 transport_suffix = health.get("status")
-    print(
-        artifacts.completion_line(
-            prompt_id=args.prompt,
-            status=args.status,
-            report_path=args.report,
-            commit=args.commit,
-            sync=sync_status,
-            transport=transport_suffix,
+    try:
+        push = artifacts.validate_push_field(args.push, commit=args.commit)
+        attention_line = _owner_attention_for_receipt(args.report)
+    except artifacts.ReportMetadataError as exc:
+        print(f"COMPLETION LINE REFUSED | {exc}", file=sys.stderr)
+        return 1
+    line = artifacts.completion_line(
+        prompt_id=args.prompt,
+        status=args.status,
+        report_path=args.report,
+        commit=args.commit,
+        sync=sync_status,
+        transport=transport_suffix,
+        push=push,
+    )
+    print(f"{attention_line}\n{line}" if attention_line else line)
+    return 0
+
+
+def _owner_attention_for_receipt(report_arg: str) -> str | None:
+    """The ``OWNER ATTENTION:`` line, only when the **finalized** local report
+    explicitly says ``Severity: serious``. Absent report/section -> no warning."""
+
+    path = Path(report_arg)
+    if not path.is_absolute() and not path.exists():
+        path = artifacts.REPO_ROOT / path
+    if not path.is_file():
+        return None
+    attention = artifacts.parse_owner_attention(path.read_text(encoding="utf-8"))
+    if attention is None or attention.severity != "serious":
+        return None
+    local_path = _display_path(path)
+    entry = state_mod.artifact_entry(artifacts.STATE_PATH, local_path)
+    if (
+        entry is None
+        or not state_mod.finalized_at(artifacts.STATE_PATH, local_path)
+        or entry.get("sha256") != artifacts.sha256_file(path)
+    ):
+        raise artifacts.ReportMetadataError(
+            "serious Owner attention is only rendered from an intact finalized report"
         )
+    return artifacts.owner_attention_line(attention)
+
+
+def cmd_managed_start(args: argparse.Namespace) -> int:
+    """Local-only, fail-closed start: report skeleton + read-path run, once."""
+
+    try:
+        result = managed_start.managed_start(
+            prompt_id=args.prompt,
+            snapshot=Path(args.snapshot).resolve(),
+            model=args.model,
+            base_commit=args.base_commit,
+            mode=args.mode,
+            owners=args.owner or [],
+            title=args.title,
+            repo_root=artifacts.REPO_ROOT,
+            state_path=artifacts.STATE_PATH,
+            reports_dir=artifacts.REPORTS_DIR,
+            runs_dir=read_path_trace.RUNS_DIR,
+            resume_report=Path(args.resume_report).resolve() if args.resume_report else None,
+        )
+    except managed_start.ManagedStartError as exc:
+        print(f"MANAGED-START REFUSED | {exc.code} | {exc.message}", file=sys.stderr)
+        return 1
+    print(
+        f"MANAGED-START OK | run={result.run_id} | report={result.report} | raw={result.raw} "
+        f"| mode={result.mode} | base={result.base_commit} | branch={result.branch}"
+        + (" | resumed" if result.resumed else "")
     )
     return 0
 
@@ -656,7 +728,34 @@ def build_parser() -> argparse.ArgumentParser:
             "status is not 'ok'."
         ),
     )
+    p_line.add_argument(
+        "--push",
+        default="not-pushed",
+        help="'not-pushed' (default) or 'pushed:<full commit SHA>' equal to --commit.",
+    )
     p_line.set_defaults(func=cmd_completion_line)
+
+    p_start = sub.add_parser(
+        "managed-start",
+        help=(
+            "Local, fail-closed managed-run start after prompt-pull: re-verify the "
+            "snapshot, require HEAD == base, create the report skeleton and read-path "
+            "run before any docs/ read."
+        ),
+    )
+    p_start.add_argument("--prompt", required=True)
+    p_start.add_argument("--snapshot", required=True, help="Exact snapshot printed by prompt-pull.")
+    p_start.add_argument("--model", required=True)
+    p_start.add_argument("--base-commit", required=True, help="Full SHA; must equal current HEAD.")
+    p_start.add_argument("--mode", required=True, choices=read_path_trace.CONTEXT_MODES)
+    p_start.add_argument("--title", default=None)
+    p_start.add_argument("--owner", action="append", help="Owning router README(s); repeatable.")
+    p_start.add_argument(
+        "--resume-report",
+        default=None,
+        help="Recover an INCOMPLETE_START: initialise only the read-path run for this existing report.",
+    )
+    p_start.set_defaults(func=cmd_managed_start)
 
     p_pull = sub.add_parser(
         "prompt-pull",

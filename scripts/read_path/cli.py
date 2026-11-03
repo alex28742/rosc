@@ -38,6 +38,16 @@ def render_summary(analysis: dict, raw_path: str) -> str:
         f"not-recorded obligations: {len(f['not_recorded_obligations'])} "
         f"(not recorded is not proof of a skipped read); failed reads: {len(f['failed_reads'])}.",
     ]
+    check = analysis.get("start_check") or {}
+    if f.get("late_init"):
+        lines.append(
+            f"START CHECK {check['status']}: run started at {check['head_start']} but the report's "
+            f"Base commit is {check['base']}; telemetry was initialised after the run began."
+        )
+    elif check.get("status") == "match":
+        lines.append("Start check: start HEAD equals report Base commit (necessary, not proof of read chronology).")
+    elif check:
+        lines.append(f"Start check unavailable: {check.get('reason')}.")
     u = analysis["uncertainties"]
     if u["route_uncertain"] or u["obligation_citation_uncertain"]:
         lines.append(
