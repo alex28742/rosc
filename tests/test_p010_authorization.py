@@ -38,7 +38,8 @@ def scope_for(action: str) -> ResourceScope:
     return ResourceScope(project_id=1 if "project_id" in required else None, task_id=1 if "task_id" in required else None,
                          doc_id="notes" if "doc_id" in required else None,
                          agent_id=AGENT_ID if "agent_id" in required else None,
-                         assignment_id=ASSIGNMENT_ID if "assignment_id" in required else None)
+                         assignment_id=ASSIGNMENT_ID if "assignment_id" in required else None,
+                         run_id=ASSIGNMENT_ID if "run_id" in required else None)
 
 
 class ActorAndPolicyTests(unittest.TestCase):
@@ -61,7 +62,7 @@ class ActorAndPolicyTests(unittest.TestCase):
                                  "task.create", "task.reconcile", "task.repair", "architect_document.list",
                                  "architect_document.read", "architect_document.write", "architect_document.reconcile"})
         self.assertTrue(m2b_actions <= authz.IMPLEMENTED_ACTIONS)
-        self.assertEqual(len(authz.IMPLEMENTED_ACTIONS), 19)
+        self.assertEqual(len(authz.IMPLEMENTED_ACTIONS), 25)
         policy = LocalOwnerPolicy()
         for action in sorted(authz.IMPLEMENTED_ACTIONS):
             self.assertTrue(evaluate(policy, OWNER, action, scope_for(action)).allowed, action)

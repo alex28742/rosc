@@ -53,6 +53,15 @@ AGENT_UPDATE = "agent.update"
 ASSIGNMENT_LIST = "assignment.list"
 ASSIGNMENT_CREATE = "assignment.create"
 ASSIGNMENT_REVOKE = "assignment.revoke"
+# M2-D Owner-only external Run provenance bookkeeping (P013). Recording an external Run/Report/Evidence reference or
+# an Owner-curated Agent correspondence is administrative history: it is NOT ``run.approve``, launches nothing and
+# grants no Agent any authority.
+RUN_REGISTER_EXTERNAL = "run.register_external"
+RUN_LIST = "run.list"
+RUN_READ = "run.read"
+RUN_REPORT_REGISTER = "run.report.register"
+RUN_EVIDENCE_REGISTER = "run.evidence.register"
+RUN_LINK_AGENT = "run.link_agent"
 
 # Resource shapes: which identifiers an action must carry and which it may carry.
 # (required fields, optional fields); every other field must be absent.
@@ -77,6 +86,13 @@ _SHAPES: dict[str, tuple[frozenset[str], frozenset[str]]] = {
     ASSIGNMENT_LIST: (frozenset({"project_id"}), frozenset()),
     ASSIGNMENT_CREATE: (frozenset({"project_id"}), frozenset()),
     ASSIGNMENT_REVOKE: (frozenset({"project_id", "assignment_id"}), frozenset()),
+    RUN_REGISTER_EXTERNAL: (frozenset({"project_id", "task_id"}), frozenset()),
+    RUN_LIST: (frozenset({"project_id"}), frozenset({"task_id"})),
+    RUN_READ: (frozenset({"project_id", "run_id"}), frozenset()),
+    RUN_REPORT_REGISTER: (frozenset({"project_id", "run_id"}), frozenset()),
+    RUN_EVIDENCE_REGISTER: (frozenset({"project_id", "run_id"}), frozenset()),
+    # agent_id is the *target* of the Owner-curated correspondence; it never selects the actor.
+    RUN_LINK_AGENT: (frozenset({"project_id", "run_id", "agent_id"}), frozenset()),
 }
 IMPLEMENTED_ACTIONS = frozenset(_SHAPES)
 
@@ -100,7 +116,7 @@ class ResourceScope:
     """Typed scope of one operation.
 
     Identifiers are canonical numeric Project/Task ids, a document id and, for registry administration only,
-    canonical UUIDv4 Agent/assignment ids. Agent ids appear in a scope because an administrative action targets a
+    canonical UUIDv4 Agent/assignment/Run ids. Agent ids appear in a scope because an administrative action targets a
     registered Agent; they never select the actor.
     """
 
@@ -109,6 +125,7 @@ class ResourceScope:
     doc_id: str | None = None
     agent_id: str | None = None
     assignment_id: str | None = None
+    run_id: str | None = None
 
 
 @dataclass(frozen=True)
@@ -163,10 +180,11 @@ def resource_problem(action: str, resource: object) -> str | None:
         return "invalid_resource"
     required, optional = shape
     values = {"project_id": resource.project_id, "task_id": resource.task_id, "doc_id": resource.doc_id,
-              "agent_id": resource.agent_id, "assignment_id": resource.assignment_id}
+              "agent_id": resource.agent_id, "assignment_id": resource.assignment_id,
+              "run_id": resource.run_id}
     for name, value in values.items():
         if name in required:
-            if name in ("doc_id", "agent_id", "assignment_id"):
+            if name in ("doc_id", "agent_id", "assignment_id", "run_id"):
                 # doc_id is syntactically validated by the document store itself; here it only has to be present text.
                 valid = is_canonical_uuid4(value) if name != "doc_id" else isinstance(value, str)
             else:
@@ -175,7 +193,7 @@ def resource_problem(action: str, resource: object) -> str | None:
                 return "invalid_resource"
         elif value is not None and name not in optional:
             return "invalid_resource"
-        elif value is not None and name in ("doc_id", "agent_id", "assignment_id") and not isinstance(value, str):
+        elif value is not None and name in ("doc_id", "agent_id", "assignment_id", "run_id") and not isinstance(value, str):
             return "invalid_resource"
     return None
 

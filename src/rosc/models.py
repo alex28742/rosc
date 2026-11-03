@@ -257,6 +257,167 @@ class AssignmentCapability(Base):
     assignment: Mapped[RoleAssignment] = relationship(back_populates="capabilities")
 
 
+# M2-D run provenance foundation (P013). ``external`` is observed/reported work done through the incumbent workflow;
+# ``managed`` is reserved for a future ROSC-launched Run and cannot be created by the P013 service. No value here
+# means verified, approved or accepted: every attribute of an external record is a claim by its source.
+ORIGIN_EXTERNAL = "external"
+ORIGIN_MANAGED = "managed"
+ATTRIBUTION_CLAIMED = "claimed"
+LINK_UNLINKED = "unlinked"
+LINK_OWNER_CURATED = "owner_curated_correspondence"
+PROVENANCE_CLAIMED = "claimed"
+INGEST_MANUAL_OWNER = "manual_owner_registration"
+EVIDENCE_REPORT_REF = "report_reference"
+EVIDENCE_GIT_REF = "git_commit_reference"
+EVIDENCE_TEST_REF = "test_result_reference"
+EVIDENCE_OTHER_REF = "other_source_reference"
+EVIDENCE_KINDS = (EVIDENCE_REPORT_REF, EVIDENCE_GIT_REF, EVIDENCE_TEST_REF, EVIDENCE_OTHER_REF)
+REPORT_KINDS = ("executor_report", "review_report", "other_report")
+REPORTED_OUTCOMES = ("reported_pass", "reported_fail", "reported_unknown")
+
+
+def _in_list(column: str, values: tuple[str, ...]) -> str:
+    return f"{column} IN (" + ", ".join(f"'{value}'" for value in values) + ")"
+
+
+class RunRecord(Base):
+    """Durable identity of one Run of a Task. Not the Task, an Agent, an assignment, a process or a provider Session.
+
+    A Task may have any number of Runs. ``external`` rows are Owner-registered observations; every ``reported_executor``
+    / ``source_*`` fact is an unverified claim and is never rewritten. ``agent_id`` is an Owner-curated correspondence,
+    never proof of authorship, an activation or a permission.
+    """
+
+    __tablename__ = "run_records"
+    __table_args__ = (
+        CheckConstraint("execution_origin IN ('external', 'managed')", name="ck_run_records_origin"),
+        CheckConstraint("source_attribution_assurance = 'claimed'", name="ck_run_records_assurance"),
+        CheckConstraint("agent_link_status IN ('unlinked', 'owner_curated_correspondence')", name="ck_run_records_link"),
+        CheckConstraint("(agent_link_status = 'unlinked') = (agent_id IS NULL)", name="ck_run_records_link_agent"),
+        CheckConstraint("assignment_id IS NULL OR agent_id IS NOT NULL", name="ck_run_records_link_assignment"),
+        CheckConstraint("attribution_revision >= 1", name="ck_run_records_revision"),
+        CheckConstraint("source_key IS NULL OR length(source_key) BETWEEN 1 AND 128", name="ck_run_records_source_key"),
+        CheckConstraint("length(source_kind) BETWEEN 1 AND 64", name="ck_run_records_source_kind"),
+        CheckConstraint("reported_executor IS NULL OR length(reported_executor) BETWEEN 1 AND 96",
+                        name="ck_run_records_executor"),
+        Index("ix_run_records_project_id", "project_id"),
+        Index("ix_run_records_task_id", "task_id"),
+        Index("ix_run_records_agent_id", "agent_id"),
+        Index("ux_run_records_source", "project_id", "source_kind", "source_key", unique=True,
+              sqlite_where=text("source_key IS NOT NULL")),
+    )
+
+    run_id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    project_id: Mapped[int] = mapped_column(ForeignKey("projects.id", ondelete="RESTRICT"))
+    task_id: Mapped[int] = mapped_column(ForeignKey("tasks.id", ondelete="RESTRICT"))
+    execution_origin: Mapped[str] = mapped_column(String(16))
+    source_kind: Mapped[str] = mapped_column(String(64))
+    source_key: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    source_attribution_assurance: Mapped[str] = mapped_column(String(16), default=ATTRIBUTION_CLAIMED)
+    reported_executor: Mapped[str | None] = mapped_column(String(96), nullable=True)
+    agent_id: Mapped[str | None] = mapped_column(ForeignKey("agent_definitions.agent_id", ondelete="RESTRICT"),
+                                                 nullable=True)
+    assignment_id: Mapped[str | None] = mapped_column(ForeignKey("role_assignments.assignment_id", ondelete="RESTRICT"),
+                                                      nullable=True)
+    agent_link_status: Mapped[str] = mapped_column(String(32), default=LINK_UNLINKED)
+    attribution_revision: Mapped[int] = mapped_column(Integer, default=1)
+    registered_by: Mapped[str] = mapped_column(String(64))
+    registered_by_assurance: Mapped[str] = mapped_column(String(32))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
+
+
+class RunAgentLink(Base):
+    """Immutable history of one Owner-curated Agent correspondence. The original claim stays on the RunRecord."""
+
+    __tablename__ = "run_agent_links"
+    __table_args__ = (
+        CheckConstraint("expected_revision >= 1 AND resulting_revision = expected_revision + 1", name="ck_run_agent_links_revision"),
+        Index("ux_run_agent_links_run_revision", "run_id", "resulting_revision", unique=True),
+        Index("ix_run_agent_links_agent_id", "agent_id"),
+    )
+
+    link_id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    run_id: Mapped[str] = mapped_column(ForeignKey("run_records.run_id", ondelete="RESTRICT"))
+    from_agent_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
+    agent_id: Mapped[str] = mapped_column(ForeignKey("agent_definitions.agent_id", ondelete="RESTRICT"))
+    assignment_id: Mapped[str | None] = mapped_column(ForeignKey("role_assignments.assignment_id", ondelete="RESTRICT"),
+                                                      nullable=True)
+    original_claim: Mapped[str | None] = mapped_column(String(96), nullable=True)
+    expected_revision: Mapped[int] = mapped_column(Integer)
+    resulting_revision: Mapped[int] = mapped_column(Integer)
+    linked_by: Mapped[str] = mapped_column(String(64))
+    linked_by_assurance: Mapped[str] = mapped_column(String(32))
+    linked_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
+
+
+class ReportRecord(Base):
+    """Reference to an externally produced report. Body, bytes and digest correctness are never held or checked."""
+
+    __tablename__ = "report_records"
+    __table_args__ = (
+        CheckConstraint(_in_list("report_kind", REPORT_KINDS), name="ck_report_records_kind"),
+        CheckConstraint("provenance = 'claimed'", name="ck_report_records_provenance"),
+        CheckConstraint("ingest_origin = 'manual_owner_registration'", name="ck_report_records_ingest"),
+        CheckConstraint("length(source_ref) BETWEEN 1 AND 200", name="ck_report_records_ref"),
+        CheckConstraint("source_key IS NULL OR length(source_key) BETWEEN 1 AND 128", name="ck_report_records_source_key"),
+        CheckConstraint("report_revision IS NULL OR report_revision >= 1", name="ck_report_records_revision"),
+        CheckConstraint("declared_digest IS NULL OR (length(declared_digest) = 64 AND declared_digest NOT GLOB '*[^0-9a-f]*')",
+                        name="ck_report_records_digest"),
+        Index("ix_report_records_run_id", "run_id"),
+        Index("ux_report_records_source", "run_id", "source_key", unique=True, sqlite_where=text("source_key IS NOT NULL")),
+    )
+
+    report_id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    run_id: Mapped[str] = mapped_column(ForeignKey("run_records.run_id", ondelete="RESTRICT"))
+    source_key: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    report_kind: Mapped[str] = mapped_column(String(32))
+    report_revision: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    source_ref: Mapped[str] = mapped_column(String(200))
+    declared_digest: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    provenance: Mapped[str] = mapped_column(String(16), default=PROVENANCE_CLAIMED)
+    ingest_origin: Mapped[str] = mapped_column(String(32), default=INGEST_MANUAL_OWNER)
+    registered_by: Mapped[str] = mapped_column(String(64))
+    registered_by_assurance: Mapped[str] = mapped_column(String(32))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
+
+
+class EvidenceRecord(Base):
+    """Reference to externally claimed evidence. A reference is never verification of what it points to."""
+
+    __tablename__ = "evidence_records"
+    __table_args__ = (
+        CheckConstraint(_in_list("evidence_kind", EVIDENCE_KINDS), name="ck_evidence_records_kind"),
+        CheckConstraint("provenance = 'claimed'", name="ck_evidence_records_provenance"),
+        CheckConstraint("ingest_origin = 'manual_owner_registration'", name="ck_evidence_records_ingest"),
+        CheckConstraint("length(reference) BETWEEN 1 AND 200", name="ck_evidence_records_ref"),
+        CheckConstraint("source_key IS NULL OR length(source_key) BETWEEN 1 AND 128", name="ck_evidence_records_source_key"),
+        CheckConstraint("reported_outcome IS NULL OR " + _in_list("reported_outcome", REPORTED_OUTCOMES),
+                        name="ck_evidence_records_outcome"),
+        CheckConstraint("reported_outcome IS NULL OR evidence_kind = 'test_result_reference'",
+                        name="ck_evidence_records_outcome_kind"),
+        CheckConstraint("declared_digest IS NULL OR (length(declared_digest) = 64 AND declared_digest NOT GLOB '*[^0-9a-f]*')",
+                        name="ck_evidence_records_digest"),
+        Index("ix_evidence_records_run_id", "run_id"),
+        Index("ix_evidence_records_report_id", "report_id"),
+        Index("ux_evidence_records_source", "run_id", "source_key", unique=True, sqlite_where=text("source_key IS NOT NULL")),
+    )
+
+    evidence_id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    run_id: Mapped[str] = mapped_column(ForeignKey("run_records.run_id", ondelete="RESTRICT"))
+    report_id: Mapped[str | None] = mapped_column(ForeignKey("report_records.report_id", ondelete="RESTRICT"),
+                                                  nullable=True)
+    source_key: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    evidence_kind: Mapped[str] = mapped_column(String(32))
+    reference: Mapped[str] = mapped_column(String(200))
+    declared_digest: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    reported_outcome: Mapped[str | None] = mapped_column(String(16), nullable=True)
+    provenance: Mapped[str] = mapped_column(String(16), default=PROVENANCE_CLAIMED)
+    ingest_origin: Mapped[str] = mapped_column(String(32), default=INGEST_MANUAL_OWNER)
+    registered_by: Mapped[str] = mapped_column(String(64))
+    registered_by_assurance: Mapped[str] = mapped_column(String(32))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
+
+
 class Task(Base):
     __tablename__ = "tasks"
 

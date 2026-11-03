@@ -648,7 +648,8 @@ class HardeningTests(StageCase):
         from sqlalchemy import create_engine, inspect
         tables = set(inspect(create_engine(f"sqlite:///{self.data / 'rosc.db'}")).get_table_names())
         self.assertEqual(tables, {"projects", "tasks", "project_root_bindings", "agent_definitions", "agent_capabilities",
-                                  "role_assignments", "assignment_capabilities", "alembic_version"})
+                                  "role_assignments", "assignment_capabilities", "run_records", "run_agent_links",
+                                  "report_records", "evidence_records", "alembic_version"})
 
 
 if __name__ == "__main__":
