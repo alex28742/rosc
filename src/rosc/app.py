@@ -8,6 +8,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from fastapi import FastAPI, HTTPException, Request, Response
+from fastapi.exception_handlers import request_validation_exception_handler
+from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field, field_validator
 from sqlalchemy import select
@@ -206,6 +208,17 @@ class ConversationMessageInput(BaseModel):
     body: str = Field(min_length=1, max_length=4000)
 
 
+CONVERSATION_PATH = re.compile(r"^/api/projects/[^/]+/conversation(/messages)?$")
+
+
+def sanitized_validation_response(exc: RequestValidationError) -> JSONResponse:
+    """422 for conversation requests: only type, location and a fixed message, never the framework's ``input``,
+    ``ctx`` or ``url`` fields, which echo the rejected body, idempotency key or decode details."""
+    detail = [{"type": str(error.get("type", "invalid")), "loc": [part for part in error.get("loc", ())],
+               "msg": str(error.get("msg", "Invalid request"))} for error in exc.errors()]
+    return JSONResponse(status_code=422, content={"detail": detail})
+
+
 def conversation_error(exc: ConversationError) -> HTTPException:
     """Map the conversation boundary onto the established HTTP status contract without echoing message content."""
     if isinstance(exc, ConversationDenied):
@@ -330,6 +343,13 @@ def create_app(db_path: Path | None = None, workspace_root: Path | None = None, 
     registry = AgentRegistryService(sessions, policy)
     conversation = ProjectConversationService(sessions, policy)
     app = FastAPI(title="ROSC Core", version="0.1.0")
+
+    @app.exception_handler(RequestValidationError)
+    async def validation_failed(request: Request, exc: RequestValidationError):
+        # Scoped to the conversation routes so other APIs keep the framework's default 422 contract.
+        if CONVERSATION_PATH.match(request.url.path):
+            return sanitized_validation_response(exc)
+        return await request_validation_exception_handler(request, exc)
 
     @app.middleware("http")
     async def local_request_guard(request: Request, call_next):

@@ -76,7 +76,10 @@ export function ConversationPanel({ projectId, architectActive, conversation, co
   const [searchOpen, setSearchOpen] = useState(false);
   const [searchTerm, setSearchTerm] = useState('');
   const [matchIndex, setMatchIndex] = useState(0);
-  const pendingKey = useRef<string | null>(null);
+  /** The last submitted body with its key. Kept after a failure so an unchanged retry replays the same key. */
+  const pending = useRef<{ body: string; key: string } | null>(null);
+  const inFlight = useRef(false);
+  const [locked, setLocked] = useState(false);
   const feed = useRef<HTMLDivElement | null>(null);
   const preserveOlder = useRef<number | null>(null);
 
@@ -122,20 +125,35 @@ export function ConversationPanel({ projectId, architectActive, conversation, co
     setMatchIndex(current => (current + delta + matches.length) % matches.length);
   };
 
+  const ready = state.status === 'ready';
+
+  /**
+   * The composer is read-only while a send is in flight, so text typed after submission cannot exist and a success
+   * can only clear exactly what was submitted. A retry of an unchanged body reuses its key; a changed body gets a
+   * fresh key because replaying the old one with different content would be rejected as a conflict.
+   */
   const submit = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
     const body = draft.trim();
-    if (!body || state.sending) return;
-    const key = pendingKey.current ?? newClientKey();
-    pendingKey.current = key;
+    if (!body || !ready || state.sending || inFlight.current) return;
+    inFlight.current = true;
+    setLocked(true);
+    const key = pending.current?.body === body ? pending.current.key : newClientKey();
+    pending.current = { body, key };
     setFailure('');
-    const problem = await conversation.onSend(body, key);
-    if (problem === null) {
-      setDraft('');
-      pendingKey.current = null;
-      setMatchIndex(0);
-    } else setFailure(problem);
+    try {
+      const problem = await conversation.onSend(body, key);
+      if (problem === null) {
+        setDraft(current => current.trim() === body ? '' : current);
+        pending.current = null;
+        setMatchIndex(0);
+      } else setFailure(problem);
+    } finally {
+      inFlight.current = false;
+      setLocked(false);
+    }
   };
+  const ambiguous = failure !== '' && pending.current !== null && draft.trim() !== pending.current.body;
 
   return <aside className={collapsed ? 'rosc-conversation rosc-conversation--collapsed' : 'rosc-conversation'}
     aria-label="Project Conversation" data-project-id={projectId}>
@@ -203,7 +221,8 @@ export function ConversationPanel({ projectId, architectActive, conversation, co
     </div>
     <form className="rosc-conversation__compose" onSubmit={submit}>
       <textarea aria-label="Сообщение в Project Conversation" placeholder="Обсудить задачу, задать вопрос…" rows={3}
-        value={draft} onChange={event => setDraft(event.target.value)}
+        value={draft} readOnly={locked} aria-busy={locked}
+        onChange={event => setDraft(event.target.value)}
         onKeyDown={event => {
           if (event.key === 'Enter' && (event.ctrlKey || event.metaKey)) {
             event.preventDefault();
@@ -213,9 +232,13 @@ export function ConversationPanel({ projectId, architectActive, conversation, co
       <div className="rosc-conversation__actions">
         <small>От: Owner · local_unverified</small>
         <button type="submit" className="rosc-btn rosc-btn--primary"
-          disabled={!draft.trim() || state.sending}>{state.sending ? 'Сохранение…' : 'Отправить'}</button>
+          disabled={!draft.trim() || !ready || state.sending || locked}>{state.sending ? 'Сохранение…' : 'Отправить'}</button>
       </div>
       {failure && <p className="rosc-conversation__error" role="alert">{failure}</p>}
+      {ambiguous && <p className="rosc-conversation__hint">
+        Предыдущая попытка могла сохраниться в ROSC. Проверьте историю: изменённый текст будет отправлен как новое сообщение.
+      </p>}
+      {!ready && <p className="rosc-conversation__hint">Отправка станет доступна после загрузки истории.</p>}
       <p className="rosc-conversation__hint">
         Сообщение сохраняется только в ROSC. Architect не активирован — доставки и ответа не будет.
       </p>

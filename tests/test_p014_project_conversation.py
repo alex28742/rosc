@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 import sqlite3
 import threading
 import unittest
@@ -301,6 +302,62 @@ class InputValidationTests(ConversationCase):
                                      json={"client_key": "key-hhhhhh01", "body": "x" * 4001})
         self.assertEqual(oversized.status_code, 422)
         self.assertEqual(self.counts(), {table: 0 for table in OWNED_TABLES})
+
+    def test_rejected_conversation_posts_never_echo_private_input(self) -> None:
+        """P014.1: FastAPI's default 422 put the rejected body/key into ``input``; conversation routes must not."""
+        marker = "PRIVATE-MARKER-7f3a"
+        url = "/api/projects/P0001/conversation/messages"
+        cases = {
+            "oversized body": {"client_key": "key-jjjjjj01", "body": marker + "x" * 4001},
+            "object body": {"client_key": "key-jjjjjj01", "body": {"secret": marker}},
+            "number body": {"client_key": "key-jjjjjj01", "body": 123456789},
+            "missing body": {"client_key": "key-jjjjjj01" + marker[:8]},
+            "missing key": {"body": marker},
+            "empty body": {"client_key": "key-jjjjjj01", "body": ""},
+            "oversized key": {"client_key": marker + "k" * 130, "body": "text"},
+            "key of wrong type": {"client_key": [marker], "body": marker},
+            "key with forbidden characters": {"client_key": "has space " + marker, "body": marker},
+            "control character body": {"client_key": "key-jjjjjj01", "body": marker + "\x00"},
+        }
+        records: list[logging.LogRecord] = []
+
+        class Collect(logging.Handler):
+            def emit(self, record: logging.LogRecord) -> None:
+                records.append(record)
+
+        handler, root = Collect(level=logging.DEBUG), logging.getLogger()
+        previous = root.level
+        root.addHandler(handler)
+        root.setLevel(logging.DEBUG)
+        self.addCleanup(lambda: (root.removeHandler(handler), root.setLevel(previous)))
+        for label, payload in cases.items():
+            response = self.client.post(url, json=payload)
+            self.assertEqual(response.status_code, 422, label)
+            self.assertNotIn(marker, response.text, label)
+            self.assertNotIn(marker[:8], response.text, label)
+            self.assertNotIn('"input"', response.text, label)
+        malformed = self.client.post(url, content=('{"body": "' + marker + '", broken').encode(),
+                                     headers={"content-type": "application/json"})
+        self.assertEqual(malformed.status_code, 422)
+        self.assertNotIn(marker, malformed.text)
+        self.assertNotIn('"input"', malformed.text)
+        self.assertEqual(self.counts(), {table: 0 for table in OWNED_TABLES})
+        self.assertTrue(records, "the log capture must be live for the absence check to mean anything")
+        for record in records:
+            self.assertNotIn(marker, record.getMessage())
+            self.assertNotIn(marker[:8], str(record.args))
+        # Sanitized errors keep the standard locator so a client can still tell which field failed.
+        detail = self.client.post(url, json={"client_key": "key-jjjjjj01", "body": 5}).json()["detail"]
+        self.assertEqual(detail[0]["loc"], ["body", "body"])
+        self.assertEqual(detail[0]["type"], "string_type")
+
+    def test_conversation_sanitizing_does_not_change_other_validation_contracts(self) -> None:
+        response = self.client.post("/api/projects/P0001/tasks", json={"title": "only a title"})
+        self.assertEqual(response.status_code, 422)
+        self.assertIn("input", response.json()["detail"][0])
+        self.assertEqual(self.send("key-jjjjjj02", "ok").status_code, 201)
+        self.assertEqual(self.send("key-jjjjjj02", "changed").status_code, 409)
+        self.assertEqual(self.send("key-jjjjjj02", "ok").json()["replayed"], True)
 
     def test_maximum_length_body_is_accepted(self) -> None:
         body = "я" * 4000

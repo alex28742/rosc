@@ -28,6 +28,14 @@ const NO_CHAT: ChatCache = {
   error: '', sending: false, olderLoading: false,
 };
 
+/** Union by message_id in stable ordinal order; the server-confirmed record wins over a duplicate. */
+const mergeMessages = (known: ConversationMessage[], incoming: ConversationMessage[]): ConversationMessage[] => {
+  const byId = new Map<string, ConversationMessage>();
+  for (const message of known) byId.set(message.message_id, message);
+  for (const message of incoming) byId.set(message.message_id, message);
+  return [...byId.values()].sort((a, b) => a.ordinal - b.ordinal);
+};
+
 const chatForProject = (projectId: string | null): ChatCache => ({ ...NO_CHAT, projectId, status: 'loading' });
 
 const repairNotice = (done: RepairResult<unknown>) => done.repair
@@ -63,6 +71,8 @@ export function useWorkspaceController({ route, routeKey, go }: Navigation, api:
   const projectsSeq = useRef(0);
   const tasksSeq = useRef(0);
   const chatSeq = useRef(0);
+  /** Project whose POST is in flight; closes the click/keyboard window before React state catches up. */
+  const sendingRef = useRef<string | null>(null);
   const busyRef = useRef(false);
   const chatRef = useRef(chat);
   chatRef.current = chat;
@@ -109,40 +119,45 @@ export function useWorkspaceController({ route, routeKey, go }: Navigation, api:
     try {
       const page = await api.getConversation(id);
       if (seq !== chatSeq.current || projectIdOf(routeRef.current) !== id) return;
-      setChat({
-        projectId: id, status: 'ready', conversationId: page.conversation?.conversation_id ?? null,
-        messages: page.messages, hasMore: page.page.has_more, nextBefore: page.page.next_before,
-        error: '', sending: false, olderLoading: false,
+      // Merge, never replace: a message confirmed by Core while this GET was in flight must not disappear.
+      setChat(prev => {
+        if (prev.projectId !== id) return prev;
+        const olderKnown = prev.messages.length > 0 && prev.messages[0].ordinal < (page.messages[0]?.ordinal ?? Infinity);
+        return {
+          ...prev, status: 'ready', conversationId: page.conversation?.conversation_id ?? prev.conversationId,
+          messages: mergeMessages(prev.messages, page.messages),
+          hasMore: olderKnown ? prev.hasMore : page.page.has_more,
+          nextBefore: olderKnown ? prev.nextBefore : page.page.next_before, error: '',
+        };
       });
     } catch (e) {
       if (seq !== chatSeq.current || projectIdOf(routeRef.current) !== id) return;
-      setChat({ ...chatForProject(id), status: 'failed', error: describeError(e) });
+      patchChat(id, { status: 'failed', error: describeError(e) });
     }
-  }, [api]);
+  }, [api, patchChat]);
 
   const reloadConversation = useCallback(() => {
     const id = projectIdOf(routeRef.current);
     if (!id) return;
-    chatSeq.current++;
-    setChat(chatForProject(id));
+    // Confirmed messages stay visible; sending is blocked until the history is ready again.
+    patchChat(id, { status: 'loading', error: '' });
     void loadConversation(id);
-  }, [loadConversation]);
+  }, [loadConversation, patchChat]);
 
   const loadOlderMessages = useCallback(async () => {
     const id = projectIdOf(routeRef.current);
     const current = chatRef.current;
     if (!id || current.projectId !== id || !current.hasMore || current.nextBefore === null || current.olderLoading) return;
-    const seq = chatSeq.current;
+    const cursor = current.nextBefore;
     patchChat(id, { olderLoading: true });
     try {
-      const page = await api.getConversation(id, current.nextBefore);
-      if (seq !== chatSeq.current || projectIdOf(routeRef.current) !== id) return;
+      const page = await api.getConversation(id, cursor);
+      // Only the Project check matters: merging by id is safe against any reload or send that overlapped.
       setChat(prev => {
         if (prev.projectId !== id) return prev;
-        const known = new Set(prev.messages.map(message => message.message_id));
-        const older = page.messages.filter(message => !known.has(message.message_id));
-        return { ...prev, status: 'ready', messages: [...older, ...prev.messages], hasMore: page.page.has_more,
-          nextBefore: page.page.next_before, olderLoading: false, error: '' };
+        const advance = prev.nextBefore === null || cursor <= prev.nextBefore;
+        return { ...prev, messages: mergeMessages(prev.messages, page.messages), olderLoading: false,
+          hasMore: advance ? page.page.has_more : prev.hasMore, nextBefore: advance ? page.page.next_before : prev.nextBefore };
       });
     } catch (e) {
       patchChat(id, { olderLoading: false, error: describeError(e) });
@@ -153,27 +168,23 @@ export function useWorkspaceController({ route, routeKey, go }: Navigation, api:
     const id = projectIdOf(routeRef.current);
     if (!id) return 'Проект не открыт.';
     const current = chatRef.current;
-    if (current.projectId !== id) return 'История проекта ещё не загружена.';
-    if (current.sending) return 'Предыдущее сообщение ещё сохраняется.';
-    const seq = chatSeq.current;
+    if (current.projectId !== id || current.status !== 'ready') return 'История проекта ещё не загружена.';
+    if (current.sending || sendingRef.current === id) return 'Предыдущее сообщение ещё сохраняется.';
+    sendingRef.current = id;
     patchChat(id, { sending: true, error: '' });
     try {
       const result = await api.sendConversationMessage(id, { client_key: clientKey, body });
-      if (seq === chatSeq.current) {
-        patchChat(id, { status: 'ready', conversationId: result.message.conversation_id });
-        setChat(prev => {
-          if (prev.projectId !== id) return prev;
-          if (prev.messages.some(message => message.message_id === result.message.message_id)) return prev;
-          return { ...prev, messages: [...prev.messages, result.message] };
-        });
-      }
+      // A message confirmed by Core is merged whatever happened to the history requests meanwhile.
+      setChat(prev => prev.projectId !== id ? prev
+        : { ...prev, conversationId: result.message.conversation_id, messages: mergeMessages(prev.messages, [result.message]) });
       return null;
     } catch (e) {
       const message = describeError(e);
-      if (seq === chatSeq.current) patchChat(id, { error: message });
+      patchChat(id, { error: message });
       return message;
     } finally {
-      if (seq === chatSeq.current) patchChat(id, { sending: false });
+      if (sendingRef.current === id) sendingRef.current = null;
+      patchChat(id, { sending: false });
     }
   }, [api, patchChat]);
 

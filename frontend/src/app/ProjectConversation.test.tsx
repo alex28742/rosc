@@ -246,3 +246,171 @@ describe('Project Conversation isolation', () => {
     expect(getConversation).toHaveBeenLastCalledWith('P0002');
   });
 });
+
+describe('Project Conversation send/reload safety (P014.1)', () => {
+  type Sent = { message: ReturnType<typeof conversationMessage>; replayed: boolean };
+  const mounted = () => waitFor(() => { const el = panel(); if (!el) throw new Error('not mounted'); return el; });
+  const field = () => within(panel()).getByLabelText('Сообщение в Project Conversation') as HTMLTextAreaElement;
+  const type = (text: string) => fireEvent.change(field(), { target: { value: text } });
+  const bodies = () => [...panel().querySelectorAll('.rosc-chat-body')].map(node => node.textContent);
+  const keysOf = (mock: ReturnType<typeof vi.fn>) => mock.mock.calls.map(call => (call[1] as { client_key: string }).client_key);
+
+  it('offers no send while the initial history is loading: click and Ctrl+Enter reach no POST', async () => {
+    const history = deferred<ReturnType<typeof conversationPage>>();
+    const api = stubApi({ listProjects: vi.fn(async () => [P1]), getConversation: vi.fn(() => history.promise) });
+    render(<App api={api} />);
+    await waitFor(() => expect(panel()).toBeTruthy());
+    type('рано');
+    expect((screen.getByRole('button', { name: 'Отправить' }) as HTMLButtonElement).disabled).toBe(true);
+    fireEvent.click(screen.getByRole('button', { name: 'Отправить' }));
+    fireEvent.keyDown(field(), { key: 'Enter', ctrlKey: true });
+    fireEvent.submit(field().form as HTMLFormElement);
+    expect(api.sendConversationMessage).not.toHaveBeenCalled();
+    await act(async () => { history.resolve(conversationPage()); await history.promise; });
+    await screen.findByText('Сообщений пока нет.');
+    expect(field().value).toBe('рано');
+    expect((screen.getByRole('button', { name: 'Отправить' }) as HTMLButtonElement).disabled).toBe(false);
+  });
+
+  it('does not allow an ungrounded send after a failed history load, only Retry', async () => {
+    const getConversation = vi.fn().mockRejectedValueOnce(new ApiError('сбой', 'network', null))
+      .mockResolvedValue(conversationPage());
+    const api = stubApi({ listProjects: vi.fn(async () => [P1]), getConversation });
+    render(<App api={api} />);
+    await within(await mounted()).findByRole('alert');
+    type('текст');
+    fireEvent.keyDown(field(), { key: 'Enter', ctrlKey: true });
+    expect(api.sendConversationMessage).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByText('Повторить'));
+    await screen.findByText('Сообщений пока нет.');
+    fireEvent.keyDown(field(), { key: 'Enter', ctrlKey: true });
+    await waitFor(() => expect(api.sendConversationMessage).toHaveBeenCalledTimes(1));
+  });
+
+  it('keeps a confirmed message exactly once and in order when a send follows an explicit reload', async () => {
+    const post = deferred<Sent>();
+    const reload = deferred<ReturnType<typeof conversationPage>>();
+    const old = conversationMessage('старое', { ordinal: 1 });
+    const getConversation = vi.fn()
+      .mockRejectedValueOnce(new ApiError('сбой', 'network', null))
+      .mockImplementationOnce(() => reload.promise);
+    const sendConversationMessage = vi.fn(() => post.promise);
+    const api = stubApi({ listProjects: vi.fn(async () => [P1]), getConversation, sendConversationMessage });
+    render(<App api={api} />);
+    await within(await mounted()).findByRole('alert');
+    // The reload is deferred; sending stays impossible until it is ready, then the POST merges in order.
+    type('преждевременно');
+    fireEvent.click(screen.getByText('Повторить'));
+    expect(sendConversationMessage).not.toHaveBeenCalled();
+    fireEvent.keyDown(field(), { key: 'Enter', ctrlKey: true });
+    expect(sendConversationMessage).not.toHaveBeenCalled();
+    await act(async () => { reload.resolve(conversationPage({ messages: [old] })); await reload.promise; });
+    await screen.findByText('старое');
+    type('новое');
+    fireEvent.click(screen.getByRole('button', { name: 'Отправить' }));
+    expect(sendConversationMessage).toHaveBeenCalledTimes(1);
+    await act(async () => { post.resolve({ message: conversationMessage('новое', { ordinal: 2 }), replayed: false }); await post.promise; });
+    await waitFor(() => expect(bodies()).toEqual(['старое', 'новое']));
+  });
+
+  it('merges a message that arrives while an older page is loading, without duplicates', async () => {
+    const older = deferred<ReturnType<typeof conversationPage>>();
+    const post = deferred<Sent>();
+    const getConversation = vi.fn()
+      .mockResolvedValueOnce(conversationPage({
+        messages: [conversationMessage('четыре', { ordinal: 4 })], page: { limit: 50, has_more: true, next_before: 4 } }))
+      .mockImplementationOnce(() => older.promise);
+    const api = stubApi({ listProjects: vi.fn(async () => [P1]), getConversation, sendConversationMessage: vi.fn(() => post.promise) });
+    render(<App api={api} />);
+    await screen.findByText('четыре');
+    fireEvent.click(screen.getByText('Загрузить более ранние'));
+    type('пять');
+    fireEvent.click(screen.getByRole('button', { name: 'Отправить' }));
+    await act(async () => { post.resolve({ message: conversationMessage('пять', { ordinal: 5 }), replayed: false }); await post.promise; });
+    await act(async () => {
+      older.resolve(conversationPage({ messages: [conversationMessage('три', { ordinal: 3 })], page: { limit: 50, has_more: false, next_before: null } }));
+      await older.promise;
+    });
+    await waitFor(() => expect(bodies()).toEqual(['три', 'четыре', 'пять']));
+    expect(screen.queryByText('Загрузить более ранние')).toBeNull();
+  });
+
+  it('does not bleed a delayed history or a delayed POST result into another Project', async () => {
+    const slowP1 = deferred<ReturnType<typeof conversationPage>>();
+    const getConversation = vi.fn((id: string) => id === 'P0001' ? slowP1.promise
+      : Promise.resolve(conversationPage({ project_id: 'P0002', messages: [conversationMessage('чужой P2', { ordinal: 9 })] })));
+    const api = stubApi({ listProjects: vi.fn(async () => [P1, P2]), getConversation });
+    render(<App api={api} />);
+    await waitFor(() => expect(panel()).toBeTruthy());
+    fireEvent.click(screen.getByLabelText('Закрыть проект'));
+    fireEvent.click(await screen.findByText('Project P0002'));
+    await screen.findByText('чужой P2');
+    await act(async () => {
+      slowP1.resolve(conversationPage({ messages: [conversationMessage('просочилось P1', { ordinal: 1 })] })); await slowP1.promise;
+    });
+    expect(screen.queryByText('просочилось P1')).toBeNull();
+    expect(bodies()).toEqual(['чужой P2']);
+  });
+
+  it('locks the composer during a send and clears only what was submitted', async () => {
+    const post = deferred<Sent>();
+    const api = stubApi({ listProjects: vi.fn(async () => [P1]), sendConversationMessage: vi.fn(() => post.promise) });
+    render(<App api={api} />);
+    await screen.findByText('Сообщений пока нет.');
+    type('первое');
+    fireEvent.click(screen.getByRole('button', { name: 'Отправить' }));
+    expect(field().readOnly).toBe(true);
+    // Even forced input and repeated submits during the flight cannot create a second POST or change the text.
+    fireEvent.keyDown(field(), { key: 'Enter', ctrlKey: true });
+    fireEvent.submit(field().form as HTMLFormElement);
+    expect(api.sendConversationMessage).toHaveBeenCalledTimes(1);
+    await act(async () => { post.resolve({ message: conversationMessage('первое'), replayed: false }); await post.promise; });
+    await waitFor(() => expect(field().readOnly).toBe(false));
+    expect(field().value).toBe('');
+  });
+
+  it('reuses the key for an identical retry, uses a new one for changed text and for independent sends', async () => {
+    const send = vi.fn()
+      .mockRejectedValueOnce(new ApiError('HTTP 503', 'server', 503))
+      .mockRejectedValueOnce(new ApiError('HTTP 503', 'server', 503))
+      .mockImplementation(async (_id: string, input: { body: string }) => ({ message: conversationMessage(input.body), replayed: false }));
+    render(<App api={stubApi({ listProjects: vi.fn(async () => [P1]), sendConversationMessage: send })} />);
+    await screen.findByText('Сообщений пока нет.');
+    type('текст А');
+    fireEvent.click(screen.getByRole('button', { name: 'Отправить' }));
+    await within(panel()).findByRole('alert');
+    fireEvent.click(screen.getByRole('button', { name: 'Отправить' }));      // identical retry
+    await waitFor(() => expect(send).toHaveBeenCalledTimes(2));
+    await waitFor(() => expect(field().readOnly).toBe(false));
+    type('текст Б');                                                           // edited after an uncertain failure
+    expect(screen.getByText(/Предыдущая попытка могла сохраниться/)).toBeTruthy();
+    fireEvent.click(screen.getByRole('button', { name: 'Отправить' }));
+    await screen.findByText('текст Б');
+    const [first, retry, changed] = keysOf(send);
+    expect(retry).toBe(first);
+    expect(changed).not.toBe(first);
+    expect(screen.queryByText(/Предыдущая попытка могла сохраниться/)).toBeNull();
+    type('текст В');                                                           // independent later send
+    fireEvent.click(screen.getByRole('button', { name: 'Отправить' }));
+    await screen.findByText('текст В');
+    const all = keysOf(send);
+    expect(all[3]).not.toBe(changed);
+    expect(new Set([first, changed, all[3]]).size).toBe(3);
+  });
+
+  it('keeps an unsent draft and its failure through collapse and nested Task navigation', async () => {
+    const send = vi.fn().mockRejectedValue(new ApiError('HTTP 503', 'server', 503));
+    render(<App api={stubApi({ listProjects: vi.fn(async () => [P1]), listTasks: vi.fn(async () => [T1]), sendConversationMessage: send })} />);
+    await screen.findByText('Сообщений пока нет.');
+    type('не отправлено');
+    fireEvent.click(screen.getByRole('button', { name: 'Отправить' }));
+    await within(panel()).findByRole('alert');
+    fireEvent.click(screen.getByLabelText('Свернуть Project Conversation'));
+    fireEvent.click(screen.getByLabelText('Развернуть Project Conversation'));
+    fireEvent.click(await screen.findByText('T0001 · Task T0001'));
+    await screen.findByLabelText('Task Work Area');
+    expect(field().value).toBe('не отправлено');
+    expect(within(panel()).getByRole('alert').textContent).toContain('HTTP 503');
+    expect(screen.queryByText('не отправлено', { selector: '.rosc-chat-body' })).toBeNull();
+  });
+});
