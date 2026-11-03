@@ -191,10 +191,13 @@ def resource_problem(action: str, resource: object) -> str | None:
                 valid = _valid_id(value)
             if not valid:
                 return "invalid_resource"
-        elif value is not None and name not in optional:
-            return "invalid_resource"
-        elif value is not None and name in ("doc_id", "agent_id", "assignment_id", "run_id") and not isinstance(value, str):
-            return "invalid_resource"
+        elif value is not None:
+            if name not in optional:
+                return "invalid_resource"
+            if name in ("project_id", "task_id") and not _valid_id(value):
+                return "invalid_resource"
+            if name in ("doc_id", "agent_id", "assignment_id", "run_id") and not isinstance(value, str):
+                return "invalid_resource"
     return None
 
 

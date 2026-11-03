@@ -35,7 +35,7 @@ from .authorization import (RUN_EVIDENCE_REGISTER, RUN_LINK_AGENT, RUN_LIST, RUN
                             is_canonical_uuid4)
 from .models import (ASSIGNMENT_ACTIVE, ATTRIBUTION_CLAIMED, EVIDENCE_GIT_REF, EVIDENCE_KINDS, EVIDENCE_TEST_REF,
                      INGEST_MANUAL_OWNER, LINK_OWNER_CURATED, LINK_UNLINKED, ORIGIN_EXTERNAL, ORIGIN_MANAGED,
-                     PROVENANCE_CLAIMED, REPORT_KINDS, REPORTED_OUTCOMES, AgentDefinition, EvidenceRecord,
+                     PROVENANCE_CLAIMED, REPORT_KINDS, REPORTED_OUTCOMES, ROLE_WORKER, AgentDefinition, EvidenceRecord,
                      Project, ProjectIdentityError, ReportRecord, RoleAssignment, RunAgentLink, RunRecord, Task,
                      validate_project_identity)
 
@@ -423,8 +423,8 @@ class RunProvenanceService:
                 assignment = session.get(RoleAssignment, assignment_key)
                 if (assignment is None or assignment.agent_id != agent_id or assignment.project_id != project_id
                         or (assignment.task_id is not None and assignment.task_id != run.task_id)
-                        or assignment.state != ASSIGNMENT_ACTIVE):
-                    raise InvalidRunInput("Assignment is not an active assignment of this Agent for this Run")
+                        or assignment.role != ROLE_WORKER or assignment.state != ASSIGNMENT_ACTIVE):
+                    raise InvalidRunInput("Assignment is not an active Worker assignment of this Agent for this Run")
             if run.agent_id is not None:
                 if run.agent_id == agent_id and run.assignment_id == assignment_key:
                     holder["changed"] = False

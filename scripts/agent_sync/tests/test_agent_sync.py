@@ -1466,11 +1466,8 @@ def _repo_root() -> Path:
 
 
 class BootstrapParityTests(unittest.TestCase):
-    def test_agents_and_claude_md_are_byte_identical(self):
-        root = _repo_root()
-        agents = (root / "AGENTS.md").read_bytes()
-        claude = (root / "CLAUDE.md").read_bytes()
-        self.assertEqual(agents, claude)
+    def test_claude_md_imports_agents_md(self):
+        self.assertEqual((_repo_root() / "CLAUDE.md").read_bytes(), b"@AGENTS.md\n")
 
     def test_agents_md_carries_managed_pull_rule(self):
         text = (_repo_root() / "AGENTS.md").read_text(encoding="utf-8")

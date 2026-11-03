@@ -9,7 +9,8 @@ from alembic import command
 
 import test_slice01 as base
 from rosc import authorization as authz
-from rosc.agent_registry import (CAPABILITY_PROJECT_CONTEXT_READ, CAPABILITY_TASK_CONTEXT_READ, AgentRegistryService)
+from rosc.agent_registry import (CAPABILITY_ARCHITECT_DOCUMENT_READ, CAPABILITY_ARCHITECT_DOCUMENT_WRITE,
+                                 CAPABILITY_PROJECT_CONTEXT_READ, CAPABILITY_TASK_CONTEXT_READ, AgentRegistryService)
 from rosc.authorization import ActorContext, AuthorizationDecision, LocalOwnerPolicy, LocalOwnerProvider, ResourceScope, evaluate
 from rosc.db import make_session_factory
 from rosc.run_provenance import (InvalidRunInput, RunConflict, RunNotFound, RunProvenanceDenied, RunProvenanceService,
@@ -18,6 +19,8 @@ from rosc.run_provenance import (InvalidRunInput, RunConflict, RunNotFound, RunP
 OWNER = LocalOwnerProvider().actor()
 TASK = {"title": "T", "description": "D", "acceptance_criteria": "A"}
 WORKER_CAPS = [CAPABILITY_PROJECT_CONTEXT_READ, CAPABILITY_TASK_CONTEXT_READ]
+ARCHITECT_CAPS = [CAPABILITY_PROJECT_CONTEXT_READ, CAPABILITY_ARCHITECT_DOCUMENT_READ,
+                  CAPABILITY_ARCHITECT_DOCUMENT_WRITE]
 DIGEST = "a" * 64
 OWNED_TABLES = ("run_records", "run_agent_links", "report_records", "evidence_records")
 LEGACY_TABLES = ("projects", "project_root_bindings", "tasks", "agent_definitions", "agent_capabilities",
@@ -199,6 +202,17 @@ class AttributionTests(ProvenanceCase):
                                          assignment_id=revoked["assignment_id"])
         self.assertEqual(self.state(), before)
 
+    def test_active_architect_assignment_is_not_valid_run_attribution(self) -> None:
+        run = self.mkrun()
+        agent = self.agent("Architect", ARCHITECT_CAPS)
+        assignment = self.client.post("/api/projects/P0001/assignments", json={
+            "agent_id": agent["agent_id"], "role": "architect", "capabilities": ARCHITECT_CAPS}).json()
+        before = self.state()
+        with self.assertRaises(InvalidRunInput):
+            self.svc.link_external_agent(OWNER, 1, run["run_id"], agent_id=agent["agent_id"], expected_revision=1,
+                                         assignment_id=assignment["assignment_id"])
+        self.assertEqual(self.state(), before)
+
     def test_active_assignment_may_be_referenced_but_grants_nothing(self) -> None:
         run = self.mkrun()
         agent = self.agent()
@@ -212,6 +226,23 @@ class AttributionTests(ProvenanceCase):
         agent_actor = ActorContext(authz.ACTOR_AGENT, agent["agent_id"], authz.ASSURANCE_LOCAL_UNVERIFIED)
         with self.assertRaises(RunProvenanceDenied):
             self.svc.get_run(agent_actor, 1, run["run_id"])
+
+    def test_failed_history_insert_rolls_back_run_link(self) -> None:
+        run = self.mkrun(reported_executor="External Worker")
+        agent = self.agent()
+        workspace_before = self.state()["tree"]
+        self.sql("CREATE TRIGGER fail_run_agent_link BEFORE INSERT ON run_agent_links "
+                 "BEGIN SELECT RAISE(ABORT, 'test failure'); END")
+        try:
+            with self.assertRaises(RunConflict):
+                self.svc.link_external_agent(OWNER, 1, run["run_id"], agent_id=agent["agent_id"], expected_revision=1)
+        finally:
+            self.sql("DROP TRIGGER fail_run_agent_link")
+        self.assertEqual(self.fetch("SELECT agent_id, assignment_id, agent_link_status, attribution_revision "
+                                    "FROM run_records WHERE run_id = ?", run["run_id"]),
+                         [(None, None, "unlinked", 1)])
+        self.assertEqual(self.fetch("SELECT count(*) FROM run_agent_links"), [(0,)])
+        self.assertEqual(self.state()["tree"], workspace_before)
 
     def test_concurrent_links_produce_one_canonical_result(self) -> None:
         run = self.mkrun()
@@ -447,6 +478,11 @@ class AuthorizationTests(ProvenanceCase):
         self.assertFalse(evaluate(policy, OWNER, authz.RUN_LINK_AGENT, ResourceScope(project_id=1, run_id=rid)).allowed)
         self.assertTrue(evaluate(policy, OWNER, authz.RUN_LIST, ResourceScope(project_id=1)).allowed)
         self.assertTrue(evaluate(policy, OWNER, authz.RUN_LIST, ResourceScope(project_id=1, task_id=1)).allowed)
+        for malformed in (True, "1", 1.0, 0, -1):
+            with self.subTest(optional_task_id=malformed):
+                decision = evaluate(policy, OWNER, authz.RUN_LIST,
+                                    ResourceScope(project_id=1, task_id=malformed))
+                self.assertEqual((decision.allowed, decision.reason), (False, "invalid_resource"))
         self.assertNotIn("run.approve", authz.IMPLEMENTED_ACTIONS)
         self.assertFalse(evaluate(policy, OWNER, "run.approve", ResourceScope(project_id=1, task_id=1)).allowed)
         self.assertFalse(evaluate(policy, OWNER, "run.approve", ResourceScope(project_id=1, run_id=rid)).allowed)
@@ -458,6 +494,14 @@ class AuthorizationTests(ProvenanceCase):
                                   agent_id=rid if "agent_id" in required else None)
             self.assertTrue(evaluate(policy, OWNER, action, scope).allowed, action)
             self.assertEqual(evaluate(policy, agent_actor, action, scope).reason, "agent_authority_not_implemented")
+
+    def test_list_runs_rejects_malformed_optional_task_scope_without_side_effects(self) -> None:
+        self.mkrun()
+        before = self.state()
+        for malformed in (True, "1", 1.0, 0, -1):
+            with self.subTest(optional_task_id=malformed), self.assertRaises(RunProvenanceDenied):
+                self.svc.list_runs(OWNER, 1, malformed)
+            self.assertEqual(self.state(), before)
 
     def test_no_http_surface_exists_for_runs(self) -> None:
         for path in ("/api/runs", "/api/projects/P0001/runs", "/api/projects/P0001/tasks/T0001/runs"):
