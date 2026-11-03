@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { coreApi, describeError, type CoreApi } from '../core/api';
-import { toProjectInput, toTaskInput, type Project, type ProjectFormValues, type RepairConfirmation, type RepairResult, type Task, type TaskFormValues } from '../core/models';
+import { toProjectInput, toTaskInput, type ConversationMessage, type Project, type ProjectFormValues, type RepairConfirmation, type RepairResult, type Task, type TaskFormValues } from '../core/models';
 import type { Navigation } from './navigation';
 import type { Feedback, LoadStatus } from './presentation/contracts';
 import { projectIdOf } from './route';
@@ -10,6 +10,25 @@ export type Layer = 'dashboard' | 'project' | 'task' | 'modal';
 type TaskCache = { projectId: string | null; items: Task[]; status: LoadStatus };
 const NO_TASKS: TaskCache = { projectId: null, items: [], status: 'loading' };
 const NO_FEEDBACK: Feedback = { error: '', notice: '' };
+
+type ChatCache = {
+  projectId: string | null;
+  status: LoadStatus;
+  conversationId: string | null;
+  messages: ConversationMessage[];
+  hasMore: boolean;
+  nextBefore: number | null;
+  error: string;
+  sending: boolean;
+  olderLoading: boolean;
+};
+
+const NO_CHAT: ChatCache = {
+  projectId: null, status: 'loading', conversationId: null, messages: [], hasMore: false, nextBefore: null,
+  error: '', sending: false, olderLoading: false,
+};
+
+const chatForProject = (projectId: string | null): ChatCache => ({ ...NO_CHAT, projectId, status: 'loading' });
 
 const repairNotice = (done: RepairResult<unknown>) => done.repair
   ? `Манифест восстановлен. Копия сохранена в карантин: ${done.repair.backup_id}`
@@ -35,6 +54,7 @@ export function useWorkspaceController({ route, routeKey, go }: Navigation, api:
   const [notice, setNotice] = useState('');
   const [registrationOpen, setRegistrationOpen] = useState(false);
   const [busy, setBusy] = useState(false);
+  const [chat, setChat] = useState<ChatCache>(NO_CHAT);
 
   const routeRef = useRef(route);
   routeRef.current = route;
@@ -42,7 +62,10 @@ export function useWorkspaceController({ route, routeKey, go }: Navigation, api:
   const modalEpoch = useRef(0);
   const projectsSeq = useRef(0);
   const tasksSeq = useRef(0);
+  const chatSeq = useRef(0);
   const busyRef = useRef(false);
+  const chatRef = useRef(chat);
+  chatRef.current = chat;
 
   /** The list failure is owned by the Project list itself (not by whichever layer is visible) and stays until a load succeeds. */
   const loadProjects = useCallback(async () => {
@@ -76,6 +99,84 @@ export function useWorkspaceController({ route, routeKey, go }: Navigation, api:
 
   const projectId = projectIdOf(route);
 
+  /** Applies a change only while the cache still belongs to this Project; a late result cannot repaint another one. */
+  const patchChat = useCallback((id: string, patch: Partial<ChatCache>) => {
+    setChat(prev => (prev.projectId === id ? { ...prev, ...patch } : prev));
+  }, []);
+
+  const loadConversation = useCallback(async (id: string) => {
+    const seq = ++chatSeq.current;
+    try {
+      const page = await api.getConversation(id);
+      if (seq !== chatSeq.current || projectIdOf(routeRef.current) !== id) return;
+      setChat({
+        projectId: id, status: 'ready', conversationId: page.conversation?.conversation_id ?? null,
+        messages: page.messages, hasMore: page.page.has_more, nextBefore: page.page.next_before,
+        error: '', sending: false, olderLoading: false,
+      });
+    } catch (e) {
+      if (seq !== chatSeq.current || projectIdOf(routeRef.current) !== id) return;
+      setChat({ ...chatForProject(id), status: 'failed', error: describeError(e) });
+    }
+  }, [api]);
+
+  const reloadConversation = useCallback(() => {
+    const id = projectIdOf(routeRef.current);
+    if (!id) return;
+    chatSeq.current++;
+    setChat(chatForProject(id));
+    void loadConversation(id);
+  }, [loadConversation]);
+
+  const loadOlderMessages = useCallback(async () => {
+    const id = projectIdOf(routeRef.current);
+    const current = chatRef.current;
+    if (!id || current.projectId !== id || !current.hasMore || current.nextBefore === null || current.olderLoading) return;
+    const seq = chatSeq.current;
+    patchChat(id, { olderLoading: true });
+    try {
+      const page = await api.getConversation(id, current.nextBefore);
+      if (seq !== chatSeq.current || projectIdOf(routeRef.current) !== id) return;
+      setChat(prev => {
+        if (prev.projectId !== id) return prev;
+        const known = new Set(prev.messages.map(message => message.message_id));
+        const older = page.messages.filter(message => !known.has(message.message_id));
+        return { ...prev, status: 'ready', messages: [...older, ...prev.messages], hasMore: page.page.has_more,
+          nextBefore: page.page.next_before, olderLoading: false, error: '' };
+      });
+    } catch (e) {
+      patchChat(id, { olderLoading: false, error: describeError(e) });
+    }
+  }, [api, patchChat]);
+
+  const sendConversationMessage = useCallback(async (body: string, clientKey: string): Promise<string | null> => {
+    const id = projectIdOf(routeRef.current);
+    if (!id) return 'Проект не открыт.';
+    const current = chatRef.current;
+    if (current.projectId !== id) return 'История проекта ещё не загружена.';
+    if (current.sending) return 'Предыдущее сообщение ещё сохраняется.';
+    const seq = chatSeq.current;
+    patchChat(id, { sending: true, error: '' });
+    try {
+      const result = await api.sendConversationMessage(id, { client_key: clientKey, body });
+      if (seq === chatSeq.current) {
+        patchChat(id, { status: 'ready', conversationId: result.message.conversation_id });
+        setChat(prev => {
+          if (prev.projectId !== id) return prev;
+          if (prev.messages.some(message => message.message_id === result.message.message_id)) return prev;
+          return { ...prev, messages: [...prev.messages, result.message] };
+        });
+      }
+      return null;
+    } catch (e) {
+      const message = describeError(e);
+      if (seq === chatSeq.current) patchChat(id, { error: message });
+      return message;
+    } finally {
+      if (seq === chatSeq.current) patchChat(id, { sending: false });
+    }
+  }, [api, patchChat]);
+
   // Effect order matters: the first one starts a new message epoch before the loaders capture it.
   useEffect(() => { epoch.current++; setError(''); setNotice(''); }, [routeKey]);
   useEffect(() => { void loadProjects(); }, [loadProjects]);
@@ -83,10 +184,26 @@ export function useWorkspaceController({ route, routeKey, go }: Navigation, api:
     if (projectId) void loadTasks(projectId);
     else { tasksSeq.current++; setTasks(NO_TASKS); }
   }, [projectId, routeKey, loadTasks]);
+  useEffect(() => {
+    if (projectId) { chatSeq.current++; setChat(chatForProject(projectId)); void loadConversation(projectId); }
+    else { chatSeq.current++; setChat(NO_CHAT); }
+  }, [projectId, loadConversation]);
 
   const project = projects.find(p => p.id === projectId) ?? null;
   const taskList = tasks.projectId === projectId && projectId ? tasks : NO_TASKS;
   const task = route.kind === 'task' ? taskList.items.find(t => t.id === route.taskId) ?? null : null;
+  // A cache for another Project is never exposed, not even for one render while the next page loads.
+  const chatCache = projectId && chat.projectId === projectId ? chat : chatForProject(projectId);
+  const conversation = {
+    state: {
+      status: chatCache.status, conversationId: chatCache.conversationId, messages: chatCache.messages,
+      hasMore: chatCache.hasMore, nextBefore: chatCache.nextBefore, error: chatCache.error,
+      sending: chatCache.sending, olderLoading: chatCache.olderLoading,
+    },
+    onReload: reloadConversation,
+    onLoadOlder: () => void loadOlderMessages(),
+    onSend: sendConversationMessage,
+  };
 
   const layer: Layer = registrationOpen ? 'modal'
     : (route.kind === 'task' || route.kind === 'new-task') && project ? 'task'
@@ -197,7 +314,7 @@ export function useWorkspaceController({ route, routeKey, go }: Navigation, api:
 
   return {
     layer, projects, projectsStatus, project, tasks: taskList.items, tasksStatus: taskList.status, task, busy, registrationOpen,
-    feedbackFor,
+    feedbackFor, conversation,
     actions: {
       retry, retryProjects,
       // Each modal instance gets its own epoch and starts and ends with clean, modal-owned feedback only.

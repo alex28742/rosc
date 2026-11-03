@@ -14,6 +14,11 @@ import { Shell } from './Shell';
 const feedback = { error: '', notice: '' };
 const scroll = { region: () => () => {} };
 const workspace = { busy: false, onReconcile: vi.fn(), onRepair: vi.fn() };
+const conversation = () => ({
+  state: { status: 'ready' as const, conversationId: null, messages: [], hasMore: false, nextBefore: null,
+    error: '', sending: false, olderLoading: false },
+  onReload: vi.fn(), onLoadOlder: vi.fn(), onSend: vi.fn(async () => null),
+});
 const P1 = project('P0001', { name: 'ROSC Platform', description: 'Ядро платформы', root_path: '/tmp/rosc', docs_entrypoint: 'README.md' });
 const P2 = project('P0002', { name: 'Telemetry Lab', workspace_state: 'needs_reconciliation', workspace_problem: 'drift' });
 const T1 = task('T0001', 'P0001', { title: 'Срез работ', description: 'Описание', acceptance_criteria: 'Критерии' });
@@ -56,7 +61,7 @@ describe('Dashboard presentation', () => {
 describe('Work area presentation', () => {
   const projectProps = {
     projectId: 'P0001', project: P1, projectStatus: 'ready' as const, tasks: [T1], tasksStatus: 'ready' as const,
-    feedback, inert: false, scroll, workspace, onClose: vi.fn(), onRetry: vi.fn(), onOpenTask: vi.fn(), onNewTask: vi.fn(),
+    feedback, inert: false, scroll, workspace, conversation: conversation(), onClose: vi.fn(), onRetry: vi.fn(), onOpenTask: vi.fn(), onNewTask: vi.fn(),
   };
 
   it('labels the Project layer and keeps one visible, named close control', () => {
@@ -102,7 +107,7 @@ describe('Work area presentation', () => {
 describe('Workspace presentation', () => {
   const baseProject = {
     projectId: 'P0001', projectStatus: 'ready' as const, tasks: [], tasksStatus: 'ready' as const,
-    feedback, inert: false, scroll, onClose: vi.fn(), onRetry: vi.fn(), onOpenTask: vi.fn(), onNewTask: vi.fn(),
+    feedback, inert: false, scroll, conversation: conversation(), onClose: vi.fn(), onRetry: vi.fn(), onOpenTask: vi.fn(), onNewTask: vi.fn(),
   };
   const controls = () => ({ busy: false, onReconcile: vi.fn(), onRepair: vi.fn() });
 

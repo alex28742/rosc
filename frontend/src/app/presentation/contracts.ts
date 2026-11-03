@@ -1,7 +1,7 @@
 // The only surface a presentation package sees. Presentations render these typed view models and call these
 // callbacks; they never reach the API client, the router or Core persistence.
 import type { ComponentType, ReactNode } from 'react';
-import type { Project, ProjectFormValues, RepairConfirmation, Task, TaskFormValues } from '../../core/models';
+import type { ConversationMessage, Project, ProjectFormValues, RepairConfirmation, Task, TaskFormValues } from '../../core/models';
 import type { ScrollRegions } from '../scroll';
 
 export type LoadStatus = 'loading' | 'ready' | 'failed';
@@ -31,6 +31,31 @@ export type DashboardViewProps = {
   onRetry: () => void;
 };
 
+/** Durable Project Conversation state for the open Project. `messages` are already ordered oldest first. */
+export type ConversationState = {
+  status: LoadStatus;
+  conversationId: string | null;
+  messages: ConversationMessage[];
+  /** True while older messages exist beyond the loaded page; `nextBefore` is the cursor for them. */
+  hasMore: boolean;
+  nextBefore: number | null;
+  /** Load failure; never carries message text. */
+  error: string;
+  sending: boolean;
+  olderLoading: boolean;
+};
+
+/**
+ * Conversation actions owned by the application controller. `onSend` resolves to `null` once the message is
+ * persisted and to an error message otherwise, so a view can keep the draft and report failure truthfully.
+ */
+export type ConversationControls = {
+  state: ConversationState;
+  onReload: () => void;
+  onLoadOlder: () => void;
+  onSend: (body: string, clientKey: string) => Promise<string | null>;
+};
+
 export type ProjectViewProps = {
   projectId: string;
   /** null while loading, failed, or when the id does not exist; `status` tells which. */
@@ -42,14 +67,14 @@ export type ProjectViewProps = {
   inert: boolean;
   scroll: ScrollRegions;
   workspace: WorkspaceControls;
+  conversation: ConversationControls;
   onClose: () => void;
   onRetry: () => void;
   onOpenTask: (taskId: string) => void;
   onNewTask: () => void;
 };
 
-export type TaskViewProps = {
-  projectName: string;
+export type TaskViewProps = {  projectName: string;
   taskId: string;
   task: Task | null;
   tasksStatus: LoadStatus;

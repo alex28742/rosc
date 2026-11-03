@@ -1,0 +1,229 @@
+import { useEffect, useMemo, useRef, useState, type FormEvent, type ReactNode } from 'react';
+import type { ConversationControls } from '../../../app/presentation/contracts';
+import type { ConversationMessage } from '../../../core/models';
+
+type Props = {
+  projectId: string;
+  /** Read-only Core fact: P014 never activates an Architect, so this stays false and is labelled truthfully. */
+  architectActive: boolean;
+  conversation: ConversationControls;
+  collapsed: boolean;
+  onCollapsedChange: (collapsed: boolean) => void;
+};
+
+type Match = { messageId: string; start: number; end: number; id: string };
+
+const MAX_MATCHES = 500;
+
+/** Case-insensitive, client-local search over the messages that are already loaded. */
+function findMatches(messages: ConversationMessage[], term: string): Match[] {
+  const needle = term.toLocaleLowerCase('ru');
+  const matches: Match[] = [];
+  if (!needle) return matches;
+  for (const message of messages) {
+    const haystack = message.body.toLocaleLowerCase('ru');
+    let from = 0;
+    let at = haystack.indexOf(needle, from);
+    while (at !== -1) {
+      if (matches.length >= MAX_MATCHES) return matches;
+      matches.push({ messageId: message.message_id, start: at, end: at + needle.length,
+        id: `rosc-chat-match-${matches.length}` });
+      from = at + needle.length;
+      at = haystack.indexOf(needle, from);
+    }
+  }
+  return matches;
+}
+
+/** Renders plain text, wrapping search hits in <mark>. Never uses HTML insertion: the body is text, not markup. */
+function renderBody(body: string, matches: Match[], currentId: string | null): ReactNode {
+  if (matches.length === 0) return body;
+  const nodes: ReactNode[] = [];
+  let cursor = 0;
+  for (const match of matches) {
+    if (match.start > cursor) nodes.push(body.slice(cursor, match.start));
+    nodes.push(<mark key={match.id} id={match.id}
+      className={match.id === currentId ? 'rosc-chat-mark rosc-chat-mark--current' : 'rosc-chat-mark'}>
+      {body.slice(match.start, match.end)}
+    </mark>);
+    cursor = match.end;
+  }
+  if (cursor < body.length) nodes.push(body.slice(cursor));
+  return nodes;
+}
+
+function formatTime(iso: string): string {
+  const date = new Date(iso);
+  return Number.isNaN(date.getTime()) ? '' : date.toLocaleTimeString('ru-RU', { hour: '2-digit', minute: '2-digit' });
+}
+
+/** One client-generated opaque idempotency key per unsent message; retrying the same text reuses it. */
+function newClientKey(): string {
+  const random = typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function'
+    ? crypto.randomUUID()
+    : `${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`;
+  return `ui-${random}`.replace(/[^A-Za-z0-9._:-]/g, '').slice(0, 96);
+}
+
+/**
+ * Persistent right-hand Project Conversation: ordered Owner messages, a truthful empty state, a bounded composer,
+ * collapse/restore and client-local search. It records text in ROSC only and never claims delivery or a reply.
+ */
+export function ConversationPanel({ projectId, architectActive, conversation, collapsed, onCollapsedChange }: Props) {
+  const state = conversation.state;
+  const [draft, setDraft] = useState('');
+  const [failure, setFailure] = useState('');
+  const [searchOpen, setSearchOpen] = useState(false);
+  const [searchTerm, setSearchTerm] = useState('');
+  const [matchIndex, setMatchIndex] = useState(0);
+  const pendingKey = useRef<string | null>(null);
+  const feed = useRef<HTMLDivElement | null>(null);
+  const preserveOlder = useRef<number | null>(null);
+
+  const matches = useMemo(() => findMatches(state.messages, searchTerm.trim()), [state.messages, searchTerm]);
+  const currentMatch = matches.length === 0 ? -1 : Math.min(matchIndex, matches.length - 1);
+  const currentId = currentMatch >= 0 ? matches[currentMatch].id : null;
+  const lastMessageId = state.messages.length > 0 ? state.messages[state.messages.length - 1].message_id : null;
+
+  // New messages scroll to the bottom; prepending older ones keeps the reader where they were.
+  useEffect(() => {
+    if (searchTerm.trim() || !feed.current) return;
+    feed.current.scrollTop = feed.current.scrollHeight;
+  }, [lastMessageId, state.status, searchTerm]);
+
+  useEffect(() => {
+    const element = feed.current;
+    if (!element || preserveOlder.current === null) return;
+    element.scrollTop = element.scrollHeight - preserveOlder.current;
+    preserveOlder.current = null;
+  }, [state.messages.length]);
+
+  useEffect(() => {
+    if (!currentId) return;
+    document.getElementById(currentId)?.scrollIntoView?.({ block: 'center' });
+  }, [currentId]);
+
+  const loadOlder = () => {
+    if (!feed.current || !state.hasMore || state.olderLoading) return;
+    preserveOlder.current = feed.current.scrollHeight - feed.current.scrollTop;
+    conversation.onLoadOlder();
+  };
+
+  const toggleSearch = () => {
+    if (searchOpen) {
+      setSearchOpen(false);
+      setSearchTerm('');
+      setMatchIndex(0);
+    } else setSearchOpen(true);
+  };
+
+  const step = (delta: number) => {
+    if (matches.length === 0) return;
+    setMatchIndex(current => (current + delta + matches.length) % matches.length);
+  };
+
+  const submit = async (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    const body = draft.trim();
+    if (!body || state.sending) return;
+    const key = pendingKey.current ?? newClientKey();
+    pendingKey.current = key;
+    setFailure('');
+    const problem = await conversation.onSend(body, key);
+    if (problem === null) {
+      setDraft('');
+      pendingKey.current = null;
+      setMatchIndex(0);
+    } else setFailure(problem);
+  };
+
+  return <aside className={collapsed ? 'rosc-conversation rosc-conversation--collapsed' : 'rosc-conversation'}
+    aria-label="Project Conversation" data-project-id={projectId}>
+    <button type="button" className="rosc-conversation__collapse" aria-label="Свернуть Project Conversation"
+      title="Свернуть Project Conversation вправо" onClick={() => onCollapsedChange(true)}>›</button>
+    <header className="rosc-conversation__head">
+      <div>
+        <h3>Project Conversation</h3>
+        <p>История сохраняется в ROSC · ответы агентов не подключены</p>
+      </div>
+      <div className="rosc-conversation__head-actions">
+        <button type="button" className={searchOpen ? 'rosc-chat-icon rosc-chat-icon--on' : 'rosc-chat-icon'}
+          aria-label="Поиск по сообщениям" aria-expanded={searchOpen} title="Поиск по Project Conversation"
+          onClick={toggleSearch}>⌕</button>
+        <span className={architectActive ? 'rosc-chip rosc-chip--live' : 'rosc-chip'}>
+          {architectActive ? 'Architect: активен' : 'Architect: не активирован'}
+        </span>
+      </div>
+    </header>
+    {searchOpen && <div className="rosc-conversation__search">
+      <input type="search" aria-label="Поиск по сообщениям" placeholder="Найти в переписке…"
+        value={searchTerm} autoFocus
+        onChange={event => { setSearchTerm(event.target.value); setMatchIndex(0); }}
+        onKeyDown={event => {
+          if (event.key === 'Enter') { event.preventDefault(); step(event.shiftKey ? -1 : 1); }
+          if (event.key === 'Escape') { event.stopPropagation(); toggleSearch(); }
+        }} />
+      <span className="rosc-conversation__count" aria-live="polite">
+        {matches.length === 0 ? '0 / 0' : `${currentMatch + 1} / ${matches.length}`}
+      </span>
+      <button type="button" className="rosc-chat-nav" aria-label="Предыдущее совпадение"
+        onClick={() => step(-1)} disabled={matches.length === 0}>‹</button>
+      <button type="button" className="rosc-chat-nav" aria-label="Следующее совпадение"
+        onClick={() => step(1)} disabled={matches.length === 0}>›</button>
+    </div>}
+    <div className="rosc-conversation__feed" role="log" aria-label="Сообщения по проекту" ref={feed}>
+      {state.hasMore && state.status === 'ready' && <div className="rosc-conversation__more">
+        <button type="button" className="rosc-btn rosc-btn--small" onClick={loadOlder} disabled={state.olderLoading}>
+          {state.olderLoading ? 'Загрузка…' : 'Загрузить более ранние'}
+        </button>
+        <span>Поиск охватывает загруженные сообщения</span>
+      </div>}
+      {state.status === 'loading' && <div className="rosc-state rosc-state--loading"><span className="rosc-spinner"
+        aria-hidden="true" />Загрузка переписки…</div>}
+      {state.status === 'failed' && <div className="rosc-state rosc-state--failed" role="alert">
+        <p>Не удалось загрузить переписку. {state.error}</p>
+        <button className="rosc-btn rosc-btn--small" onClick={conversation.onReload}>Повторить</button>
+      </div>}
+      {state.status === 'ready' && state.messages.length === 0 && <div className="rosc-state">
+        <p>Сообщений пока нет.</p>
+        <p>Первое сообщение Owner сохранится в ROSC. Architect не активирован, поэтому ответа не будет.</p>
+      </div>}
+      {state.messages.map(message => <article key={message.message_id}
+        className="rosc-chat-message rosc-chat-message--owner" data-message-id={message.message_id}>
+        <span className="rosc-chat-avatar" aria-hidden="true">O</span>
+        <div className="rosc-chat-bubble">
+          <div className="rosc-chat-meta">
+            <span>{message.sender.display_name}</span>
+            <time dateTime={message.created_at}>{formatTime(message.created_at)}</time>
+          </div>
+          <p className="rosc-chat-body">{renderBody(message.body,
+            matches.filter(match => match.messageId === message.message_id), currentId)}</p>
+        </div>
+      </article>)}
+    </div>
+    <form className="rosc-conversation__compose" onSubmit={submit}>
+      <textarea aria-label="Сообщение в Project Conversation" placeholder="Обсудить задачу, задать вопрос…" rows={3}
+        value={draft} onChange={event => setDraft(event.target.value)}
+        onKeyDown={event => {
+          if (event.key === 'Enter' && (event.ctrlKey || event.metaKey)) {
+            event.preventDefault();
+            event.currentTarget.form?.requestSubmit();
+          }
+        }} />
+      <div className="rosc-conversation__actions">
+        <small>От: Owner · local_unverified</small>
+        <button type="submit" className="rosc-btn rosc-btn--primary"
+          disabled={!draft.trim() || state.sending}>{state.sending ? 'Сохранение…' : 'Отправить'}</button>
+      </div>
+      {failure && <p className="rosc-conversation__error" role="alert">{failure}</p>}
+      <p className="rosc-conversation__hint">
+        Сообщение сохраняется только в ROSC. Architect не активирован — доставки и ответа не будет.
+      </p>
+    </form>
+    <button type="button" className="rosc-conversation__rail" aria-label="Развернуть Project Conversation"
+      onClick={() => onCollapsedChange(false)}>
+      <span aria-hidden="true">‹</span>
+      <span className="rosc-conversation__rail-label">PROJECT CONVERSATION</span>
+    </button>
+  </aside>;
+}

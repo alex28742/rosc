@@ -51,6 +51,7 @@ export function App({ api = coreApi }: { api?: CoreApi }) {
       inert={taskLayerOpen || modalOpen}
       scroll={scroll}
       workspace={workspace('project')}
+      conversation={core.conversation}
       onClose={close}
       onRetry={() => void actions.retry()}
       onOpenTask={taskId => go({ kind: 'task', projectId, taskId })}

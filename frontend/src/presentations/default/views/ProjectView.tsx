@@ -1,30 +1,25 @@
+import { useState } from 'react';
 import type { ProjectViewProps } from '../../../app/presentation/contracts';
 import { Drawer } from '../ui/Drawer';
 import { Feedback } from '../ui/Feedback';
 import { WorkspaceActions } from '../ui/WorkspaceActions';
+import { ConversationPanel } from '../ui/ConversationPanel';
 import { ChevronRightIcon, DocumentIcon } from '../ui/icons';
 
-export function ProjectView({ projectId, project, projectStatus, tasks, tasksStatus, feedback, inert, scroll, workspace, onClose, onRetry, onOpenTask, onNewTask }: ProjectViewProps) {
-  const head = <>
-    <div className="rosc-drawer__heading">
-      <p className="rosc-drawer-eyebrow">PROJECT / WORK AREA</p>
-      <h2>{project?.name ?? projectId}</h2>
-      <p>{project?.root_path ?? 'Проект не загружен'}</p>
-    </div>
-    <div className="rosc-drawer__controls">
-      <span className="rosc-chip">Агенты не запущены</span>
-      {project && <span className={project.workspace_state === 'ready' ? 'rosc-tag rosc-tag--success' : 'rosc-tag rosc-tag--warning'}>
-        {project.workspace_state === 'ready' ? 'Workspace готов' : 'Нужна сверка'}
-      </span>}
-    </div>
-  </>;
-  return <Drawer variant="project" label="Project Work Area" closeLabel="Закрыть проект" inert={inert} onClose={onClose} head={head} bodyRef={scroll.region(`project:${projectId}`)}>
-    <Feedback {...feedback} />
-    {!project && (projectStatus === 'loading'
-      ? <div className="rosc-state rosc-state--loading"><span className="rosc-spinner" aria-hidden="true" />Загрузка…</div>
-      : projectStatus === 'failed' ? <div className="rosc-state rosc-state--failed"><p>Не удалось загрузить проект. <button className="rosc-btn rosc-btn--small" onClick={onRetry}>Повторить</button></p></div>
-        : <div className="rosc-state"><p>Проект не найден. Закройте окно и выберите проект на дашборде.</p></div>)}
-    {project && <>
+type WorkAreaProps = Omit<ProjectViewProps, 'project' | 'projectStatus' | 'onClose' | 'projectId' | 'inert'> & {
+  project: NonNullable<ProjectViewProps['project']>;
+};
+
+/**
+ * Approved v0.6 Project Work Area composition: left overview + tabs + Tasks, right persistent Project Conversation.
+ * Both columns scroll independently; the conversation is not a left-side tab. UI-local chat state (draft, collapse,
+ * search) lives here and is keyed by Project, so switching Projects cannot leak it and a nested Task keeps it intact.
+ */
+function ProjectWorkArea({ project, tasks, tasksStatus, feedback, scroll, workspace, conversation, onRetry, onOpenTask, onNewTask }: WorkAreaProps) {
+  const [collapsed, setCollapsed] = useState(false);
+  return <div className={collapsed ? 'rosc-project-workspace rosc-project-workspace--collapsed' : 'rosc-project-workspace'}>
+    <section className="rosc-project-left" aria-label="Обзор проекта и задачи" ref={scroll.region(`project:${project.id}`)}>
+      <Feedback {...feedback} />
       <div className="rosc-hero">
         <section className="rosc-panel-card">
           <h3>Контекст проекта</h3>
@@ -63,6 +58,35 @@ export function ProjectView({ projectId, project, projectStatus, tasks, tasksSta
               <span className="rosc-task-item__chevron" aria-hidden="true"><ChevronRightIcon size="sm" /></span>
             </button>)}
       </div>
-    </>}
+    </section>
+    <ConversationPanel projectId={project.id} architectActive={project.architect !== 'not_active'}
+      conversation={conversation} collapsed={collapsed} onCollapsedChange={setCollapsed} />
+  </div>;
+}
+
+export function ProjectView({ projectId, project, projectStatus, tasks, tasksStatus, feedback, inert, scroll, workspace, conversation, onClose, onRetry, onOpenTask, onNewTask }: ProjectViewProps) {
+  const head = <>
+    <div className="rosc-drawer__heading">
+      <p className="rosc-drawer-eyebrow">PROJECT / WORK AREA</p>
+      <h2>{project?.name ?? projectId}</h2>
+      <p>{project?.root_path ?? 'Проект не загружен'}</p>
+    </div>
+    <div className="rosc-drawer__controls">
+      <span className="rosc-chip">Агенты не запущены</span>
+      {project && <span className={project.workspace_state === 'ready' ? 'rosc-tag rosc-tag--success' : 'rosc-tag rosc-tag--warning'}>
+        {project.workspace_state === 'ready' ? 'Workspace готов' : 'Нужна сверка'}
+      </span>}
+    </div>
+  </>;
+  return <Drawer variant="project" label="Project Work Area" closeLabel="Закрыть проект" inert={inert} onClose={onClose} head={head} fill>
+    {!project ? <div className="rosc-drawer__scroll" ref={scroll.region(`project:${projectId}`)}>
+      <Feedback {...feedback} />
+      {projectStatus === 'loading'
+        ? <div className="rosc-state rosc-state--loading"><span className="rosc-spinner" aria-hidden="true" />Загрузка…</div>
+        : projectStatus === 'failed' ? <div className="rosc-state rosc-state--failed"><p>Не удалось загрузить проект. <button className="rosc-btn rosc-btn--small" onClick={onRetry}>Повторить</button></p></div>
+          : <div className="rosc-state"><p>Проект не найден. Закройте окно и выберите проект на дашборде.</p></div>}
+    </div> : <ProjectWorkArea key={project.id} project={project} tasks={tasks} tasksStatus={tasksStatus}
+      feedback={feedback} scroll={scroll} workspace={workspace} conversation={conversation}
+      onRetry={onRetry} onOpenTask={onOpenTask} onNewTask={onNewTask} />}
   </Drawer>;
 }

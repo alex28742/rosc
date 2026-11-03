@@ -649,7 +649,8 @@ class HardeningTests(StageCase):
         tables = set(inspect(create_engine(f"sqlite:///{self.data / 'rosc.db'}")).get_table_names())
         self.assertEqual(tables, {"projects", "tasks", "project_root_bindings", "agent_definitions", "agent_capabilities",
                                   "role_assignments", "assignment_capabilities", "run_records", "run_agent_links",
-                                  "report_records", "evidence_records", "alembic_version"})
+                                  "report_records", "evidence_records", "conversations", "conversation_participants",
+                                  "conversation_messages", "alembic_version"})
 
 
 if __name__ == "__main__":

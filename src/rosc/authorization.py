@@ -62,6 +62,10 @@ RUN_READ = "run.read"
 RUN_REPORT_REGISTER = "run.report.register"
 RUN_EVIDENCE_REGISTER = "run.evidence.register"
 RUN_LINK_AGENT = "run.link_agent"
+# M3-A durable Project Conversation (P014). Reading and Owner-authored messages are separate operations. Neither
+# activates an Agent, creates a Run or grants an Agent participant any authority.
+CONVERSATION_READ = "conversation.read"
+CONVERSATION_MESSAGE_CREATE = "conversation.message.create"
 
 # Resource shapes: which identifiers an action must carry and which it may carry.
 # (required fields, optional fields); every other field must be absent.
@@ -93,6 +97,8 @@ _SHAPES: dict[str, tuple[frozenset[str], frozenset[str]]] = {
     RUN_EVIDENCE_REGISTER: (frozenset({"project_id", "run_id"}), frozenset()),
     # agent_id is the *target* of the Owner-curated correspondence; it never selects the actor.
     RUN_LINK_AGENT: (frozenset({"project_id", "run_id", "agent_id"}), frozenset()),
+    CONVERSATION_READ: (frozenset({"project_id"}), frozenset()),
+    CONVERSATION_MESSAGE_CREATE: (frozenset({"project_id"}), frozenset()),
 }
 IMPLEMENTED_ACTIONS = frozenset(_SHAPES)
 

@@ -43,7 +43,7 @@ describe('navigation', () => {
     at('/projects/P0001/new-task');
     render(<App api={api} />);
     expect(await screen.findByLabelText('Новая Task')).toBeTruthy();
-    for (const mutation of [api.createProject, api.createTask, api.reconcileProject, api.repairProject, api.reconcileTask, api.repairTask]) expect(mutation).not.toHaveBeenCalled();
+    for (const mutation of [api.createProject, api.createTask, api.reconcileProject, api.repairProject, api.reconcileTask, api.repairTask, api.sendConversationMessage]) expect(mutation).not.toHaveBeenCalled();
   });
 
   it('does not coerce an unsupported path into a Project view', async () => {

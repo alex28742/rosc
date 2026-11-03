@@ -7,7 +7,7 @@ import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import FastAPI, HTTPException, Request, Response
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field, field_validator
 from sqlalchemy import select
@@ -18,6 +18,9 @@ from .agent_registry import (AgentNotFound, AgentRegistryService, AssignmentNotF
                              RegistryConflict, RegistryDenied, RegistryError, RegistryStoreError, UnsafeProjectIdentity,
                              canonical_agent_id)
 from .config import data_dir
+from .conversation import (DEFAULT_PAGE_SIZE, ConversationConflict, ConversationDenied, ConversationError,
+                           ConversationNotFound, ConversationStoreError, InvalidConversationInput,
+                           ProjectConversationService, UnsafeProjectIdentity as UnsafeConversationIdentity)
 from .db import make_session_factory
 from .models import (CURRENT_BINDING, Project, ProjectIdentityError, ProjectRootBinding, Task, reserved_roots,
                      validate_project_identity)
@@ -196,6 +199,30 @@ class RevokeInput(BaseModel):
     expected_version: int = Field(ge=1)
 
 
+class ConversationMessageInput(BaseModel):
+    """Owner message text plus an opaque client idempotency key; no author, participant or session is accepted."""
+
+    client_key: str = Field(min_length=8, max_length=128)
+    body: str = Field(min_length=1, max_length=4000)
+
+
+def conversation_error(exc: ConversationError) -> HTTPException:
+    """Map the conversation boundary onto the established HTTP status contract without echoing message content."""
+    if isinstance(exc, ConversationDenied):
+        return HTTPException(403, "Not authorized for this operation")
+    if isinstance(exc, ConversationNotFound):
+        return HTTPException(404, "Project not found")
+    if isinstance(exc, ConversationConflict):
+        return HTTPException(409, str(exc))
+    if isinstance(exc, InvalidConversationInput):
+        return HTTPException(422, str(exc))
+    if isinstance(exc, UnsafeConversationIdentity):
+        return HTTPException(503, "Project identity records are inconsistent; manual reconciliation is required")
+    if isinstance(exc, ConversationStoreError):
+        return HTTPException(503, str(exc))
+    return HTTPException(503, "Conversation operation failed")
+
+
 def require_confirmation(data: RepairInput) -> None:
     if not data.confirm_repair:
         raise HTTPException(422, "Owner confirmation is required to repair a Workspace manifest")
@@ -301,6 +328,7 @@ def create_app(db_path: Path | None = None, workspace_root: Path | None = None, 
     workspace_root = workspace_root or base / "workspace"
     sessions = make_session_factory(db_path, busy_timeout_ms)
     registry = AgentRegistryService(sessions, policy)
+    conversation = ProjectConversationService(sessions, policy)
     app = FastAPI(title="ROSC Core", version="0.1.0")
 
     @app.middleware("http")
@@ -342,6 +370,13 @@ def create_app(db_path: Path | None = None, workspace_root: Path | None = None, 
             return call(*args, **kwargs)
         except RegistryError as exc:
             raise registry_error(exc) from None
+
+    def conversation_call(call, *args, **kwargs):
+        """Run one conversation service call and translate its boundary errors into HTTP contract errors."""
+        try:
+            return call(*args, **kwargs)
+        except ConversationError as exc:
+            raise conversation_error(exc) from None
 
     @app.get("/api/health")
     def health() -> dict:
@@ -550,6 +585,24 @@ def create_app(db_path: Path | None = None, workspace_root: Path | None = None, 
         pid = numeric_id(project_id, "P")
         return registry_call(registry.revoke_assignment, current_actor(), pid, agent_path_id(assignment_id),
                              expected_version=data.expected_version)
+
+    # -- M3-A durable Owner-only Project Conversation (no agent, delivery or activation surface) ---------------
+    @app.get("/api/projects/{project_id}/conversation")
+    def read_project_conversation(project_id: str, before: int | None = None,
+                                  limit: int = DEFAULT_PAGE_SIZE) -> dict:
+        pid = numeric_id(project_id, "P")
+        return conversation_call(conversation.read_conversation, current_actor(), pid, before=before, limit=limit)
+
+    @app.post("/api/projects/{project_id}/conversation/messages", status_code=201)
+    def create_project_conversation_message(project_id: str, data: ConversationMessageInput,
+                                            response: Response) -> dict:
+        pid = numeric_id(project_id, "P")
+        # The sender is the trusted local Owner context, never a request-supplied id, role or session.
+        result = conversation_call(conversation.create_message, current_actor(), pid,
+                                   client_key=data.client_key, body=data.body)
+        if result["replayed"]:
+            response.status_code = 200
+        return result
 
     return app
 

@@ -53,6 +53,44 @@ export type TaskFormValues = { title: string; description: string; acceptance_cr
 export type RepairRecord = { backup_id: string };
 export type RepairResult<T> = T & { repair: RepairRecord | null };
 
+/** Durable Project Conversation (P014). A participant is attribution history, never liveness or authority. */
+export type ConversationParticipant = {
+  participant_id: string;
+  kind: 'owner' | 'architect' | 'worker';
+  display_name: string;
+  actor_id: string;
+  assurance: string;
+  agent_id: string | null;
+};
+
+export type ConversationMessage = {
+  message_id: string;
+  conversation_id: string;
+  ordinal: number;
+  body: string;
+  created_at: string;
+  sender: ConversationParticipant;
+};
+
+export type ProjectConversation = {
+  conversation_id: string;
+  kind: string;
+  project_id: string;
+  task_id: number | null;
+  created_at: string;
+  participants: ConversationParticipant[];
+};
+
+export type ConversationPage = {
+  project_id: string;
+  conversation: ProjectConversation | null;
+  messages: ConversationMessage[];
+  page: { limit: number; has_more: boolean; next_before: number | null };
+};
+
+export type ConversationMessageInput = { client_key: string; body: string };
+export type ConversationMessageResult = { message: ConversationMessage; replayed: boolean };
+
 /** Can only be produced by an explicit user confirmation; the repair endpoint requires it. */
 export type RepairConfirmation = { readonly confirmed: true };
 

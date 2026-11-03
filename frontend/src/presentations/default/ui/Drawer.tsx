@@ -14,14 +14,16 @@ type Props = {
   /** When set, the layer body is a `<form>` (Task Draft) instead of a plain scroll region. */
   onSubmit?: (event: React.FormEvent<HTMLFormElement>) => void;
   bodyRef?: (element: HTMLElement | null) => void;
+  /** The body manages its own scrolling regions (two-column Project Work Area) instead of one padded scroll box. */
+  fill?: boolean;
 };
 
 /**
  * Backdrop + right-hand drawer + left-edge close control shared by the Project and Task layers.
  * The scroll region is tagged by the caller so the app keeps its position across close/reopen.
  */
-export function Drawer({ variant, label, closeLabel, inert, onClose, head, children, footer, onSubmit, bodyRef }: Props) {
-  const scroll = <div className="rosc-drawer__scroll" ref={bodyRef}>{children}</div>;
+export function Drawer({ variant, label, closeLabel, inert, onClose, head, children, footer, onSubmit, bodyRef, fill }: Props) {
+  const scroll = <div className={fill ? 'rosc-drawer__scroll rosc-drawer__scroll--fill' : 'rosc-drawer__scroll'} ref={bodyRef}>{children}</div>;
   const body = onSubmit
     ? <form className="rosc-drawer__form" onSubmit={onSubmit}>{scroll}{footer && <div className="rosc-drawer__footer">{footer}</div>}</form>
     : <>{scroll}{footer && <div className="rosc-drawer__footer">{footer}</div>}</>;

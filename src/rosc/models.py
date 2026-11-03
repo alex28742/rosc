@@ -418,6 +418,100 @@ class EvidenceRecord(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
 
 
+# M3-A Project Conversation (P014). A conversation is a durable ROSC record. It is not a runtime process, a provider
+# session, an activation, a delivery channel or an approval. ``owner`` is the only participant kind that may author in
+# this slice; ``architect``/``worker`` are reserved logical identities that no P014 code path creates.
+CONVERSATION_KIND_PROJECT = "project"
+CONVERSATION_KIND_TASK = "task"
+PARTICIPANT_OWNER = "owner"
+PARTICIPANT_ARCHITECT = "architect"
+PARTICIPANT_WORKER = "worker"
+MAX_MESSAGE_BODY = 4000
+MAX_CLIENT_KEY = 128
+
+
+class Conversation(Base):
+    """One durable conversation. A Project has at most one canonical ``project`` conversation.
+
+    ``task_id`` exists so a later Task Conversation uses the same model instead of a second one; P014 implements only
+    the project scope and the service refuses to create a ``task`` conversation.
+    """
+
+    __tablename__ = "conversations"
+    __table_args__ = (
+        CheckConstraint("kind IN ('project', 'task')", name="ck_conversations_kind"),
+        CheckConstraint("(kind = 'project') = (task_id IS NULL)", name="ck_conversations_scope"),
+        Index("ux_conversations_project", "project_id", unique=True, sqlite_where=text("kind = 'project'")),
+        Index("ux_conversations_task", "task_id", unique=True, sqlite_where=text("kind = 'task'")),
+        Index("ix_conversations_project_id", "project_id"),
+    )
+
+    conversation_id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    project_id: Mapped[int] = mapped_column(ForeignKey("projects.id", ondelete="RESTRICT"))
+    task_id: Mapped[int | None] = mapped_column(ForeignKey("tasks.id", ondelete="RESTRICT"), nullable=True)
+    kind: Mapped[str] = mapped_column(String(16))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
+    participants: Mapped[list[ConversationParticipant]] = relationship(
+        back_populates="conversation", lazy="selectin", order_by="ConversationParticipant.created_at")
+
+
+class ConversationParticipant(Base):
+    """Logical participant identity inside one conversation, independent of any runtime session.
+
+    ``actor_id``/``actor_assurance`` record the trusted ``ActorContext`` that created the participant. Membership is
+    attribution history, never a permission: an Agent participant would still be denied by ``LocalOwnerPolicy``.
+    """
+
+    __tablename__ = "conversation_participants"
+    __table_args__ = (
+        CheckConstraint("kind IN ('owner', 'architect', 'worker')", name="ck_conversation_participants_kind"),
+        CheckConstraint("(kind = 'owner') = (agent_id IS NULL)", name="ck_conversation_participants_agent"),
+        CheckConstraint("length(actor_id) BETWEEN 1 AND 64", name="ck_conversation_participants_actor"),
+        CheckConstraint("length(actor_assurance) BETWEEN 1 AND 32", name="ck_conversation_participants_assurance"),
+        UniqueConstraint("conversation_id", "kind", "actor_id", name="uq_conversation_participants_identity"),
+        Index("ux_conversation_participants_owner", "conversation_id", unique=True,
+              sqlite_where=text("kind = 'owner'")),
+    )
+
+    participant_id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    conversation_id: Mapped[str] = mapped_column(ForeignKey("conversations.conversation_id", ondelete="RESTRICT"))
+    kind: Mapped[str] = mapped_column(String(16))
+    actor_id: Mapped[str] = mapped_column(String(64))
+    actor_assurance: Mapped[str] = mapped_column(String(32))
+    agent_id: Mapped[str | None] = mapped_column(ForeignKey("agent_definitions.agent_id", ondelete="RESTRICT"),
+                                                 nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
+    conversation: Mapped[Conversation] = relationship(back_populates="participants")
+
+
+class ConversationMessage(Base):
+    """Immutable Owner-authored plain-text message with a stable per-conversation display order.
+
+    ``client_key`` is a bounded, opaque caller-generated idempotency key scoped to one conversation; it is never a
+    canonical identity and never the message text. ``ordinal`` is assigned inside the write transaction so concurrent
+    inserts keep a deterministic order.
+    """
+
+    __tablename__ = "conversation_messages"
+    __table_args__ = (
+        CheckConstraint("ordinal >= 1", name="ck_conversation_messages_ordinal"),
+        CheckConstraint(f"length(body) BETWEEN 1 AND {MAX_MESSAGE_BODY}", name="ck_conversation_messages_body"),
+        CheckConstraint(f"length(client_key) BETWEEN 8 AND {MAX_CLIENT_KEY}", name="ck_conversation_messages_key"),
+        UniqueConstraint("conversation_id", "ordinal", name="uq_conversation_messages_ordinal"),
+        UniqueConstraint("conversation_id", "client_key", name="uq_conversation_messages_client_key"),
+        Index("ix_conversation_messages_sender", "sender_participant_id"),
+    )
+
+    message_id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    conversation_id: Mapped[str] = mapped_column(ForeignKey("conversations.conversation_id", ondelete="RESTRICT"))
+    sender_participant_id: Mapped[str] = mapped_column(
+        ForeignKey("conversation_participants.participant_id", ondelete="RESTRICT"))
+    ordinal: Mapped[int] = mapped_column(Integer)
+    body: Mapped[str] = mapped_column(Text)
+    client_key: Mapped[str] = mapped_column(String(MAX_CLIENT_KEY))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
+
+
 class Task(Base):
     __tablename__ = "tasks"
 

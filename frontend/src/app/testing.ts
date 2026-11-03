@@ -1,7 +1,7 @@
 // Test fixtures shared by the application tests. Not imported by production code.
 import { vi } from 'vitest';
 import type { CoreApi } from '../core/api';
-import type { Project, Task } from '../core/models';
+import type { ConversationMessage, ConversationPage, ConversationParticipant, ConversationMessageInput, Project, Task } from '../core/models';
 
 export const project = (id: string, over: Partial<Project> = {}): Project => ({
   id, name: `Project ${id}`, description: `About ${id}`, root_path: `/tmp/${id}`, mode: 'existing', docs_entrypoint: null,
@@ -11,6 +11,26 @@ export const project = (id: string, over: Partial<Project> = {}): Project => ({
 export const task = (id: string, projectId: string, over: Partial<Task> = {}): Task => ({
   id, project_id: projectId, title: `Task ${id}`, description: `Do ${id}`, acceptance_criteria: `Done ${id}`, status: 'Draft',
   workspace_state: 'ready', workspace_problem: null, worker: 'not_assigned', created_at: '2026-10-31T00:00:00Z', ...over,
+});
+
+export const ownerParticipant = (over: Partial<ConversationParticipant> = {}): ConversationParticipant => ({
+  participant_id: 'participant-owner', kind: 'owner', display_name: 'Owner', actor_id: 'local-owner',
+  assurance: 'local_unverified', agent_id: null, ...over,
+});
+
+let messageSequence = 0;
+
+export const conversationMessage = (body: string, over: Partial<ConversationMessage> = {}): ConversationMessage => {
+  const ordinal = over.ordinal ?? ++messageSequence;
+  return {
+    message_id: `message-${ordinal}`, conversation_id: 'conversation-1', ordinal, body,
+    created_at: '2026-11-03T10:00:00Z', sender: ownerParticipant(), ...over,
+  };
+};
+
+export const conversationPage = (over: Partial<ConversationPage> = {}): ConversationPage => ({
+  project_id: 'P0001', conversation: null, messages: [],
+  page: { limit: 50, has_more: false, next_before: null }, ...over,
 });
 
 export function stubApi(over: Partial<{ [K in keyof CoreApi]: ReturnType<typeof vi.fn> }> = {}) {
@@ -23,6 +43,10 @@ export function stubApi(over: Partial<{ [K in keyof CoreApi]: ReturnType<typeof 
     createTask: vi.fn(async () => task('T0001', 'P0001')),
     reconcileTask: vi.fn(async () => task('T0001', 'P0001')),
     repairTask: vi.fn(async () => ({ ...task('T0001', 'P0001'), repair: null })),
+    getConversation: vi.fn(async () => conversationPage()),
+    sendConversationMessage: vi.fn(async (_projectId: string, input: ConversationMessageInput) => ({
+      message: conversationMessage(input.body), replayed: false,
+    })),
     ...over,
   };
   return api as typeof api & CoreApi;
