@@ -12,7 +12,7 @@ export function App({ api = coreApi }: { api?: CoreApi }) {
   const nav = useNavigation();
   const core = useWorkspaceController(nav, api);
   const scroll = useScrollRegions();
-  const { Shell, Dashboard, Project, Task, NewTask, RegisterProject } = presentation;
+  const { Shell, Dashboard, Project, Task, NewTask, RegisterProject, Settings } = presentation;
   const { route, go, close } = nav;
   const { actions, project, layer } = core;
 
@@ -22,7 +22,7 @@ export function App({ api = coreApi }: { api?: CoreApi }) {
     return () => { document.body.style.overflow = ''; };
   }, [layer]);
 
-  const projectId = route.kind === 'dashboard' ? null : route.projectId;
+  const projectId = route.kind === 'dashboard' || route.kind === 'settings' ? null : route.projectId;
   const taskLayerOpen = (route.kind === 'task' || route.kind === 'new-task') && project !== null;
   const modalOpen = core.registrationOpen;
   const workspace = (kind: 'project' | 'task') => ({
@@ -31,7 +31,7 @@ export function App({ api = coreApi }: { api?: CoreApi }) {
     onRepair: (c: { readonly confirmed: true }) => void (kind === 'project' ? actions.repairProject(c) : actions.repairTask(c)),
   });
 
-  return <Shell>
+  return <Shell onOpenSettings={actions.openSettings} settingsOpen={route.kind === 'settings'}>
     <Dashboard
       projects={core.projects}
       projectsStatus={core.projectsStatus}
@@ -52,6 +52,9 @@ export function App({ api = coreApi }: { api?: CoreApi }) {
       scroll={scroll}
       workspace={workspace('project')}
       conversation={core.conversation}
+      assignments={core.assignments}
+      tab={core.projectTab}
+      onSelectTab={tab => go({ kind: 'project', projectId, tab: tab === 'settings' ? 'settings' : undefined })}
       onClose={close}
       onRetry={() => void actions.retry()}
       onOpenTask={taskId => go({ kind: 'task', projectId, taskId })}
@@ -76,6 +79,14 @@ export function App({ api = coreApi }: { api?: CoreApi }) {
       workspace={workspace('task')}
       onClose={close}
       onRetry={() => void actions.retry()}
+    />}
+    {route.kind === 'settings' && <Settings
+      state={core.registryControls.state}
+      projects={core.projects}
+      onRetry={core.registryControls.onRetry}
+      onSaveAgent={core.registryControls.onSaveAgent}
+      onOpenProjectSettings={id => go({ kind: 'project', projectId: id, tab: 'settings' })}
+      onClose={close}
     />}
     {modalOpen && <RegisterProject
       feedback={core.feedbackFor('modal')}

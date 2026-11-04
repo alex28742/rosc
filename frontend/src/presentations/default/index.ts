@@ -5,6 +5,7 @@ import { DashboardView } from './views/DashboardView';
 import { NewTaskView } from './views/NewTaskView';
 import { ProjectView } from './views/ProjectView';
 import { RegisterProjectView } from './views/RegisterProjectView';
+import { SettingsView } from './views/SettingsView';
 import { TaskView } from './views/TaskView';
 
 const presentation: Presentation = {
@@ -15,6 +16,7 @@ const presentation: Presentation = {
   Task: TaskView,
   NewTask: NewTaskView,
   RegisterProject: RegisterProjectView,
+  Settings: SettingsView,
 };
 
 export default presentation;

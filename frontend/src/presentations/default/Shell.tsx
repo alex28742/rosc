@@ -1,7 +1,7 @@
 import type { ShellProps } from '../../app/presentation/contracts';
 
-/** Application frame: brand, the current area and the truthful Engine state chip. */
-export function Shell({ children }: ShellProps) {
+/** Application frame: brand, the approved Settings entry and the truthful Engine state chip. */
+export function Shell({ children, onOpenSettings, settingsOpen }: ShellProps) {
   return <div className="rosc-app">
     <header className="rosc-topbar">
       <div className="rosc-brand">
@@ -11,6 +11,8 @@ export function Shell({ children }: ShellProps) {
       </div>
       <div className="rosc-topbar__actions">
         <span className="rosc-chip" title="Текущее состояние Engine Slice 01"><span className="rosc-chip__dot" aria-hidden="true" />Engine Slice 01 · агенты не запущены</span>
+        <button type="button" className="rosc-btn rosc-btn--small" onClick={onOpenSettings}
+          aria-current={settingsOpen ? 'page' : undefined}>Настройки</button>
       </div>
     </header>
     {children}

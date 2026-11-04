@@ -989,3 +989,347 @@
 .rosc-chat-delivery--unknown {
   font-weight: 700;
 }
+
+/* P016 / Settings: wide right drawer with the Agent Registry and Project assignment panel.
+   The approved v0.6.1 geometry is translated to the package tokens; no new stylesheet is added. */
+.rosc-drawer--settings {
+  left: max(58px, calc(100vw - min(820px, 86vw)));
+}
+
+.rosc-settings {
+  display: grid;
+  grid-template-columns: 218px minmax(0, 1fr);
+  flex: 1;
+  min-width: 0;
+  min-height: 0;
+}
+
+.rosc-settings__nav {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 20px 14px;
+  overflow-y: auto;
+  border-right: 1px solid var(--rosc-line);
+  background: var(--rosc-panel);
+}
+
+.rosc-settings__tab {
+  padding: 9px 11px;
+  border: 1px solid transparent;
+  border-radius: var(--rosc-radius-sm);
+  background: transparent;
+  color: var(--rosc-secondary);
+  font-size: 12px;
+  font-weight: 670;
+  text-align: left;
+}
+
+.rosc-settings__tab:hover:not(:disabled) {
+  background: var(--rosc-soft);
+}
+
+.rosc-settings__tab--active {
+  border-color: var(--rosc-blue-line);
+  background: var(--rosc-soft-blue);
+  color: var(--rosc-blue-strong);
+  font-weight: 760;
+}
+
+.rosc-settings__nav-hint {
+  margin-top: 8px;
+  padding: 0 4px;
+  line-height: 1.5;
+}
+
+.rosc-settings__content {
+  min-width: 0;
+  padding: clamp(18px, 2vw, 30px);
+  overflow-y: auto;
+  overscroll-behavior: contain;
+}
+
+.rosc-settings__heading {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+  margin: 0 0 12px;
+}
+
+.rosc-settings__heading h3,
+.rosc-settings__panel-head h3,
+.rosc-settings__editor-head h3 {
+  font-size: 17px;
+  font-weight: 780;
+  letter-spacing: -0.2px;
+}
+
+.rosc-settings__heading p {
+  margin-top: 3px;
+}
+
+.rosc-settings__hint {
+  margin: 12px 0;
+  padding: 11px 13px;
+  border: 1px solid var(--rosc-line);
+  border-radius: var(--rosc-radius-sm);
+  background: var(--rosc-soft);
+  color: var(--rosc-secondary);
+  font-size: 11px;
+  line-height: 1.55;
+}
+
+.rosc-settings__hint--warn {
+  border-color: #ecd9ba;
+  background: var(--rosc-soft-amber);
+  color: var(--rosc-amber);
+}
+
+.rosc-settings__hint ul {
+  margin: 6px 0;
+  padding-left: 18px;
+}
+
+.rosc-settings__agents {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.rosc-settings__agent {
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+  width: 100%;
+  padding: 13px 14px;
+  border: 1px solid var(--rosc-line);
+  border-radius: var(--rosc-radius);
+  background: var(--rosc-panel);
+  text-align: left;
+}
+
+.rosc-settings__agent:hover {
+  border-color: var(--rosc-blue-line);
+  background: var(--rosc-soft-blue);
+}
+
+.rosc-settings__avatar {
+  display: grid;
+  place-items: center;
+  width: 34px;
+  height: 34px;
+  flex: none;
+  border-radius: 9px;
+  background: var(--rosc-soft-blue);
+  color: var(--rosc-blue);
+  font-size: 16px;
+}
+
+.rosc-settings__agent-main {
+  display: flex;
+  min-width: 0;
+  flex: 1;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.rosc-settings__agent-main strong {
+  font-size: 13px;
+  color: var(--rosc-ink-strong);
+}
+
+.rosc-settings__agent-main p,
+.rosc-settings__agent-main small {
+  color: var(--rosc-secondary);
+  font-size: 11px;
+  overflow-wrap: anywhere;
+}
+
+.rosc-settings__agent-main small + small {
+  color: var(--rosc-muted);
+}
+
+.rosc-settings__editor,
+.rosc-settings__panel {
+  margin-top: 14px;
+  padding: 18px;
+}
+
+.rosc-settings__editor-head,
+.rosc-settings__panel-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 10px;
+  flex-wrap: wrap;
+  margin: 0 0 12px;
+}
+
+.rosc-settings__grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+  margin: 0 0 12px;
+}
+
+.rosc-settings__full {
+  grid-column: 1 / -1;
+}
+
+.rosc-settings__caps-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin: 14px 0 7px;
+}
+
+.rosc-settings__caps {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 6px;
+}
+
+.rosc-settings__cap {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  padding: 8px 10px;
+  border: 1px solid var(--rosc-line);
+  border-radius: var(--rosc-radius-sm);
+  background: var(--rosc-soft);
+  font-size: 11px;
+}
+
+.rosc-settings__cap span {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+}
+
+.rosc-settings__cap code {
+  color: var(--rosc-muted);
+  font-size: 10px;
+}
+
+.rosc-settings__roles {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin: 6px 0 12px;
+}
+
+.rosc-settings__role {
+  display: flex;
+  align-items: flex-start;
+  gap: 9px;
+  padding: 9px 11px;
+  border: 1px solid var(--rosc-line);
+  border-radius: var(--rosc-radius-sm);
+  background: var(--rosc-panel);
+  font-size: 11px;
+}
+
+.rosc-settings__role span {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.rosc-settings__role small {
+  color: var(--rosc-secondary);
+}
+
+.rosc-settings__role--disabled {
+  opacity: 0.62;
+}
+
+.rosc-settings__label {
+  display: block;
+  margin-top: 12px;
+  font-size: 12px;
+  color: #536676;
+}
+
+.rosc-settings__confirm {
+  margin: 12px 0;
+  padding: 12px 14px;
+  border: 1px solid #ecd9ba;
+  border-radius: var(--rosc-radius);
+  background: var(--rosc-soft-amber);
+  color: #6f5226;
+  font-size: 11px;
+  line-height: 1.6;
+}
+
+.rosc-settings__editor-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin-top: 12px;
+}
+
+.rosc-settings__panel .rosc-alert,
+.rosc-settings__panel .rosc-notice {
+  margin-bottom: 10px;
+}
+
+@media (max-width: 850px) {
+  .rosc-settings {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .rosc-settings__nav {
+    flex-direction: row;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: 5px;
+    padding: 10px 12px;
+    overflow-x: auto;
+    overflow-y: hidden;
+    border-right: 0;
+    border-bottom: 1px solid var(--rosc-line);
+  }
+
+  .rosc-settings__tab {
+    white-space: nowrap;
+  }
+
+  .rosc-settings__nav-hint {
+    flex: 1 0 100%;
+    margin: 2px 0 0;
+  }
+
+  .rosc-settings__grid,
+  .rosc-settings__caps {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+
+@media (max-width: 640px) {
+  .rosc-drawer--settings {
+    left: 0;
+  }
+
+  .rosc-settings__content {
+    padding: 12px;
+  }
+
+  .rosc-settings__editor,
+  .rosc-settings__panel {
+    padding: 13px;
+  }
+
+  .rosc-settings__agent {
+    gap: 9px;
+    padding: 11px;
+  }
+
+  .rosc-settings__agent .rosc-tag {
+    display: none;
+  }
+}

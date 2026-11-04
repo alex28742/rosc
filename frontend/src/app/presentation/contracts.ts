@@ -1,13 +1,111 @@
 // The only surface a presentation package sees. Presentations render these typed view models and call these
 // callbacks; they never reach the API client, the router or Core persistence.
 import type { ComponentType, ReactNode } from 'react';
-import type { ArchitectStatus, ConversationMessage, Project, ProjectFormValues, RepairConfirmation, Task, TaskFormValues } from '../../core/models';
+import type { AgentDefinition, AgentFormValues, ArchitectStatus, ConversationMessage, Project, ProjectFormValues, RepairConfirmation, RoleAssignment, Task, TaskFormValues } from '../../core/models';
 import type { ScrollRegions } from '../scroll';
 
 export type LoadStatus = 'loading' | 'ready' | 'failed';
 
 /** Messages for this layer only; empty strings when the message belongs to a different layer. */
 export type Feedback = { error: string; notice: string };
+
+/** The closed, provider-neutral capability vocabulary of the Core (declarations only). */
+export const AGENT_CAPABILITIES: ReadonlyArray<{ id: string; label: string; optional: boolean }> = [
+  { id: 'project.context.read', label: 'Чтение контекста проекта', optional: false },
+  { id: 'task.context.read', label: 'Чтение контекста Task', optional: false },
+  { id: 'architect.document.read', label: 'Чтение документов Architect', optional: false },
+  { id: 'architect.document.write', label: 'Редактирование документов Architect', optional: false },
+  { id: 'task.artifact.publish', label: 'Публикация Task-артефактов (опционально)', optional: true },
+];
+
+/** Capabilities a role assignment must request; the same set Core enforces. */
+export const ROLE_REQUIRED_CAPABILITIES: Record<'architect' | 'worker', readonly string[]> = {
+  architect: ['project.context.read', 'architect.document.read', 'architect.document.write'],
+  worker: ['project.context.read', 'task.context.read'],
+};
+
+/** Safe glyph mapping for the prototype icon keys; an unknown Core label falls back to a neutral dot. */
+export const AGENT_ICON_GLYPHS: Readonly<Record<string, string>> = {
+  diamond: '◆', star: '✳', command: '⌘', robot: '🤖', gear: '⚙', brain: '🧠',
+};
+
+export const AGENT_RUNTIME_OPTIONS: ReadonlyArray<{ id: string; label: string }> = [
+  { id: 'opencode', label: 'OpenCode' },
+  { id: 'claude-code', label: 'Claude Code' },
+  { id: 'codex-cli', label: 'Codex CLI' },
+  { id: 'other', label: 'Другой / не интегрирован' },
+];
+
+export const agentIcon = (iconLabel: string | null): string =>
+  (iconLabel ? AGENT_ICON_GLYPHS[iconLabel] : undefined) ?? '·';
+
+export const runtimeLabel = (runtimeAdapter: string): string =>
+  AGENT_RUNTIME_OPTIONS.find(option => option.id === runtimeAdapter)?.label ?? runtimeAdapter;
+
+/** An Agent may take a role only when it declares every required capability (Core still decides). */
+export const roleEligible = (agent: AgentDefinition, role: 'architect' | 'worker'): boolean => {
+  const declared = new Set(agent.capabilities.map(item => item.capability));
+  return ROLE_REQUIRED_CAPABILITIES[role].every(capability => declared.has(capability));
+};
+
+export type CapabilityPreset = 'none' | 'architect' | 'worker' | 'both' | 'custom';
+
+export function capabilityPreset(capabilities: readonly string[]): CapabilityPreset {
+  const names = [...new Set(capabilities)].sort().join(',');
+  if (!names) return 'none';
+  const matches = (role: 'architect' | 'worker') => [...ROLE_REQUIRED_CAPABILITIES[role]].sort().join(',') === names;
+  if (matches('architect')) return 'architect';
+  if (matches('worker')) return 'worker';
+  const both = [...new Set([...ROLE_REQUIRED_CAPABILITIES.architect, ...ROLE_REQUIRED_CAPABILITIES.worker])].sort().join(',');
+  return names === both ? 'both' : 'custom';
+}
+
+export type ProjectTab = 'tasks' | 'settings';
+
+/** Explicit Owner intent for one Project save; the controller computes the minimal delta against fresh Core records. */
+export type AssignmentIntent = { architectAgentId: string | null; workerAgentIds: string[] };
+
+export type AgentRegistryState = {
+  status: LoadStatus;
+  agents: AgentDefinition[];
+  /** Load or mutation failure; a mutation failure never carries a success notice. */
+  error: string;
+  notice: string;
+  busy: boolean;
+};
+
+export type SettingsViewProps = {
+  state: AgentRegistryState;
+  /** Loaded Projects are the only ones a truthful assignment link may point at. */
+  projects: Project[];
+  onRetry: () => void;
+  /** Resolves to an error message or null; the view keeps the draft on failure. */
+  onSaveAgent: (agentId: string | null, values: AgentFormValues) => Promise<string | null>;
+  onOpenProjectSettings: (projectId: string) => void;
+  onClose: () => void;
+};
+
+export type ProjectAssignmentsState = {
+  status: LoadStatus;
+  agents: AgentDefinition[];
+  assignments: RoleAssignment[];
+  /** Read-only Core status used only as a change gate; null means it could not be established. */
+  architect: ArchitectStatus | null;
+  architectKnown: boolean;
+  error: string;
+  notice: string;
+  busy: boolean;
+  /** Changes whose outcome is unconfirmed after a partial failure; never reported as saved. */
+  unresolved: string[];
+};
+
+export type ProjectAssignmentsControls = {
+  state: ProjectAssignmentsState;
+  onRetry: () => void;
+  onSave: (intent: AssignmentIntent, confirmArchitectChange: boolean) => Promise<string | null>;
+  onOpenRegistry: () => void;
+};
+
 
 /** Workspace manifest actions shared by Project and Task. `onRepair` is only reachable with an explicit confirmation. */
 export type WorkspaceControls = {
@@ -16,7 +114,12 @@ export type WorkspaceControls = {
   onRepair: (confirmation: RepairConfirmation) => void;
 };
 
-export type ShellProps = { children: ReactNode };
+export type ShellProps = {
+  children: ReactNode;
+  /** Opens the approved global Settings / Agent Registry surface. */
+  onOpenSettings: () => void;
+  settingsOpen: boolean;
+};
 
 export type DashboardViewProps = {
   projects: Project[];
@@ -83,6 +186,9 @@ export type ProjectViewProps = {
   scroll: ScrollRegions;
   workspace: WorkspaceControls;
   conversation: ConversationControls;
+  assignments: ProjectAssignmentsControls;
+  tab: ProjectTab;
+  onSelectTab: (tab: ProjectTab) => void;
   onClose: () => void;
   onRetry: () => void;
   onOpenTask: (taskId: string) => void;
@@ -126,4 +232,5 @@ export type Presentation = {
   Task: ComponentType<TaskViewProps>;
   NewTask: ComponentType<NewTaskViewProps>;
   RegisterProject: ComponentType<RegisterProjectViewProps>;
+  Settings: ComponentType<SettingsViewProps>;
 };

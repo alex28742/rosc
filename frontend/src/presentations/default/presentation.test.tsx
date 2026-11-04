@@ -1,11 +1,12 @@
 import { cleanup, fireEvent, render, screen, within } from '@testing-library/react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { architectStatus, project, task } from '../../app/testing';
+import { architectStatus, agentDefinition, project, roleAssignment, task } from '../../app/testing';
 import { DashboardView } from './views/DashboardView';
 import { ProjectView } from './views/ProjectView';
 import { TaskView } from './views/TaskView';
 import { NewTaskView } from './views/NewTaskView';
 import { RegisterProjectView } from './views/RegisterProjectView';
+import { SettingsView } from './views/SettingsView';
 import { Shell } from './Shell';
 
 // Presentation-layer checks: the package must render the real view model truthfully, expose a
@@ -21,6 +22,11 @@ const conversation = () => ({
   onActivate: vi.fn(async () => null), onDeactivate: vi.fn(async () => null),
   onReconcile: vi.fn(async () => null), onRetryDelivery: vi.fn(async () => null),
   onReload: vi.fn(), onLoadOlder: vi.fn(), onSend: vi.fn(async () => null),
+});
+const assignments = () => ({
+  state: { status: 'ready' as const, agents: [], assignments: [], architect: null, architectKnown: true,
+    error: '', notice: '', busy: false, unresolved: [] },
+  onRetry: vi.fn(), onSave: vi.fn(async () => null), onOpenRegistry: vi.fn(),
 });
 const P1 = project('P0001', { name: 'ROSC Platform', description: 'Ядро платформы', root_path: '/tmp/rosc', docs_entrypoint: 'README.md' });
 const P2 = project('P0002', { name: 'Telemetry Lab', workspace_state: 'needs_reconciliation', workspace_problem: 'drift' });
@@ -64,7 +70,8 @@ describe('Dashboard presentation', () => {
 describe('Work area presentation', () => {
   const projectProps = {
     projectId: 'P0001', project: P1, projectStatus: 'ready' as const, tasks: [T1], tasksStatus: 'ready' as const,
-    feedback, inert: false, scroll, workspace, conversation: conversation(), onClose: vi.fn(), onRetry: vi.fn(), onOpenTask: vi.fn(), onNewTask: vi.fn(),
+    feedback, inert: false, scroll, workspace, conversation: conversation(), assignments: assignments(),
+    tab: 'tasks' as const, onSelectTab: vi.fn(), onClose: vi.fn(), onRetry: vi.fn(), onOpenTask: vi.fn(), onNewTask: vi.fn(),
   };
 
   it('labels the Project layer and keeps one visible, named close control', () => {
@@ -110,7 +117,8 @@ describe('Work area presentation', () => {
 describe('Workspace presentation', () => {
   const baseProject = {
     projectId: 'P0001', projectStatus: 'ready' as const, tasks: [], tasksStatus: 'ready' as const,
-    feedback, inert: false, scroll, conversation: conversation(), onClose: vi.fn(), onRetry: vi.fn(), onOpenTask: vi.fn(), onNewTask: vi.fn(),
+    feedback, inert: false, scroll, conversation: conversation(), assignments: assignments(),
+    tab: 'tasks' as const, onSelectTab: vi.fn(), onClose: vi.fn(), onRetry: vi.fn(), onOpenTask: vi.fn(), onNewTask: vi.fn(),
   };
   const controls = () => ({ busy: false, onReconcile: vi.fn(), onRepair: vi.fn() });
 
@@ -183,10 +191,111 @@ describe('Register Project dialog', () => {
   });
 });
 
+describe('Settings presentation', () => {
+  const base = {
+    projects: [P1], onRetry: vi.fn(), onSaveAgent: vi.fn(async () => null),
+    onOpenProjectSettings: vi.fn(), onClose: vi.fn(),
+  };
+  const registry = (over: Partial<Parameters<typeof SettingsView>[0]['state']> = {}) => ({
+    status: 'ready' as const, agents: [], error: '', notice: '', busy: false, ...over,
+  });
+
+  it('renders only Core rows, labels readiness as unverified and offers Add for an empty Registry', () => {
+    const { rerender } = render(<SettingsView {...base} state={registry()} />);
+    expect(screen.getByText('Глобальный Agent Registry')).toBeTruthy();
+    expect(screen.getByText('Нет Agent Definitions.')).toBeTruthy();
+    expect(screen.getByRole('button', { name: '＋ Добавить' })).toBeTruthy();
+    expect(screen.queryByText(/Подключен/)).toBeNull();
+
+    rerender(<SettingsView {...base} state={registry({ agents: [agentDefinition('a1', { display_name: 'DeepSeek Coder' })] })} />);
+    expect(screen.getByText('DeepSeek Coder')).toBeTruthy();
+    expect(screen.getByText(/OpenCode · prov · model-a/)).toBeTruthy();
+    expect(screen.getByText('Не проверен')).toBeTruthy();
+    expect(screen.getByText('Всего Agent Definitions: 1')).toBeTruthy();
+  });
+
+  it('keeps the other Settings sections clearly deferred', () => {
+    render(<SettingsView {...base} state={registry()} />);
+    for (const label of ['Профиль Owner', 'Workspace и пауза', 'Авторизация', 'Статистика']) {
+      expect((screen.getByRole('button', { name: label }) as HTMLButtonElement).disabled).toBe(true);
+    }
+  });
+
+  it('submits the full capability list and the selected safe icon key', () => {
+    const onSaveAgent = vi.fn(async () => null);
+    render(<SettingsView {...base} state={registry()} onSaveAgent={onSaveAgent} />);
+    fireEvent.click(screen.getByRole('button', { name: '＋ Добавить' }));
+    fireEvent.change(screen.getByLabelText('Отображаемое имя'), { target: { value: 'Architect Agent' } });
+    fireEvent.change(screen.getByLabelText('Provider ID'), { target: { value: 'deepseek' } });
+    fireEvent.change(screen.getByLabelText('Model ID'), { target: { value: 'deepseek-v4.1-flash' } });
+    fireEvent.change(screen.getByLabelText('Набор declared capabilities'), { target: { value: 'architect' } });
+    fireEvent.submit(screen.getByRole('button', { name: 'Зарегистрировать' }).closest('form')!);
+    expect(onSaveAgent).toHaveBeenCalledWith(null, {
+      display_name: 'Architect Agent', icon_label: 'robot', runtime_adapter: 'opencode',
+      provider_id: 'deepseek', model_id: 'deepseek-v4.1-flash',
+      capabilities: ['project.context.read', 'architect.document.read', 'architect.document.write'],
+    });
+  });
+
+  it('shows a failed load with Retry and no invented rows', () => {
+    render(<SettingsView {...base} state={registry({ status: 'failed', error: 'backend down' })} />);
+    expect(screen.getByText('Не удалось загрузить Agent Registry.')).toBeTruthy();
+    fireEvent.click(screen.getByRole('button', { name: 'Повторить' }));
+    expect(base.onRetry).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe('Project assignment presentation', () => {
+  it('keeps the Project Conversation mounted while the left Settings tab is selected', () => {
+    const props = {
+      projectId: 'P0001', project: P1, projectStatus: 'ready' as const, tasks: [T1], tasksStatus: 'ready' as const,
+      feedback, inert: false, scroll, workspace, conversation: conversation(), assignments: assignments(),
+      tab: 'settings' as const, onSelectTab: vi.fn(), onClose: vi.fn(), onRetry: vi.fn(), onOpenTask: vi.fn(), onNewTask: vi.fn(),
+    };
+    render(<ProjectView {...props} />);
+    expect(screen.getByText('Project Conversation')).toBeTruthy();
+    expect(screen.getByText('Агенты проекта · назначения')).toBeTruthy();
+    expect(screen.queryByText('Задачи проекта')).toBeNull();
+  });
+
+  it('disables an ineligible unassigned Agent and keeps a blocked current assignment removable', () => {
+    const ineligible = agentDefinition('worker-ineligible', {
+      display_name: 'No Worker Caps', capabilities: [{ capability: 'project.context.read', status: 'declared' }],
+    });
+    const blocked = agentDefinition('worker-blocked', { display_name: 'Blocked Worker' });
+    const props = {
+      projectId: 'P0001', project: P1, projectStatus: 'ready' as const, tasks: [], tasksStatus: 'ready' as const,
+      feedback, inert: false, scroll, workspace, conversation: conversation(),
+      assignments: {
+        state: {
+          status: 'ready' as const, agents: [ineligible, blocked], assignments: [roleAssignment('a1', { agent_id: 'worker-blocked', readiness: 'blocked' })],
+          architect: architectStatus(), architectKnown: true, error: '', notice: '', busy: false, unresolved: [],
+        },
+        onRetry: vi.fn(), onSave: vi.fn(async () => null), onOpenRegistry: vi.fn(),
+      },
+      tab: 'settings' as const, onSelectTab: vi.fn(), onClose: vi.fn(), onRetry: vi.fn(), onOpenTask: vi.fn(), onNewTask: vi.fn(),
+    };
+    render(<ProjectView {...props} />);
+    const boxes = screen.getAllByRole('checkbox') as HTMLInputElement[];
+    expect(boxes.find(box => box.closest('label')?.textContent?.includes('No Worker Caps'))?.disabled).toBe(true);
+    const assigned = boxes.find(box => box.closest('label')?.textContent?.includes('Blocked Worker'))!;
+    expect(assigned.disabled).toBe(false);
+    expect(assigned.checked).toBe(true);
+  });
+});
+
 describe('Shell', () => {
   it('states the Engine slice truthfully and renders the view as its only content', () => {
-    render(<Shell><main data-testid="view" /></Shell>);
+    render(<Shell onOpenSettings={vi.fn()} settingsOpen={false}><main data-testid="view" /></Shell>);
     expect(screen.getByText(/Engine Slice 01 · агенты не запущены/)).toBeTruthy();
     expect(screen.getByTestId('view')).toBeTruthy();
+  });
+
+  it('offers the Settings entry without claiming a connected agent', () => {
+    const onOpenSettings = vi.fn();
+    render(<Shell onOpenSettings={onOpenSettings} settingsOpen={false}><main /></Shell>);
+    fireEvent.click(screen.getByRole('button', { name: 'Настройки' }));
+    expect(onOpenSettings).toHaveBeenCalledTimes(1);
+    expect(screen.queryByText(/Подключен/)).toBeNull();
   });
 });

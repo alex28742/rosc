@@ -1,11 +1,12 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { coreApi, describeError, type CoreApi } from '../core/api';
-import { toProjectInput, toTaskInput, type ArchitectStatus, type ConversationMessage, type Project, type ProjectFormValues, type RepairConfirmation, type RepairResult, type Task, type TaskFormValues } from '../core/models';
+import { ApiError, coreApi, describeError, type CoreApi } from '../core/api';
+import { toAgentInput, toAgentUpdateInput, toProjectInput, toTaskInput, type AgentDefinition, type AgentFormValues, type ArchitectStatus, type ConversationMessage, type Project, type ProjectFormValues, type RepairConfirmation, type RepairResult, type RoleAssignment, type Task, type TaskFormValues } from '../core/models';
 import type { Navigation } from './navigation';
-import type { Feedback, LoadStatus } from './presentation/contracts';
+import type { AgentRegistryState, AssignmentIntent, Feedback, LoadStatus, ProjectAssignmentsState, ProjectTab } from './presentation/contracts';
+import { ROLE_REQUIRED_CAPABILITIES } from './presentation/contracts';
 import { projectIdOf } from './route';
 
-export type Layer = 'dashboard' | 'project' | 'task' | 'modal';
+export type Layer = 'dashboard' | 'project' | 'task' | 'modal' | 'settings';
 
 type TaskCache = { projectId: string | null; items: Task[]; status: LoadStatus };
 const NO_TASKS: TaskCache = { projectId: null, items: [], status: 'loading' };
@@ -48,6 +49,31 @@ const repairNotice = (done: RepairResult<unknown>) => done.repair
   ? `Манифест восстановлен. Копия сохранена в карантин: ${done.repair.backup_id}`
   : 'Манифест уже в порядке.';
 
+type RegistryCache = { status: LoadStatus; agents: AgentDefinition[]; error: string; notice: string; busy: boolean };
+const NO_REGISTRY: RegistryCache = { status: 'loading', agents: [], error: '', notice: '', busy: false };
+
+type AssignmentsCache = {
+  projectId: string | null;
+  status: LoadStatus;
+  agents: AgentDefinition[];
+  assignments: RoleAssignment[];
+  architect: ArchitectStatus | null;
+  architectKnown: boolean;
+  error: string;
+  notice: string;
+  busy: boolean;
+  unresolved: string[];
+};
+
+const NO_ASSIGNMENTS: AssignmentsCache = {
+  projectId: null, status: 'loading', agents: [], assignments: [], architect: null, architectKnown: false,
+  error: '', notice: '', busy: false, unresolved: [],
+};
+const assignmentsForProject = (projectId: string): AssignmentsCache => ({ ...NO_ASSIGNMENTS, projectId });
+
+const assignmentLabel = (kind: 'revoke' | 'create', role: 'architect' | 'worker', agentId: string) =>
+  `${kind === 'revoke' ? 'отзыв' : 'назначение'} ${role === 'architect' ? 'Architect' : 'Worker'} ${agentId}`;
+
 /**
  * Owns Core data loading, mutations, messages and the registration modal. Rules enforced here, not in views:
  * - a Task list for Project A is never exposed while the route points at Project B;
@@ -69,6 +95,8 @@ export function useWorkspaceController({ route, routeKey, go }: Navigation, api:
   const [registrationOpen, setRegistrationOpen] = useState(false);
   const [busy, setBusy] = useState(false);
   const [chat, setChat] = useState<ChatCache>(NO_CHAT);
+  const [registry, setRegistry] = useState<RegistryCache>(NO_REGISTRY);
+  const [assignments, setAssignments] = useState<AssignmentsCache>(NO_ASSIGNMENTS);
 
   const routeRef = useRef(route);
   routeRef.current = route;
@@ -83,6 +111,14 @@ export function useWorkspaceController({ route, routeKey, go }: Navigation, api:
   const chatRef = useRef(chat);
   chatRef.current = chat;
   const architectRef = useRef<ArchitectCache>(NO_ARCHITECT);
+  const registrySeq = useRef(0);
+  const registryBusyRef = useRef(false);
+  const registryRef = useRef(registry);
+  registryRef.current = registry;
+  const assignmentsSeq = useRef(0);
+  const assignmentsBusyRef = useRef(false);
+  const assignmentsRef = useRef(assignments);
+  assignmentsRef.current = assignments;
 
   /** The list failure is owned by the Project list itself (not by whichever layer is visible) and stays until a load succeeds. */
   const loadProjects = useCallback(async () => {
@@ -97,6 +133,58 @@ export function useWorkspaceController({ route, routeKey, go }: Navigation, api:
       if (seq !== projectsSeq.current) return;
       setProjectsStatus('failed');
       setProjectsError(describeError(e));
+    }
+  }, [api]);
+
+  /** Registry read path. Core is the only source; nothing here implies a runtime check. */
+  const loadAgents = useCallback(async () => {
+    const seq = ++registrySeq.current;
+    setRegistry(prev => ({ ...prev, status: 'loading', error: '' }));
+    try {
+      const agents = await api.listAgents();
+      if (seq !== registrySeq.current) return;
+      setRegistry({ status: 'ready', agents, error: '', notice: '', busy: false });
+    } catch (e) {
+      if (seq !== registrySeq.current) return;
+      setRegistry(prev => ({ ...prev, status: 'failed', error: describeError(e) }));
+    }
+  }, [api]);
+
+  /** One version-guarded Agent mutation at a time; a failure never produces a success notice. */
+  const saveAgent = useCallback(async (agentId: string | null, values: AgentFormValues): Promise<string | null> => {
+    if (registryBusyRef.current) return 'Сохранение уже выполняется.';
+    registryBusyRef.current = true;
+    setRegistry(prev => ({ ...prev, busy: true, error: '', notice: '' }));
+    try {
+      if (agentId === null) {
+        await api.registerAgent(toAgentInput(values));
+      } else {
+        const known = registryRef.current.agents.find(agent => agent.agent_id === agentId);
+        if (!known) throw new Error('Agent отсутствует в загруженном списке. Обновите Registry и повторите.');
+        await api.updateAgent(agentId, toAgentUpdateInput(values, known.version));
+      }
+      const done = agentId === null
+        ? 'Agent Definition зарегистрирован. Runtime не проверялся.'
+        : 'Agent Definition сохранён. Runtime не проверялся.';
+      try {
+        const agents = await api.listAgents();
+        setRegistry({ status: 'ready', agents, error: '', notice: done, busy: false });
+      } catch (e) {
+        setRegistry(prev => ({ ...prev, busy: false, notice: done, error: `Список не обновился: ${describeError(e)}` }));
+      }
+      return null;
+    } catch (e) {
+      const message = describeError(e);
+      setRegistry(prev => ({ ...prev, busy: false, error: message }));
+      // A stale PATCH is never retried blindly: reload the authoritative list so the Owner can reconcile the draft.
+      if (e instanceof ApiError && e.isConflict) {
+        void api.listAgents()
+          .then(agents => setRegistry(prev => ({ ...prev, agents, status: 'ready' })))
+          .catch(() => undefined);
+      }
+      return message;
+    } finally {
+      registryBusyRef.current = false;
     }
   }, [api]);
 
@@ -208,6 +296,159 @@ export function useWorkspaceController({ route, routeKey, go }: Navigation, api:
     }
   }, [api, patchArchitect]);
 
+  const patchAssignments = useCallback((id: string, patch: Partial<AssignmentsCache>) => {
+    setAssignments(prev => (prev.projectId === id ? { ...prev, ...patch } : prev));
+  }, []);
+
+  /** Read-only Architect probe: gates an administrative change, never starts or stops a session. */
+  const loadArchitectProbe = useCallback(async (id: string, seq: number) => {
+    try {
+      const info = await api.getArchitect(id);
+      if (seq === assignmentsSeq.current) patchAssignments(id, { architect: info, architectKnown: true });
+    } catch {
+      if (seq === assignmentsSeq.current) patchAssignments(id, { architect: null, architectKnown: false });
+    }
+  }, [api, patchAssignments]);
+
+  const loadAssignments = useCallback(async (id: string) => {
+    const seq = ++assignmentsSeq.current;
+    patchAssignments(id, { status: 'loading', error: '', notice: '' });
+    try {
+      const [agents, list] = await Promise.all([api.listAgents(), api.listAssignments(id)]);
+      if (seq !== assignmentsSeq.current) return;
+      patchAssignments(id, { status: 'ready', agents, assignments: list, error: '' });
+    } catch (e) {
+      if (seq !== assignmentsSeq.current) return;
+      patchAssignments(id, { status: 'failed', error: describeError(e) });
+    }
+    void loadArchitectProbe(id, seq);
+  }, [api, loadArchitectProbe, patchAssignments]);
+
+  /**
+   * Applies a minimal assignment delta against fresh Core records, one mutation at a time. The prototype's
+   * «Сохранить назначения» is a UI intent, not an atomic endpoint: a partial failure is reported as such, is never
+   * rolled back automatically, and the authoritative state is re-read. No activate/deactivate call is made.
+   */
+  const saveAssignments = useCallback(async (intent: AssignmentIntent, confirmArchitectChange: boolean): Promise<string | null> => {
+    const id = projectIdOf(routeRef.current);
+    if (!id) return 'Проект не открыт.';
+    if (assignmentsRef.current.projectId !== id) return 'Настройки проекта ещё не загружены.';
+    if (assignmentsBusyRef.current) return 'Сохранение уже выполняется.';
+    assignmentsBusyRef.current = true;
+    patchAssignments(id, { busy: true, error: '', notice: '', unresolved: [] });
+
+    const confirmed: string[] = [];
+    const unresolved: string[] = [];
+    let failure: string | null = null;
+    try {
+      try {
+        const [fresh, probe] = await Promise.all([
+          api.listAssignments(id),
+          api.getArchitect(id).then(info => ({ ok: true as const, info })).catch(() => ({ ok: false as const })),
+        ]);
+        if (projectIdOf(routeRef.current) !== id) {
+          failure = 'Настройки проекта закрыты до завершения сохранения.';
+        } else {
+          patchAssignments(id, { architect: probe.ok ? probe.info : null, architectKnown: probe.ok });
+
+          const currentArchitect = fresh.find(item => item.role === 'architect' && item.state === 'active') ?? null;
+          const currentWorkers = fresh.filter(item => item.role === 'worker' && item.state === 'active' && item.scope === 'project');
+          const architectChanging = (currentArchitect?.agent_id ?? null) !== intent.architectAgentId;
+          const desiredWorkers = new Set(intent.workerAgentIds);
+          const workersToRevoke = currentWorkers.filter(item => !desiredWorkers.has(item.agent_id));
+          const currentWorkerIds = new Set(currentWorkers.map(item => item.agent_id));
+          const workersToCreate = [...desiredWorkers].filter(agentId => !currentWorkerIds.has(agentId));
+
+          if (architectChanging && !confirmArchitectChange) {
+            failure = 'Смена или отзыв текущего Architect требует явного подтверждения Owner.';
+          } else if (architectChanging) {
+            if (!probe.ok) {
+              failure = 'Не удалось проверить состояние Architect. Смена назначения заблокирована; проверьте состояние проекта.';
+            } else if (!(probe.info.state === 'not_configured' || probe.info.state === 'stopped') || probe.info.can_deactivate) {
+              failure = 'Architect не подтверждённо остановлен. Сначала явно деактивируйте его и дождитесь остановки.';
+            }
+          }
+
+          if (!failure) {
+            const steps: Array<{ label: string; run: () => Promise<unknown> }> = [];
+            if (architectChanging && currentArchitect) {
+              steps.push({
+                label: assignmentLabel('revoke', 'architect', currentArchitect.agent_id),
+                run: () => api.revokeAssignment(id, currentArchitect.assignment_id, currentArchitect.version),
+              });
+            }
+            if (architectChanging && intent.architectAgentId) {
+              const agentId = intent.architectAgentId;
+              steps.push({
+                label: assignmentLabel('create', 'architect', agentId),
+                run: () => api.createAssignment(id, { agent_id: agentId, role: 'architect', task_id: null,
+                  capabilities: [...ROLE_REQUIRED_CAPABILITIES.architect] }),
+              });
+            }
+            for (const item of workersToRevoke) {
+              steps.push({
+                label: assignmentLabel('revoke', 'worker', item.agent_id),
+                run: () => api.revokeAssignment(id, item.assignment_id, item.version),
+              });
+            }
+            for (const agentId of workersToCreate) {
+              steps.push({
+                label: assignmentLabel('create', 'worker', agentId),
+                run: () => api.createAssignment(id, { agent_id: agentId, role: 'worker', task_id: null,
+                  capabilities: [...ROLE_REQUIRED_CAPABILITIES.worker] }),
+              });
+            }
+
+            if (steps.length === 0) {
+              patchAssignments(id, { busy: false, notice: 'Назначения не изменились.' });
+              return null;
+            }
+
+            for (let index = 0; index < steps.length; index += 1) {
+              if (projectIdOf(routeRef.current) !== id) {
+                failure = 'Настройки проекта закрыты до завершения сохранения.';
+                unresolved.push(...steps.slice(index).map(step => step.label));
+                break;
+              }
+              try {
+                await steps[index]!.run();
+                confirmed.push(steps[index]!.label);
+              } catch (e) {
+                failure = describeError(e);
+                unresolved.push(...steps.slice(index).map(step => step.label));
+                break;
+              }
+            }
+          }
+        }
+      } catch (e) {
+        failure = describeError(e);
+      }
+
+      // Authoritative reload after any attempt: partial results are never presented as a full save.
+      try {
+        const [agents, list] = await Promise.all([api.listAgents(), api.listAssignments(id)]);
+        patchAssignments(id, { agents, assignments: list });
+        void loadArchitectProbe(id, assignmentsSeq.current);
+      } catch (e) {
+        failure = `${failure ? `${failure} ` : ''}Не удалось перечитать назначения: ${describeError(e)}`;
+      }
+
+      if (failure) {
+        const parts = [`Не все изменения подтверждены: ${failure}`];
+        if (confirmed.length) parts.push(`Подтверждено: ${confirmed.join('; ')}.`);
+        if (unresolved.length) parts.push(`Не подтверждено: ${unresolved.join('; ')}. Требуется решение Owner.`);
+        const message = parts.join(' ');
+        patchAssignments(id, { busy: false, error: message, notice: '', unresolved });
+        return message;
+      }
+      patchAssignments(id, { busy: false, error: '', notice: 'Назначения сохранены.', unresolved: [] });
+      return null;
+    } finally {
+      assignmentsBusyRef.current = false;
+    }
+  }, [api, loadArchitectProbe, patchAssignments]);
+
   const changeDelivery = useCallback(async (messageId: string, action: 'reconcile' | 'retry'): Promise<string | null> => {
     const id = projectIdOf(routeRef.current);
     if (!id) return 'Проект не открыт.';
@@ -259,6 +500,22 @@ export function useWorkspaceController({ route, routeKey, go }: Navigation, api:
     if (projectId) { architectSeq.current++; setArchitect(architectForProject(projectId)); void loadArchitect(projectId); }
     else { architectSeq.current++; setArchitect(NO_ARCHITECT); }
   }, [projectId, loadArchitect]);
+  const settingsRoute = route.kind === 'settings';
+  useEffect(() => {
+    if (settingsRoute) void loadAgents();
+    else registrySeq.current++;
+  }, [settingsRoute, loadAgents]);
+  const projectTab: ProjectTab = route.kind === 'project' ? (route.tab ?? 'tasks') : 'tasks';
+  useEffect(() => {
+    if (projectId && projectTab === 'settings') {
+      assignmentsSeq.current++;
+      setAssignments(assignmentsForProject(projectId));
+      void loadAssignments(projectId);
+    } else if (!projectId) {
+      assignmentsSeq.current++;
+      setAssignments(NO_ASSIGNMENTS);
+    }
+  }, [projectId, projectTab, loadAssignments]);
   const awaitingReply = chat.projectId === projectId && chat.messages.some(m => m.delivery?.state === 'pending');
   useEffect(() => {
     if (!projectId || !awaitingReply) return;
@@ -293,12 +550,14 @@ export function useWorkspaceController({ route, routeKey, go }: Navigation, api:
   };
 
   const layer: Layer = registrationOpen ? 'modal'
-    : (route.kind === 'task' || route.kind === 'new-task') && project ? 'task'
-      : route.kind !== 'dashboard' ? 'project' : 'dashboard';
+    : route.kind === 'settings' ? 'settings'
+      : (route.kind === 'task' || route.kind === 'new-task') && project ? 'task'
+        : route.kind !== 'dashboard' ? 'project' : 'dashboard';
 
   const feedbackFor = (target: Layer): Feedback => {
     if (target === 'modal') return layer === 'modal' ? { error: modalError, notice: '' } : NO_FEEDBACK;
     if (target === 'dashboard') return layer === 'dashboard' ? { error: projectsError, notice: '' } : NO_FEEDBACK;
+    if (target === 'settings') return NO_FEEDBACK;
     if (layer !== target) return NO_FEEDBACK;
     // The Project drawer also reports a failed Project list, since it cannot render without it.
     return { error: error || (target === 'project' ? projectsError : ''), notice };
@@ -399,11 +658,34 @@ export function useWorkspaceController({ route, routeKey, go }: Navigation, api:
     await loadProjects();
   };
 
+  const registryState: AgentRegistryState = {
+    status: registry.status, agents: registry.agents, error: registry.error, notice: registry.notice, busy: registry.busy,
+  };
+  const assignmentCache = projectId && assignments.projectId === projectId ? assignments : assignmentsForProject(projectId ?? '');
+  const assignmentState: ProjectAssignmentsState = {
+    status: assignmentCache.status, agents: assignmentCache.agents, assignments: assignmentCache.assignments,
+    architect: assignmentCache.architect, architectKnown: assignmentCache.architectKnown,
+    error: assignmentCache.error, notice: assignmentCache.notice, busy: assignmentCache.busy,
+    unresolved: assignmentCache.unresolved,
+  };
+
   return {
     layer, projects, projectsStatus, project, tasks: taskList.items, tasksStatus: taskList.status, task, busy, registrationOpen,
-    feedbackFor, conversation,
+    feedbackFor, conversation, registry: registryState, projectTab,
+    registryControls: {
+      state: registryState,
+      onRetry: () => void loadAgents(),
+      onSaveAgent: saveAgent,
+    },
+    assignments: {
+      state: assignmentState,
+      onRetry: () => { if (projectId) void loadAssignments(projectId); },
+      onSave: saveAssignments,
+      onOpenRegistry: () => go({ kind: 'settings' }),
+    },
     actions: {
       retry, retryProjects,
+      openSettings: () => go({ kind: 'settings' }),
       // Each modal instance gets its own epoch and starts and ends with clean, modal-owned feedback only.
       openRegistration: () => { modalEpoch.current++; setModalError(''); setRegistrationOpen(true); },
       closeRegistration: () => { modalEpoch.current++; setModalError(''); setRegistrationOpen(false); },

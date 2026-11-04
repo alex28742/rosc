@@ -1,7 +1,7 @@
 // Test fixtures shared by the application tests. Not imported by production code.
 import { vi } from 'vitest';
 import type { CoreApi } from '../core/api';
-import type { ArchitectStatus, ConversationMessage, ConversationPage, ConversationParticipant, ConversationMessageInput, Project, Task } from '../core/models';
+import type { AgentDefinition, ArchitectStatus, ConversationMessage, ConversationPage, ConversationParticipant, ConversationMessageInput, Project, RoleAssignment, Task } from '../core/models';
 
 export const project = (id: string, over: Partial<Project> = {}): Project => ({
   id, name: `Project ${id}`, description: `About ${id}`, root_path: `/tmp/${id}`, mode: 'existing', docs_entrypoint: null,
@@ -39,6 +39,23 @@ export const architectStatus = (over: Partial<ArchitectStatus> = {}): ArchitectS
   session: null, ...over,
 });
 
+const declared = (capabilities: string[]) => capabilities.map(capability => ({ capability, status: 'declared' as const }));
+
+export const agentDefinition = (id = 'agent-1', over: Partial<AgentDefinition> = {}): AgentDefinition => ({
+  agent_id: id, display_name: `Agent ${id}`, icon_label: 'robot', runtime_adapter: 'opencode',
+  provider_id: 'prov', model_id: 'model-a',
+  capabilities: declared(['project.context.read', 'architect.document.read', 'architect.document.write']),
+  runtime_state: 'unverified', version: 1, created_at: '2026-11-01T00:00:00Z', updated_at: '2026-11-01T00:00:00Z', ...over,
+});
+
+export const roleAssignment = (id: string, over: Partial<RoleAssignment> = {}): RoleAssignment => ({
+  assignment_id: id, agent_id: 'agent-1', project_id: 'P0001', task_id: null, role: 'worker', scope: 'project',
+  state: 'active', readiness: 'unverified', capabilities: ['project.context.read', 'task.context.read'],
+  runtime_effect: 'none', version: 1, created_at: '2026-11-01T00:00:00Z', updated_at: '2026-11-01T00:00:00Z',
+  revoked_at: null, created_by: 'local-owner', created_by_assurance: 'local_unverified',
+  revoked_by: null, revoked_by_assurance: null, ...over,
+});
+
 export function stubApi(over: Partial<{ [K in keyof CoreApi]: ReturnType<typeof vi.fn> }> = {}) {
   const api = {
     listProjects: vi.fn(async () => [] as Project[]),
@@ -50,6 +67,13 @@ export function stubApi(over: Partial<{ [K in keyof CoreApi]: ReturnType<typeof 
     reconcileTask: vi.fn(async () => task('T0001', 'P0001')),
     repairTask: vi.fn(async () => ({ ...task('T0001', 'P0001'), repair: null })),
     getConversation: vi.fn(async () => conversationPage()),
+    listAgents: vi.fn(async () => [] as AgentDefinition[]),
+    getAgent: vi.fn(async () => agentDefinition()),
+    registerAgent: vi.fn(async () => agentDefinition('agent-2')),
+    updateAgent: vi.fn(async () => agentDefinition()),
+    listAssignments: vi.fn(async () => [] as RoleAssignment[]),
+    createAssignment: vi.fn(async () => roleAssignment('assignment-1')),
+    revokeAssignment: vi.fn(async () => roleAssignment('assignment-1', { state: 'revoked', version: 2 })),
     getArchitect: vi.fn(async () => architectStatus()),
     activateArchitect: vi.fn(async () => architectStatus({ state: 'ready', can_activate: false, can_deactivate: true })),
     deactivateArchitect: vi.fn(async () => architectStatus()),

@@ -46,6 +46,11 @@ export function post<T>(path: string, body?: unknown): Promise<T> {
   return request<T>(path, { method: 'POST', ...(body === undefined ? {} : { body: JSON.stringify(body) }) });
 }
 
+/** `PATCH` is only used for the version-guarded full Agent metadata replacement. */
+export function patch<T>(path: string, body: unknown): Promise<T> {
+  return request<T>(path, { method: 'PATCH', body: JSON.stringify(body) });
+}
+
 export function describeError(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }

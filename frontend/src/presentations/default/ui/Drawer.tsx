@@ -2,7 +2,7 @@ import type { ReactNode } from 'react';
 import { CloseIcon } from './icons';
 
 type Props = {
-  variant: 'project' | 'task';
+  variant: 'project' | 'task' | 'settings';
   label: string;
   closeLabel: string;
   inert: boolean;
@@ -30,7 +30,7 @@ export function Drawer({ variant, label, closeLabel, inert, onClose, head, child
   return <div className={variant === 'task' ? 'rosc-backdrop--nested' : 'rosc-backdrop'} onClick={onClose} inert={inert}>
     <section className={`rosc-drawer rosc-drawer--${variant} ${variant}-drawer`} onClick={e => e.stopPropagation()} aria-label={label}>
       <button className="rosc-edge-close" onClick={onClose} aria-label={closeLabel}><CloseIcon /></button>
-      <span className="rosc-edge-caption" aria-hidden="true">{variant === 'task' ? 'TASK' : 'PROJECT'}</span>
+      <span className="rosc-edge-caption" aria-hidden="true">{variant === 'task' ? 'TASK' : variant === 'settings' ? 'SETTINGS' : 'PROJECT'}</span>
       <header className="rosc-drawer__head">{head}</header>
       {body}
     </section>

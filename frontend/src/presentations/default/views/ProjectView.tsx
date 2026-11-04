@@ -4,6 +4,7 @@ import { Drawer } from '../ui/Drawer';
 import { Feedback } from '../ui/Feedback';
 import { WorkspaceActions } from '../ui/WorkspaceActions';
 import { ConversationPanel } from '../ui/ConversationPanel';
+import { ProjectSettingsPanel } from '../ui/ProjectSettingsPanel';
 import { ChevronRightIcon, DocumentIcon } from '../ui/icons';
 
 function architectState({ architect }: ProjectViewProps['conversation']): string {
@@ -23,11 +24,13 @@ type WorkAreaProps = Omit<ProjectViewProps, 'project' | 'projectStatus' | 'onClo
 };
 
 /**
- * Approved v0.6 Project Work Area composition: left overview + tabs + Tasks, right persistent Project Conversation.
- * Both columns scroll independently; the conversation is not a left-side tab. UI-local chat state (draft, collapse,
- * search) lives here and is keyed by Project, so switching Projects cannot leak it and a nested Task keeps it intact.
+ * Approved v0.6 Project Work Area composition: left overview + tabs + Tasks/Settings, right persistent Project
+ * Conversation. Both columns scroll independently; the conversation is not a left-side tab. UI-local chat state
+ * (draft, collapse, search) lives here and is keyed by Project, so switching Projects cannot leak it and a nested
+ * Task keeps it intact.
  */
-function ProjectWorkArea({ project, tasks, tasksStatus, feedback, scroll, workspace, conversation, onRetry, onOpenTask, onNewTask }: WorkAreaProps) {
+function ProjectWorkArea({ project, tasks, tasksStatus, feedback, scroll, workspace, conversation, assignments, tab,
+  onSelectTab, onRetry, onOpenTask, onNewTask }: WorkAreaProps) {
   const [collapsed, setCollapsed] = useState(false);
   const architect = architectState(conversation);
   return <div className={collapsed ? 'rosc-project-workspace rosc-project-workspace--collapsed' : 'rosc-project-workspace'}>
@@ -53,31 +56,38 @@ function ProjectWorkArea({ project, tasks, tasksStatus, feedback, scroll, worksp
         </section>
       </div>
       <div className="rosc-tabs" role="tablist" aria-label="Разделы проекта">
-        <button className="rosc-tab rosc-tab--active" role="tab" aria-selected="true">Tasks ({tasks.length})</button>
+        <button className={tab === 'tasks' ? 'rosc-tab rosc-tab--active' : 'rosc-tab'} role="tab"
+          aria-selected={tab === 'tasks'} onClick={() => onSelectTab('tasks')}>Tasks ({tasks.length})</button>
         <button className="rosc-tab" role="tab" aria-selected="false" disabled>Activity</button>
-        <button className="rosc-tab" role="tab" aria-selected="false" disabled>Настройки проекта</button>
+        <button className={tab === 'settings' ? 'rosc-tab rosc-tab--active' : 'rosc-tab'} role="tab"
+          aria-selected={tab === 'settings'} onClick={() => onSelectTab('settings')}>Настройки проекта</button>
       </div>
-      <div className="rosc-work-toolbar">
-        <div className="rosc-work-toolbar__title"><h3>Задачи проекта</h3><span className="rosc-counter">{tasks.length}</span></div>
-        <button className="rosc-btn rosc-btn--primary" onClick={onNewTask}>＋ Новая задача</button>
-      </div>
-      <div className="rosc-task-list">
-        {tasksStatus === 'failed' ? <div className="rosc-state rosc-state--failed"><p>Не удалось загрузить задачи. <button className="rosc-btn rosc-btn--small" onClick={onRetry}>Повторить</button></p></div>
-          : tasks.length === 0 ? <div className="rosc-state">{tasksStatus === 'loading' ? 'Загрузка…' : 'Задач пока нет.'}</div>
-            : tasks.map(t => <button className="rosc-task-item" key={t.id} onClick={() => onOpenTask(t.id)}>
-              <span className="rosc-task-item__glyph" aria-hidden="true"><DocumentIcon size="sm" /></span>
-              <span className="rosc-task-item__main"><span className="rosc-task-title">{t.id} · {t.title}</span></span>
-              <span className="rosc-tag">{t.status}</span>
-              <span className="rosc-task-item__chevron" aria-hidden="true"><ChevronRightIcon size="sm" /></span>
-            </button>)}
-      </div>
+      {tab === 'settings'
+        ? <ProjectSettingsPanel key={`${project.id}:settings`} projectId={project.id} controls={assignments} />
+        : <>
+          <div className="rosc-work-toolbar">
+            <div className="rosc-work-toolbar__title"><h3>Задачи проекта</h3><span className="rosc-counter">{tasks.length}</span></div>
+            <button className="rosc-btn rosc-btn--primary" onClick={onNewTask}>＋ Новая задача</button>
+          </div>
+          <div className="rosc-task-list">
+            {tasksStatus === 'failed' ? <div className="rosc-state rosc-state--failed"><p>Не удалось загрузить задачи. <button className="rosc-btn rosc-btn--small" onClick={onRetry}>Повторить</button></p></div>
+              : tasks.length === 0 ? <div className="rosc-state">{tasksStatus === 'loading' ? 'Загрузка…' : 'Задач пока нет.'}</div>
+                : tasks.map(t => <button className="rosc-task-item" key={t.id} onClick={() => onOpenTask(t.id)}>
+                  <span className="rosc-task-item__glyph" aria-hidden="true"><DocumentIcon size="sm" /></span>
+                  <span className="rosc-task-item__main"><span className="rosc-task-title">{t.id} · {t.title}</span></span>
+                  <span className="rosc-tag">{t.status}</span>
+                  <span className="rosc-task-item__chevron" aria-hidden="true"><ChevronRightIcon size="sm" /></span>
+                </button>)}
+          </div>
+        </>}
     </section>
     <ConversationPanel key={project.id} projectId={project.id}
       conversation={conversation} collapsed={collapsed} onCollapsedChange={setCollapsed} />
   </div>;
 }
 
-export function ProjectView({ projectId, project, projectStatus, tasks, tasksStatus, feedback, inert, scroll, workspace, conversation, onClose, onRetry, onOpenTask, onNewTask }: ProjectViewProps) {
+export function ProjectView({ projectId, project, projectStatus, tasks, tasksStatus, feedback, inert, scroll, workspace,
+  conversation, assignments, tab, onSelectTab, onClose, onRetry, onOpenTask, onNewTask }: ProjectViewProps) {
   const architect = architectState(conversation);
   const head = <>
     <div className="rosc-drawer__heading">
@@ -100,7 +110,7 @@ export function ProjectView({ projectId, project, projectStatus, tasks, tasksSta
         : projectStatus === 'failed' ? <div className="rosc-state rosc-state--failed"><p>Не удалось загрузить проект. <button className="rosc-btn rosc-btn--small" onClick={onRetry}>Повторить</button></p></div>
           : <div className="rosc-state"><p>Проект не найден. Закройте окно и выберите проект на дашборде.</p></div>}
     </div> : <ProjectWorkArea key={project.id} project={project} tasks={tasks} tasksStatus={tasksStatus}
-      feedback={feedback} scroll={scroll} workspace={workspace} conversation={conversation}
-      onRetry={onRetry} onOpenTask={onOpenTask} onNewTask={onNewTask} />}
+      feedback={feedback} scroll={scroll} workspace={workspace} conversation={conversation} assignments={assignments}
+      tab={tab} onSelectTab={onSelectTab} onRetry={onRetry} onOpenTask={onOpenTask} onNewTask={onNewTask} />}
   </Drawer>;
 }
