@@ -63,7 +63,24 @@ export function capabilityPreset(capabilities: readonly string[]): CapabilityPre
 export type ProjectTab = 'tasks' | 'settings';
 
 /** Explicit Owner intent for one Project save; the controller computes the minimal delta against fresh Core records. */
-export type AssignmentIntent = { architectAgentId: string | null; workerAgentIds: string[] };
+export type AssignmentIntent = {
+  architectAgentId: string | null;
+  workerAgentIds: string[];
+  /** `assignmentBaseline` of the authoritative set the Owner's selection was made against. */
+  baseline: string;
+};
+
+/**
+ * Order-independent fingerprint of the active Project-scoped assignments (Task-scoped records are never part of
+ * Project edit intent). A save is only allowed when fresh Core state still has the exact fingerprint the Owner saw.
+ */
+export function assignmentBaseline(list: RoleAssignment[]): string {
+  return list
+    .filter(item => item.state === 'active' && item.scope === 'project')
+    .map(item => [item.assignment_id, item.agent_id, item.role, item.scope, item.version, item.readiness].join(':'))
+    .sort()
+    .join('|');
+}
 
 export type AgentRegistryState = {
   status: LoadStatus;

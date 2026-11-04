@@ -334,3 +334,222 @@ describe('Project assignments', () => {
     expect((within(panel).getByRole('checkbox', { name: /Worker One/ }) as HTMLInputElement).checked).toBe(false);
   });
 });
+
+describe('P016.1 first Architect assignment and stale-snapshot safety', () => {
+  const openSettings = async (api: ReturnType<typeof stubApi>) => {
+    at('/projects/P0001');
+    render(<App api={api} />);
+    fireEvent.click(await screen.findByRole('tab', { name: 'Настройки проекта' }));
+    await screen.findByText('Агенты проекта · назначения');
+  };
+  const save = () => fireEvent.click(screen.getByRole('button', { name: 'Сохранить назначения' }));
+  const archAssignment = (id: string, agent: string, over: Partial<RoleAssignment> = {}) =>
+    roleAssignment(id, { agent_id: agent, role: 'architect', capabilities: [...architectCaps], ...over });
+  const noRuntimeCalls = (api: ReturnType<typeof stubApi>) => {
+    expect(api.activateArchitect).not.toHaveBeenCalled();
+    expect(api.deactivateArchitect).not.toHaveBeenCalled();
+  };
+
+  it('F1: saves the first Architect without a replacement confirmation, with exactly one create', async () => {
+    let current: RoleAssignment[] = [];
+    const api = stubApi({
+      listProjects: vi.fn(async () => [P1]),
+      listAgents: vi.fn(async () => [architectAgent('a1', 'Architect One')]),
+      listAssignments: vi.fn(async () => current),
+      createAssignment: vi.fn(async () => { const made = archAssignment('arch-1', 'a1'); current = [made]; return made; }),
+    });
+    await openSettings(api);
+    fireEvent.change(screen.getByLabelText('Project Architect'), { target: { value: 'a1' } });
+    save();
+    expect(screen.queryByText('Подтвердить замену Architect?')).toBeNull();
+    await waitFor(() => expect(api.createAssignment).toHaveBeenCalledTimes(1));
+    expect(api.createAssignment).toHaveBeenCalledWith('P0001', { agent_id: 'a1', role: 'architect', task_id: null, capabilities: [...architectCaps] });
+    expect((await screen.findByRole('status')).textContent).toBe('Назначения сохранены.');
+    expect(api.revokeAssignment).not.toHaveBeenCalled();
+    noRuntimeCalls(api);
+  });
+
+  it.each([
+    ['starting', { state: 'starting' as const, can_activate: false, can_deactivate: false }],
+    ['error', { state: 'error' as const, can_activate: false, can_deactivate: false }],
+    ['can_deactivate', { state: 'stopped' as const, can_deactivate: true }],
+  ])('F1: a first assignment stays blocked when the Architect probe is %s', async (_name, status) => {
+    const api = stubApi({
+      listProjects: vi.fn(async () => [P1]),
+      listAgents: vi.fn(async () => [architectAgent('a1')]),
+      listAssignments: vi.fn(async () => []),
+      getArchitect: vi.fn(async () => architectStatus(status)),
+    });
+    await openSettings(api);
+    fireEvent.change(screen.getByLabelText('Project Architect'), { target: { value: 'a1' } });
+    expect((screen.getByRole('button', { name: 'Сохранить назначения' }) as HTMLButtonElement).disabled).toBe(true);
+    expect(api.createAssignment).not.toHaveBeenCalled();
+  });
+
+  it('F1: a failed probe blocks a first assignment', async () => {
+    const api = stubApi({
+      listProjects: vi.fn(async () => [P1]),
+      listAgents: vi.fn(async () => [architectAgent('a1')]),
+      listAssignments: vi.fn(async () => []),
+      getArchitect: vi.fn(async () => { throw new ApiError('down', 'network', null); }),
+    });
+    await openSettings(api);
+    fireEvent.change(screen.getByLabelText('Project Architect'), { target: { value: 'a1' } });
+    expect((screen.getByRole('button', { name: 'Сохранить назначения' }) as HTMLButtonElement).disabled).toBe(true);
+    expect(api.createAssignment).not.toHaveBeenCalled();
+  });
+
+  it('F1: revoking the existing Architect needs confirmation; cancel makes zero writes, confirm revokes with version', async () => {
+    let current: RoleAssignment[] = [archAssignment('arch-1', 'a1', { version: 3 })];
+    const api = stubApi({
+      listProjects: vi.fn(async () => [P1]),
+      listAgents: vi.fn(async () => [architectAgent('a1')]),
+      listAssignments: vi.fn(async () => current),
+      revokeAssignment: vi.fn(async () => { current = []; return archAssignment('arch-1', 'a1', { state: 'revoked', version: 4 }); }),
+    });
+    await openSettings(api);
+    fireEvent.change(screen.getByLabelText('Project Architect'), { target: { value: '' } });
+    save();
+    expect(screen.getByText('Подтвердить отзыв Architect?')).toBeTruthy();
+    fireEvent.click(screen.getByRole('button', { name: 'Отмена' }));
+    expect(api.revokeAssignment).not.toHaveBeenCalled();
+    expect(api.createAssignment).not.toHaveBeenCalled();
+    save();
+    fireEvent.click(screen.getByRole('button', { name: 'Подтвердить' }));
+    await waitFor(() => expect(api.revokeAssignment).toHaveBeenCalledWith('P0001', 'arch-1', 3));
+    expect(api.createAssignment).not.toHaveBeenCalled();
+    noRuntimeCalls(api);
+  });
+
+  it('F2: a Worker added after the form loaded is not revoked by a stale unchanged-form save', async () => {
+    let current: RoleAssignment[] = [roleAssignment('as-1', { agent_id: 'w1' })];
+    const api = stubApi({
+      listProjects: vi.fn(async () => [P1]),
+      listAgents: vi.fn(async () => [workerAgent('w1', 'Worker One'), workerAgent('w2', 'Worker Two')]),
+      listAssignments: vi.fn(async () => current),
+    });
+    await openSettings(api);
+    current = [...current, roleAssignment('as-2', { agent_id: 'w2' })];
+    save();
+    await waitFor(() => expect(screen.getAllByRole('alert').some(node => node.textContent?.includes('изменились'))).toBe(true));
+    expect(api.createAssignment).not.toHaveBeenCalled();
+    expect(api.revokeAssignment).not.toHaveBeenCalled();
+    expect(screen.queryByText('Назначения сохранены.')).toBeNull();
+    expect((screen.getByRole('checkbox', { name: /Worker Two/ }) as HTMLInputElement).checked).toBe(true);
+    noRuntimeCalls(api);
+  });
+
+  it('F2: an intended change to Worker A plus a concurrently added Worker C produces no partial write; a fresh save sends only the delta', async () => {
+    let current: RoleAssignment[] = [roleAssignment('as-1', { agent_id: 'w1' })];
+    const api = stubApi({
+      listProjects: vi.fn(async () => [P1]),
+      listAgents: vi.fn(async () => [workerAgent('w1', 'Worker One'), workerAgent('w2', 'Worker Two'), workerAgent('w3', 'Worker Three')]),
+      listAssignments: vi.fn(async () => current),
+      revokeAssignment: vi.fn(async () => { current = current.filter(item => item.assignment_id !== 'as-1'); return roleAssignment('as-1', { state: 'revoked', version: 2 }); }),
+    });
+    await openSettings(api);
+    fireEvent.click(screen.getByRole('checkbox', { name: /Worker One/ }));
+    current = [...current, roleAssignment('as-3', { agent_id: 'w3' })];
+    save();
+    await waitFor(() => expect(screen.getAllByRole('alert').some(node => node.textContent?.includes('изменились'))).toBe(true));
+    expect(api.revokeAssignment).not.toHaveBeenCalled();
+    expect(api.createAssignment).not.toHaveBeenCalled();
+
+    // After review the Owner reselects against the refreshed state and saves deliberately.
+    fireEvent.click(screen.getByRole('checkbox', { name: /Worker One/ }));
+    save();
+    await waitFor(() => expect(api.revokeAssignment).toHaveBeenCalledTimes(1));
+    expect(api.revokeAssignment).toHaveBeenCalledWith('P0001', 'as-1', 1);
+    expect(api.createAssignment).not.toHaveBeenCalled();
+    expect((await screen.findByRole('status')).textContent).toBe('Назначения сохранены.');
+  });
+
+  it('F2: a changed Architect or an advanced version blocks a stale confirmed replacement with zero writes', async () => {
+    let current: RoleAssignment[] = [archAssignment('arch-1', 'a1')];
+    const api = stubApi({
+      listProjects: vi.fn(async () => [P1]),
+      listAgents: vi.fn(async () => [architectAgent('a1', 'Architect One'), architectAgent('a2', 'Architect Two'), architectAgent('a3', 'Architect Three')]),
+      listAssignments: vi.fn(async () => current),
+    });
+    await openSettings(api);
+    fireEvent.change(screen.getByLabelText('Project Architect'), { target: { value: 'a2' } });
+    save();
+    expect(screen.getByText('Подтвердить замену Architect?')).toBeTruthy();
+    current = [archAssignment('arch-9', 'a3')]; // someone else replaced the Architect meanwhile
+    fireEvent.click(screen.getByRole('button', { name: 'Подтвердить' }));
+    await waitFor(() => expect(screen.getAllByRole('alert').some(node => node.textContent?.includes('изменились'))).toBe(true));
+    expect(api.revokeAssignment).not.toHaveBeenCalled();
+    expect(api.createAssignment).not.toHaveBeenCalled();
+    // Refreshed state requires a fresh selection and a new confirmation.
+    expect((screen.getByLabelText('Project Architect') as HTMLSelectElement).value).toBe('a3');
+    expect(screen.queryByText('Подтвердить замену Architect?')).toBeNull();
+  });
+
+  it('F2: a version-only change on an existing assignment blocks the stale save', async () => {
+    let current: RoleAssignment[] = [roleAssignment('as-1', { agent_id: 'w1', version: 1 })];
+    const api = stubApi({
+      listProjects: vi.fn(async () => [P1]),
+      listAgents: vi.fn(async () => [workerAgent('w1', 'Worker One'), workerAgent('w2', 'Worker Two')]),
+      listAssignments: vi.fn(async () => current),
+    });
+    await openSettings(api);
+    fireEvent.click(screen.getByRole('checkbox', { name: /Worker Two/ }));
+    current = [roleAssignment('as-1', { agent_id: 'w1', version: 2 })];
+    save();
+    await waitFor(() => expect(screen.getAllByRole('alert').some(node => node.textContent?.includes('изменились'))).toBe(true));
+    expect(api.createAssignment).not.toHaveBeenCalled();
+    expect(api.revokeAssignment).not.toHaveBeenCalled();
+  });
+
+  it('F2: the baseline is order-independent and ignores Task-scoped assignments', async () => {
+    const w1 = roleAssignment('as-1', { agent_id: 'w1' });
+    const w2 = roleAssignment('as-2', { agent_id: 'w2' });
+    let current: RoleAssignment[] = [w1, w2];
+    const api = stubApi({
+      listProjects: vi.fn(async () => [P1]),
+      listAgents: vi.fn(async () => [workerAgent('w1', 'Worker One'), workerAgent('w2', 'Worker Two'), workerAgent('w3', 'Worker Three')]),
+      listAssignments: vi.fn(async () => current),
+    });
+    await openSettings(api);
+    current = [w2, w1, roleAssignment('t-1', { agent_id: 'w3', scope: 'task', task_id: 'T0001' })];
+    fireEvent.click(screen.getByRole('checkbox', { name: /Worker Three/ }));
+    save();
+    await waitFor(() => expect(api.createAssignment).toHaveBeenCalledTimes(1));
+    expect(api.createAssignment).toHaveBeenCalledWith('P0001', expect.objectContaining({ agent_id: 'w3', role: 'worker', task_id: null }));
+    expect(api.revokeAssignment).not.toHaveBeenCalled();
+  });
+
+  it('F2: fails closed with zero writes when fresh assignments cannot be read', async () => {
+    const listAssignments = vi.fn().mockResolvedValueOnce([]).mockRejectedValue(new ApiError('down', 'network', null));
+    const api = stubApi({
+      listProjects: vi.fn(async () => [P1]),
+      listAgents: vi.fn(async () => [workerAgent()]),
+      listAssignments,
+    });
+    await openSettings(api);
+    fireEvent.click(screen.getByRole('checkbox'));
+    save();
+    await waitFor(() => expect(screen.getAllByRole('alert').length).toBeGreaterThan(0));
+    expect(api.createAssignment).not.toHaveBeenCalled();
+    expect(api.revokeAssignment).not.toHaveBeenCalled();
+    expect(screen.queryByText('Назначения сохранены.')).toBeNull();
+  });
+
+  it('F2: leaving the Project during the preflight read stops before any mutation', async () => {
+    const fresh = deferred<RoleAssignment[]>();
+    const listAssignments = vi.fn().mockResolvedValueOnce([]).mockImplementationOnce(() => fresh.promise).mockResolvedValue([]);
+    const api = stubApi({
+      listProjects: vi.fn(async () => [P1, P2]),
+      listAgents: vi.fn(async () => [workerAgent()]),
+      listAssignments,
+    });
+    await openSettings(api);
+    fireEvent.click(screen.getByRole('checkbox'));
+    save();
+    fireEvent.click(screen.getByLabelText('Закрыть проект'));
+    await act(async () => { fresh.resolve([]); await fresh.promise; });
+    expect(api.createAssignment).not.toHaveBeenCalled();
+    expect(api.revokeAssignment).not.toHaveBeenCalled();
+    noRuntimeCalls(api);
+  });
+});

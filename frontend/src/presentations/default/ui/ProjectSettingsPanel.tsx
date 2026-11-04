@@ -1,6 +1,6 @@
 import { useState } from 'react';
 import type { ProjectAssignmentsControls, ProjectAssignmentsState } from '../../../app/presentation/contracts';
-import { agentIcon, roleEligible, runtimeLabel } from '../../../app/presentation/contracts';
+import { agentIcon, assignmentBaseline, roleEligible, runtimeLabel } from '../../../app/presentation/contracts';
 import { Feedback } from './Feedback';
 
 const activeArchitectOf = (state: ProjectAssignmentsState) =>
@@ -35,11 +35,7 @@ export function ProjectSettingsPanel({ projectId, controls }: { projectId: strin
   const { state } = controls;
   const currentArchitect = activeArchitectOf(state);
   const currentWorkers = activeWorkersOf(state);
-  const signature = [
-    currentArchitect?.assignment_id ?? '', currentArchitect?.version ?? '', currentArchitect?.agent_id ?? '',
-    currentArchitect?.readiness ?? '',
-    ...currentWorkers.map(item => `${item.assignment_id}:${item.version}:${item.agent_id}:${item.readiness}`),
-  ].join('|');
+  const signature = assignmentBaseline(state.assignments);
 
   // The draft is reset synchronously whenever Core returns a different authoritative assignment set. A render-phase
   // update (not an effect) means "Сохранить" can never serialize a stale empty draft right after a load.
@@ -74,7 +70,7 @@ export function ProjectSettingsPanel({ projectId, controls }: { projectId: strin
   };
 
   const save = async (confirmed: boolean) => {
-    await controls.onSave({ architectAgentId: architectId || null, workerAgentIds: workerIds }, confirmed);
+    await controls.onSave({ architectAgentId: architectId || null, workerAgentIds: workerIds, baseline: current.signature }, confirmed);
     setConfirming(false);
   };
 

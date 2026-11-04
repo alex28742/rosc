@@ -3,7 +3,7 @@ import { ApiError, coreApi, describeError, type CoreApi } from '../core/api';
 import { toAgentInput, toAgentUpdateInput, toProjectInput, toTaskInput, type AgentDefinition, type AgentFormValues, type ArchitectStatus, type ConversationMessage, type Project, type ProjectFormValues, type RepairConfirmation, type RepairResult, type RoleAssignment, type Task, type TaskFormValues } from '../core/models';
 import type { Navigation } from './navigation';
 import type { AgentRegistryState, AssignmentIntent, Feedback, LoadStatus, ProjectAssignmentsState, ProjectTab } from './presentation/contracts';
-import { ROLE_REQUIRED_CAPABILITIES } from './presentation/contracts';
+import { assignmentBaseline, ROLE_REQUIRED_CAPABILITIES } from './presentation/contracts';
 import { projectIdOf } from './route';
 
 export type Layer = 'dashboard' | 'project' | 'task' | 'modal' | 'settings';
@@ -340,6 +340,7 @@ export function useWorkspaceController({ route, routeKey, go }: Navigation, api:
     const confirmed: string[] = [];
     const unresolved: string[] = [];
     let failure: string | null = null;
+    let conflict: string | null = null;
     try {
       try {
         const [fresh, probe] = await Promise.all([
@@ -351,6 +352,10 @@ export function useWorkspaceController({ route, routeKey, go }: Navigation, api:
         } else {
           patchAssignments(id, { architect: probe.ok ? probe.info : null, architectKnown: probe.ok });
 
+          if (assignmentBaseline(fresh) !== intent.baseline) {
+            conflict = 'Назначения проекта изменились после открытия формы. Ничего не сохранено: проверьте актуальное состояние и повторите выбор.';
+          }
+
           const currentArchitect = fresh.find(item => item.role === 'architect' && item.state === 'active') ?? null;
           const currentWorkers = fresh.filter(item => item.role === 'worker' && item.state === 'active' && item.scope === 'project');
           const architectChanging = (currentArchitect?.agent_id ?? null) !== intent.architectAgentId;
@@ -359,9 +364,12 @@ export function useWorkspaceController({ route, routeKey, go }: Navigation, api:
           const currentWorkerIds = new Set(currentWorkers.map(item => item.agent_id));
           const workersToCreate = [...desiredWorkers].filter(agentId => !currentWorkerIds.has(agentId));
 
-          if (architectChanging && !confirmArchitectChange) {
+          if (conflict) {
+            failure = conflict;
+          } else if (architectChanging && currentArchitect !== null && !confirmArchitectChange) {
             failure = 'Смена или отзыв текущего Architect требует явного подтверждения Owner.';
           } else if (architectChanging) {
+            // First assignment (no current Architect) needs no replacement confirmation but keeps the safety gate.
             if (!probe.ok) {
               failure = 'Не удалось проверить состояние Architect. Смена назначения заблокирована; проверьте состояние проекта.';
             } else if (!(probe.info.state === 'not_configured' || probe.info.state === 'stopped') || probe.info.can_deactivate) {
@@ -435,7 +443,7 @@ export function useWorkspaceController({ route, routeKey, go }: Navigation, api:
       }
 
       if (failure) {
-        const parts = [`Не все изменения подтверждены: ${failure}`];
+        const parts = [conflict ? failure : `Не все изменения подтверждены: ${failure}`];
         if (confirmed.length) parts.push(`Подтверждено: ${confirmed.join('; ')}.`);
         if (unresolved.length) parts.push(`Не подтверждено: ${unresolved.join('; ')}. Требуется решение Owner.`);
         const message = parts.join(' ');
