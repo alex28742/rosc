@@ -6,6 +6,18 @@ import { WorkspaceActions } from '../ui/WorkspaceActions';
 import { ConversationPanel } from '../ui/ConversationPanel';
 import { ChevronRightIcon, DocumentIcon } from '../ui/icons';
 
+function architectState({ architect }: ProjectViewProps['conversation']): string {
+  if (architect.busy) return 'запускается';
+  if (architect.status !== 'ready' || architect.info === null) return 'проверяется';
+  switch (architect.info.state) {
+    case 'ready': return 'активен (проверен)';
+    case 'starting': return 'запускается';
+    case 'error': return 'требует внимания';
+    case 'not_configured': return 'не настроен';
+    default: return 'не активирован';
+  }
+}
+
 type WorkAreaProps = Omit<ProjectViewProps, 'project' | 'projectStatus' | 'onClose' | 'projectId' | 'inert'> & {
   project: NonNullable<ProjectViewProps['project']>;
 };
@@ -17,6 +29,7 @@ type WorkAreaProps = Omit<ProjectViewProps, 'project' | 'projectStatus' | 'onClo
  */
 function ProjectWorkArea({ project, tasks, tasksStatus, feedback, scroll, workspace, conversation, onRetry, onOpenTask, onNewTask }: WorkAreaProps) {
   const [collapsed, setCollapsed] = useState(false);
+  const architect = architectState(conversation);
   return <div className={collapsed ? 'rosc-project-workspace rosc-project-workspace--collapsed' : 'rosc-project-workspace'}>
     <section className="rosc-project-left" aria-label="Обзор проекта и задачи" ref={scroll.region(`project:${project.id}`)}>
       <Feedback {...feedback} />
@@ -25,7 +38,7 @@ function ProjectWorkArea({ project, tasks, tasksStatus, feedback, scroll, worksp
           <h3>Контекст проекта</h3>
           <p>{project.description}</p>
           <dl className="rosc-facts">
-            <dt>Architect</dt><dd>не активен</dd>
+            <dt>Architect</dt><dd>{architect}</dd>
             <dt>Workers</dt><dd>{project.active_workers}</dd>
             <dt>Workspace</dt><dd>{project.workspace_state === 'ready' ? 'готов' : 'нужна сверка'}</dd>
             <dt>Документация</dt><dd>{project.docs_entrypoint ?? 'не указана'}</dd>
@@ -65,6 +78,7 @@ function ProjectWorkArea({ project, tasks, tasksStatus, feedback, scroll, worksp
 }
 
 export function ProjectView({ projectId, project, projectStatus, tasks, tasksStatus, feedback, inert, scroll, workspace, conversation, onClose, onRetry, onOpenTask, onNewTask }: ProjectViewProps) {
+  const architect = architectState(conversation);
   const head = <>
     <div className="rosc-drawer__heading">
       <p className="rosc-drawer-eyebrow">PROJECT / WORK AREA</p>
@@ -72,7 +86,7 @@ export function ProjectView({ projectId, project, projectStatus, tasks, tasksSta
       <p>{project?.root_path ?? 'Проект не загружен'}</p>
     </div>
     <div className="rosc-drawer__controls">
-      <span className="rosc-chip">Агенты не запущены</span>
+      <span className="rosc-chip">Project Architect · {architect}</span>
       {project && <span className={project.workspace_state === 'ready' ? 'rosc-tag rosc-tag--success' : 'rosc-tag rosc-tag--warning'}>
         {project.workspace_state === 'ready' ? 'Workspace готов' : 'Нужна сверка'}
       </span>}

@@ -16,9 +16,10 @@ import test_slice01 as base
 from rosc.agent_registry import (CAPABILITY_ARCHITECT_DOCUMENT_READ, CAPABILITY_ARCHITECT_DOCUMENT_WRITE,
                                  CAPABILITY_PROJECT_CONTEXT_READ, AgentRegistryService)
 from rosc.app import create_app
+import rosc.architect_runtime as runtime_module
 from rosc.architect_runtime import (ENV_APPROVED_MODEL, ENV_BINARY, ENV_PASSWORD, OpenCodeRuntime, ReplyLookup,
                                     RuntimeAmbiguous, RuntimeHandle, RuntimeNotConfigured, RuntimeRefused,
-                                    RuntimeUnavailable, owned_process, process_ticks)
+                                    RuntimeStartUnresolved, RuntimeUnavailable, owned_process, process_ticks)
 from rosc.architect_service import ArchitectDenied, ArchitectService
 from rosc.authorization import ACTOR_AGENT, ASSURANCE_LOCAL_UNVERIFIED, ActorContext, LocalOwnerPolicy, LocalOwnerProvider
 from rosc.db import make_session_factory
@@ -44,6 +45,9 @@ class FakeRuntime:
         self.stopped: list[str] = []
         self.start_error: Exception | None = None
         self.gate: threading.Event | None = None
+        self.stop_result = True
+        self.stop_error: Exception | None = None
+        self.ask_started = threading.Event()
 
     def configuration_problem(self, provider_id: str, model_id: str) -> str | None:
         return self.problem
@@ -58,6 +62,7 @@ class FakeRuntime:
         return self.alive
 
     def ask(self, handle, runtime_message_id, text, timeout):
+        self.ask_started.set()
         if self.gate is not None:
             self.gate.wait(10)
         self.asked.append((runtime_message_id, text))
@@ -72,7 +77,11 @@ class FakeRuntime:
 
     def stop(self, session_id, handle) -> bool:
         self.stopped.append(session_id)
-        return True
+        if self.stop_error:
+            raise self.stop_error
+        if self.stop_result:
+            self.alive = False
+        return self.stop_result
 
 
 class ArchitectCase(base.StageCase):
@@ -167,7 +176,73 @@ class ActivationTests(ArchitectCase):
         self.assertEqual(self.activate()["state"], "ready")
         self.runtime.alive = False  # provider died: a database row must not keep claiming ready
         view = self.status()
-        self.assertEqual((view["state"], view["detail"]), ("error", "runtime_not_alive"))
+        self.assertEqual((view["state"], view["detail"], view["can_activate"]),
+                         ("error", "runtime_status_unknown", False))
+
+    def test_unconfirmed_stop_blocks_duplicate_until_proven_termination(self) -> None:
+        self.assign()
+        self.activate()
+        self.runtime.stop_result = False
+        view = self.client.post("/api/projects/P0001/architect/deactivate").json()
+        self.assertEqual((view["state"], view["detail"], view["can_activate"], view["can_deactivate"]),
+                         ("error", "stop_unconfirmed", False, True))
+        self.assertEqual(self.activate()["state"], "error")
+        self.assertEqual(self.runtime.starts, 1)
+        self.runtime.stop_result = True
+        self.assertEqual(self.client.post("/api/projects/P0001/architect/deactivate").json()["state"], "stopped")
+        self.runtime.alive = True
+        self.assertEqual(self.activate()["state"], "ready")
+        self.assertEqual(self.runtime.starts, 2)
+
+    def test_unresolved_start_persists_identity_and_blocks_replacement(self) -> None:
+        self.assign()
+        handle = RuntimeHandle(321, 654, 987, "")
+        self.runtime.start_error = RuntimeStartUnresolved("start_cleanup_unconfirmed", handle)
+        view = self.activate()
+        self.assertEqual((view["state"], view["detail"], view["can_activate"]),
+                         ("error", "start_cleanup_unconfirmed", False))
+        with self.sessions() as session:
+            row = session.connection().exec_driver_sql(
+                "SELECT state, process_pid, process_ticks, port, runtime_session_id FROM architect_sessions"
+            ).fetchone()
+        self.assertEqual(tuple(row), ("starting", 321, 654, 987, ""))
+        self.activate()
+        self.assertEqual(self.runtime.starts, 1)
+
+    def test_unexpected_adapter_start_failure_blocks_when_spawn_outcome_is_unknown(self) -> None:
+        self.assign()
+        self.runtime.start_error = ValueError("adapter bug")
+        view = self.activate()
+        self.assertEqual((view["state"], view["detail"], view["can_activate"]),
+                         ("error", "runtime_failure", False))
+        self.activate()
+        self.assertEqual(self.runtime.starts, 1)
+
+    def test_restart_preserves_an_interrupted_start_as_a_live_blocker(self) -> None:
+        self.assign()
+        self.activate()
+        with self.sessions() as session:
+            session.connection().exec_driver_sql(
+                "UPDATE architect_sessions SET state='starting', error_code=NULL"
+            )
+            session.commit()
+        restarted = ArchitectService(self.sessions, LocalOwnerPolicy(), self.runtime)
+        restarted.recover()
+        view = restarted.status(OWNER, 1)
+        self.assertEqual((view["state"], view["detail"], view["can_activate"]),
+                         ("error", "interrupted", False))
+        restarted.activate(OWNER, 1)
+        self.assertEqual(self.runtime.starts, 1)
+
+    def test_revoked_assignment_with_failed_stop_keeps_manual_blocker(self) -> None:
+        made = self.assign()
+        self.activate()
+        self.runtime.stop_result = False
+        self.client.post(f"/api/projects/P0001/assignments/{made['assignment']['assignment_id']}/revoke",
+                         json={"expected_version": made["assignment"]["version"]})
+        view = self.status()
+        self.assertEqual((view["state"], view["detail"], view["can_activate"]),
+                         ("error", "stop_unconfirmed", False))
 
     def test_revoked_assignment_stops_the_session(self) -> None:
         made = self.assign()
@@ -294,6 +369,10 @@ class DeliveryTests(ArchitectCase):
         self.runtime.lookup_result = ReplyLookup("in_progress")
         outcome = self.client.post(f"/api/projects/P0001/conversation/messages/{sent['message_id']}/reconcile")
         self.assertEqual(outcome.json()["delivery"]["state"], "unknown")
+        self.runtime.lookup_result = ReplyLookup("uncertain")
+        outcome = self.client.post(f"/api/projects/P0001/conversation/messages/{sent['message_id']}/reconcile")
+        self.assertEqual((outcome.json()["delivery"]["state"], outcome.json()["delivery"]["can_retry"]),
+                         ("unknown", False))
         self.runtime.lookup_result = ReplyLookup("reply", "Late answer")
         outcome = self.client.post(f"/api/projects/P0001/conversation/messages/{sent['message_id']}/reconcile")
         self.assertEqual(outcome.json()["delivery"]["state"], "delivered")
@@ -342,6 +421,21 @@ class DeliveryTests(ArchitectCase):
         self.architect.drain()
         delivery = self.delivery(sent["message_id"])
         self.assertEqual((delivery["state"], delivery["error_code"]), ("unknown", "session_changed"))
+        self.assertEqual([m["sender"]["kind"] for m in self.messages()], ["owner"])
+
+    def test_deactivate_and_status_during_in_flight_reply_cannot_commit_it(self) -> None:
+        self.activate()
+        self.runtime.gate = threading.Event()
+        sent = self.send().json()["message"]
+        self.assertTrue(self.runtime.ask_started.wait(2))
+        self.assertEqual(self.status()["state"], "ready")
+        stopped = self.client.post("/api/projects/P0001/architect/deactivate").json()
+        self.assertEqual(stopped["state"], "stopped")
+        self.runtime.gate.set()
+        self.architect.drain()
+        self.assertEqual((self.delivery(sent["message_id"])["state"],
+                          self.delivery(sent["message_id"])["error_code"]),
+                         ("unknown", "session_changed"))
         self.assertEqual([m["sender"]["kind"] for m in self.messages()], ["owner"])
 
     def test_turns_for_one_project_are_serialized(self) -> None:
@@ -447,15 +541,49 @@ class OpenCodeAdapterTests(unittest.TestCase):
         self.assertTrue(self.runtime.stop(session_id, handle))
         self.assertFalse(self.runtime.probe(session_id, handle))
 
+    def test_cursor_lookup_covers_long_history_and_repeated_end_match(self) -> None:
+        session_id, handle = self.start("long_match")
+        self.assertEqual(self.runtime.ask(handle, "msg_rosc_long", "hi", 5), "Fake architect reply")
+        expected = ReplyLookup("reply", "Fake architect reply")
+        self.assertEqual(self.runtime.lookup(handle, "msg_rosc_long"), expected)
+        self.assertEqual(self.runtime.lookup(handle, "msg_rosc_long"), expected)
+        self.assertEqual(self.runtime.lookup(handle, "msg_missing"), ReplyLookup("absent"))
+
+    def test_incomplete_lookup_never_claims_absence_and_page_failure_is_ambiguous(self) -> None:
+        session_id, handle = self.start("long_history")
+        with patch.object(runtime_module, "MAX_LOOKUP_MESSAGES", 300):
+            self.assertEqual(self.runtime.lookup(handle, "msg_missing"), ReplyLookup("uncertain"))
+        self.runtime.stop(session_id, handle)
+        self.handles.remove((session_id, handle))
+        session_id, handle = self.start("pagination_error")
+        with self.assertRaises(RuntimeAmbiguous) as caught:
+            self.runtime.lookup(handle, "msg_missing")
+        self.assertEqual(caught.exception.code, "lookup_failed")
+
     def test_password_is_not_in_the_process_command_line(self) -> None:
         session_id, handle = self.start()
         cmdline = Path(f"/proc/{handle.pid}/cmdline").read_bytes()
         self.assertNotIn(self.env[ENV_PASSWORD].encode(), cmdline)
         self.assertIn(b"127.0.0.1", cmdline)
 
+    def test_child_home_xdg_and_logs_are_session_local_and_private(self) -> None:
+        session_id, handle = self.start()
+        environ = Path(f"/proc/{handle.pid}/environ").read_bytes().split(b"\0")
+        values = dict(item.split(b"=", 1) for item in environ if b"=" in item)
+        workdir = Path(self.tmp.name) / "data" / "architect-runtime" / session_id
+        self.assertEqual(values[b"HOME"], str(workdir / "home").encode())
+        for key, directory in ((b"XDG_CONFIG_HOME", "config"), (b"XDG_DATA_HOME", "data"),
+                               (b"XDG_CACHE_HOME", "cache"), (b"XDG_STATE_HOME", "state")):
+            self.assertEqual(values[key], str(workdir / directory).encode())
+        self.assertEqual(stat.S_IMODE(workdir.stat().st_mode), 0o700)
+        self.assertFalse((workdir.parent / "logs" / f"{session_id}.log").exists())
+
     def test_unrestricted_session_is_refused_before_any_model_request(self) -> None:
         with self.assertRaises(RuntimeUnavailable) as caught:
             self.start("unrestricted")
+        self.assertEqual(caught.exception.code, "restricted_mode_unconfirmed")
+        with self.assertRaises(RuntimeUnavailable) as caught:
+            self.start("leaky_permission")
         self.assertEqual(caught.exception.code, "restricted_mode_unconfirmed")
 
     def test_provider_error_is_a_refusal_not_a_reply(self) -> None:
@@ -468,6 +596,39 @@ class OpenCodeAdapterTests(unittest.TestCase):
         self.assertFalse(owned_process(mine, process_ticks(mine), str(uuid.uuid4())))
         self.assertFalse(self.runtime.stop(str(uuid.uuid4()), RuntimeHandle(mine, process_ticks(mine) or 0, 9, "x")))
         self.assertIsNone(process_ticks(2 ** 22 + 12345))
+
+    def test_signal_and_identity_failures_never_report_a_stop(self) -> None:
+        handle = RuntimeHandle(12345, 678, 9, "ses")
+        with patch.object(runtime_module.OpenCodeRuntime, "_termination_confirmed", return_value=False), \
+                patch.object(runtime_module, "owned_group_leader", return_value=False), \
+                patch.object(runtime_module.os, "killpg") as killpg:
+            self.assertFalse(self.runtime.stop("owner", handle))
+            killpg.assert_not_called()
+        with patch.object(runtime_module.OpenCodeRuntime, "_termination_confirmed", return_value=False), \
+                patch.object(runtime_module, "owned_group_leader", return_value=True), \
+                patch.object(runtime_module.OpenCodeRuntime, "_wait_group_absent", return_value=False), \
+                patch.object(runtime_module.os, "killpg", side_effect=[None, PermissionError()]):
+            self.assertFalse(self.runtime.stop("owner", handle))
+        with patch.object(runtime_module.OpenCodeRuntime, "_termination_confirmed", return_value=False), \
+                patch.object(runtime_module, "owned_group_leader", return_value=True), \
+                patch.object(runtime_module.OpenCodeRuntime, "_wait_group_absent", return_value=False), \
+                patch.object(runtime_module.os, "killpg") as killpg:
+            self.assertFalse(self.runtime.stop("owner", handle))
+            self.assertEqual(killpg.call_count, 2)
+
+    def test_reused_or_unreadable_pid_is_never_signalled(self) -> None:
+        handle = RuntimeHandle(12345, 678, 9, "ses")
+        with patch.object(runtime_module.OpenCodeRuntime, "_group_absent", return_value=True), \
+                patch.object(runtime_module, "process_group_identity", return_value=(999, 2, 2)), \
+                patch.object(runtime_module.os, "killpg") as killpg:
+            self.assertTrue(self.runtime.stop("owner", handle))  # original identity is proven absent
+            killpg.assert_not_called()
+        with patch.object(runtime_module.OpenCodeRuntime, "_group_absent", return_value=True), \
+                patch.object(runtime_module, "process_group_identity", return_value=None), \
+                patch.object(runtime_module.os, "kill", side_effect=PermissionError()), \
+                patch.object(runtime_module.os, "killpg") as killpg:
+            self.assertFalse(self.runtime.stop("owner", handle))
+            killpg.assert_not_called()
 
     def test_wrong_password_cannot_talk_to_the_server(self) -> None:
         session_id, handle = self.start()

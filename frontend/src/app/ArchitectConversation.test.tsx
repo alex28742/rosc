@@ -23,6 +23,8 @@ describe('Architect activation control', () => {
     const api = open();
     render(<App api={api} />);
     expect(await screen.findByText('Architect: не активирован')).toBeTruthy();
+    expect(screen.getByText('Project Architect · не активирован')).toBeTruthy();
+    expect(screen.queryByText('Агенты не запущены')).toBeNull();
     expect(api.getArchitect).toHaveBeenCalledWith('P0001');
     const box = within(panel()).getByLabelText('Сообщение в Project Conversation');
     fireEvent.change(box, { target: { value: 'Привет' } });
@@ -41,6 +43,8 @@ describe('Architect activation control', () => {
     expect(screen.queryByText('Активировать Architect')).toBeNull();
     pending.resolve(architectStatus({ state: 'ready', can_activate: false, can_deactivate: true }));
     expect(await screen.findByText('Architect: активен (проверен)')).toBeTruthy();
+    expect(screen.getByText('Project Architect · активен (проверен)')).toBeTruthy();
+    expect(screen.getByText('активен (проверен)')).toBeTruthy();
     expect(api.activateArchitect).toHaveBeenCalledTimes(1);
     expect(screen.getByText('Остановить Architect')).toBeTruthy();
     expect(screen.getByText(/Ранее сохранённые сообщения не пересылаются/)).toBeTruthy();
@@ -62,9 +66,22 @@ describe('Architect activation control', () => {
     render(<App api={open({ activateArchitect })} />);
     fireEvent.click(await screen.findByText('Активировать Architect'));
     expect(await screen.findByText('Architect: ошибка')).toBeTruthy();
+    expect(screen.getByText('Project Architect · требует внимания')).toBeTruthy();
     expect(screen.getByText('Runtime не запустился вовремя.')).toBeTruthy();
     fireEvent.click(screen.getByText('Повторить активацию Architect'));
     expect(await screen.findByText('Architect: активен (проверен)')).toBeTruthy();
+  });
+
+  it('renders an unresolved lifecycle as blocked and offers only explicit stop', async () => {
+    const api = open({ getArchitect: vi.fn(async () => architectStatus({
+      state: 'error', detail: 'stop_unconfirmed', can_activate: false, can_deactivate: true,
+    })) });
+    render(<App api={api} />);
+    expect(await screen.findByText('Architect: ошибка')).toBeTruthy();
+    expect(screen.getByText(/runtime не подтверждена/)).toBeTruthy();
+    expect(screen.queryByText('Повторить активацию Architect')).toBeNull();
+    expect(screen.getByText('Остановить Architect')).toBeTruthy();
+    expect(screen.getAllByText(/runtime требует безопасного разрешения/).length).toBeGreaterThan(0);
   });
 
   it('surfaces an API failure of activation without claiming activity', async () => {

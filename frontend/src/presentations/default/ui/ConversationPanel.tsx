@@ -64,6 +64,10 @@ const REASONS: Record<string, string> = {
   interrupted: 'Запуск был прерван перезапуском ROSC.',
   assignment_changed: 'Назначение Architect изменилось.',
   process_not_owned: 'Процесс не принадлежит ROSC и не был остановлен.',
+  runtime_status_unknown: 'Runtime не отвечает; возможно живой процесс сохранён для безопасного разрешения.',
+  runtime_identity_missing: 'Недостаточно данных, чтобы безопасно остановить runtime.',
+  stop_unconfirmed: 'Остановка runtime не подтверждена; повторный запуск заблокирован.',
+  start_cleanup_unconfirmed: 'Запуск не завершён, а остановка процесса не подтверждена.',
 };
 const reason = (code: string | null) => (code ? REASONS[code] ?? `Код: ${code}` : '');
 
@@ -112,6 +116,7 @@ export function ConversationPanel({ projectId, conversation, collapsed, onCollap
   const architect = conversation.architect;
   const view = describeArchitect(architect.info, architect.status === 'ready', architect.busy);
   const live = view.live && architect.info?.state === 'ready';
+  const unresolved = architect.info?.state === 'error' && architect.info.can_deactivate;
   const [architectFailure, setArchitectFailure] = useState('');
   const [deliveryFailure, setDeliveryFailure] = useState('');
   const [draft, setDraft] = useState('');
@@ -205,7 +210,9 @@ export function ConversationPanel({ projectId, conversation, collapsed, onCollap
     <header className="rosc-conversation__head">
       <div>
         <h3>Project Conversation</h3>
-        <p>{live ? 'История сохраняется в ROSC · новые сообщения передаются Architect' : 'История сохраняется в ROSC · Architect не активирован'}</p>
+        <p>{live ? 'История сохраняется в ROSC · новые сообщения передаются Architect'
+          : unresolved ? 'История сохраняется в ROSC · runtime требует безопасного разрешения'
+            : 'История сохраняется в ROSC · Architect не активирован'}</p>
       </div>
       <div className="rosc-conversation__head-actions">
         <button type="button" className={searchOpen ? 'rosc-chat-icon rosc-chat-icon--on' : 'rosc-chat-icon'}
@@ -259,7 +266,8 @@ export function ConversationPanel({ projectId, conversation, collapsed, onCollap
       {state.status === 'ready' && state.messages.length === 0 && <div className="rosc-state">
         <p>Сообщений пока нет.</p>
         <p>{live ? 'Новое сообщение Owner будет передано Architect, ответ сохранится в этой переписке.'
-          : 'Первое сообщение Owner сохранится в ROSC. Architect не активирован, поэтому ответа не будет.'}</p>
+          : unresolved ? 'Первое сообщение Owner сохранится в ROSC. Runtime недоступен, доставки и ответа не будет.'
+            : 'Первое сообщение Owner сохранится в ROSC. Architect не активирован, поэтому ответа не будет.'}</p>
       </div>}
       {state.messages.map(message => {
         const fromArchitect = message.sender.kind === 'architect';
@@ -312,7 +320,8 @@ export function ConversationPanel({ projectId, conversation, collapsed, onCollap
       {deliveryFailure && <p className="rosc-conversation__error" role="alert">{deliveryFailure}</p>}
       <p className="rosc-conversation__hint">
         {live ? 'Новое сообщение сохраняется в ROSC и передаётся Architect. Ранее сохранённые сообщения не пересылаются.'
-          : 'Сообщение сохраняется только в ROSC. Architect не активирован — доставки и ответа не будет.'}
+          : unresolved ? 'Сообщение сохраняется только в ROSC. Runtime требует безопасного разрешения; доставки и ответа не будет.'
+            : 'Сообщение сохраняется только в ROSC. Architect не активирован — доставки и ответа не будет.'}
       </p>
     </form>
     <button type="button" className="rosc-conversation__rail" aria-label="Развернуть Project Conversation"

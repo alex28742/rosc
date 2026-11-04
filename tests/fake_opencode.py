@@ -11,6 +11,7 @@ import json
 import os
 import sys
 from http.server import BaseHTTPRequestHandler, HTTPServer
+from urllib.parse import parse_qs, urlsplit
 
 PASSWORD = os.environ.get("OPENCODE_PASSWORD", "")
 
@@ -51,7 +52,8 @@ class Handler(BaseHTTPRequestHandler):
     def do_GET(self) -> None:
         if not self._authorized():
             return self._send({"_tag": "UnauthorizedError"}, 401)
-        path = self.path.split("?")[0]
+        parsed = urlsplit(self.path)
+        path = parsed.path
         if path == "/api/info":
             return self._send({"version": "2.2.5", "pid": os.getpid(), "urls": []})
         if path == "/api/model":
@@ -59,7 +61,17 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/api/session/ses_fake":
             return self._send({"data": STATE["session"]})
         if path == "/api/session/ses_fake/message":
-            return self._send({"data": STATE["messages"]})
+            query = parse_qs(parsed.query)
+            cursor = query.get("cursor", [None])[0]
+            offset = int(cursor.removeprefix("cursor-")) if cursor else 0
+            if mode() == "pagination_error" and offset:
+                return self._send({"_tag": "UnknownError"}, 500)
+            limit = min(int(query.get("limit", [200])[0]), 200)
+            items = STATE["messages"][offset:offset + limit]
+            next_offset = offset + len(items)
+            next_cursor = f"cursor-{next_offset}" if next_offset < len(STATE["messages"]) else None
+            previous = f"cursor-{max(0, offset - limit)}" if offset else None
+            return self._send({"data": items, "cursor": {"previous": previous, "next": next_cursor}})
         self._send({}, 404)
 
     def do_POST(self) -> None:
@@ -69,12 +81,19 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/api/session":
             permissions = [] if mode() == "unrestricted" else body.get("permissions")
             STATE["session"] = {"id": "ses_fake", "permissions": permissions}
+            if mode() in ("long_history", "long_match", "pagination_error"):
+                STATE["messages"] = [
+                    {"id": f"msg_history_{index}", "type": "assistant", "finish": "stop",
+                     "time": {"completed": 1}, "content": [{"type": "text", "text": f"history {index}"}]}
+                    for index in range(450)
+                ]
             return self._send({"data": STATE["session"]})
         if path == "/api/session/ses_fake/permission":
-            return self._send({"data": {"id": "per_1", "effect": "deny"}})
+            effect = "allow" if mode() == "leaky_permission" and body.get("action") == "read" else "deny"
+            return self._send({"data": {"id": "per_1", "effect": effect}})
         if path == "/api/session/ses_fake/prompt":
             STATE["messages"].append({"id": body["id"], "type": "user", "text": body["text"]})
-            if mode() == "ok":
+            if mode() in ("ok", "long_match"):
                 STATE["messages"].append({"id": "msg_a1", "type": "assistant", "finish": "stop",
                                           "time": {"completed": 1},
                                           "content": [{"type": "text", "text": "Fake architect reply"}]})

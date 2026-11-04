@@ -22,6 +22,7 @@ signalled. A foreign process, including the Owner's background OpenCode service,
 from __future__ import annotations
 
 import base64
+import errno
 import json
 import os
 import shutil
@@ -30,6 +31,7 @@ import socket
 import subprocess
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 from dataclasses import dataclass
 from pathlib import Path
@@ -43,8 +45,14 @@ ADAPTER_NAME = "opencode"
 MIN_PASSWORD = 16
 START_TIMEOUT = 25.0
 REQUEST_TIMEOUT = 15.0
+MAX_RESPONSE_BYTES = 4_000_000
+LOOKUP_PAGE_SIZE = 200
+MAX_LOOKUP_PAGES = 25
+MAX_LOOKUP_MESSAGES = 5_000
+MAX_REPLY_CHARS = 4_000
 RUNTIME_AGENT = "plan"
 DENY_ALL = [{"action": "*", "resource": "*", "effect": "deny"}]
+RESTRICTED_ACTIONS = ("shell", "edit", "read", "webfetch", "subagent")
 
 
 class RuntimeProblem(Exception):
@@ -71,6 +79,18 @@ class RuntimeAmbiguous(RuntimeProblem):
     """The prompt may or may not have been received (timeout or broken connection after sending)."""
 
 
+class RuntimeStartUnresolved(RuntimeProblem):
+    """Startup failed and the spawned process could not be proven stopped.
+
+    The handle is intentionally persisted by the service so the Project remains blocked until an explicit Owner
+    deactivation can prove termination.  It contains process identity only, never credentials.
+    """
+
+    def __init__(self, code: str, handle: "RuntimeHandle") -> None:
+        super().__init__(code)
+        self.handle = handle
+
+
 @dataclass(frozen=True)
 class RuntimeHandle:
     pid: int
@@ -81,7 +101,7 @@ class RuntimeHandle:
 
 @dataclass(frozen=True)
 class ReplyLookup:
-    status: str  # "reply" | "in_progress" | "absent"
+    status: str  # "reply" | "in_progress" | "absent" | "uncertain"
     text: str | None = None
 
 
@@ -106,6 +126,16 @@ def process_ticks(pid: int) -> int | None:
         return None
 
 
+def process_group_identity(pid: int) -> tuple[int, int, int] | None:
+    """Return ``(start_ticks, process_group, session)`` without exposing argv or environment values."""
+    try:
+        raw = Path(f"/proc/{pid}/stat").read_text()
+        fields = raw[raw.rindex(")") + 2:].split()
+        return int(fields[19]), int(fields[2]), int(fields[3])
+    except (OSError, ValueError, IndexError):
+        return None
+
+
 def process_has_marker(pid: int, session_id: str) -> bool:
     """True only if the process environment carries ROSC's per-session marker. Only the marker is compared; the rest
     of the environment (which contains the password) is never stored or returned."""
@@ -119,6 +149,12 @@ def process_has_marker(pid: int, session_id: str) -> bool:
 def owned_process(pid: int | None, ticks: int | None, session_id: str) -> bool:
     return (pid is not None and ticks is not None and process_ticks(pid) == ticks
             and process_has_marker(pid, session_id))
+
+
+def owned_group_leader(pid: int, ticks: int, session_id: str) -> bool:
+    """Prove the original process is still the leader of the new session/process group ROSC created."""
+    identity = process_group_identity(pid)
+    return (identity == (ticks, pid, pid) and process_has_marker(pid, session_id))
 
 
 class OpenCodeRuntime:
@@ -163,7 +199,7 @@ class OpenCodeRuntime:
             headers={"Authorization": f"Basic {token}", "Content-Type": "application/json"})
         try:
             with urllib.request.urlopen(request, timeout=timeout) as response:
-                raw = response.read(4_000_000)
+                raw = response.read(MAX_RESPONSE_BYTES + 1)
         except urllib.error.HTTPError as exc:
             exc.read(1024)
             raise RuntimeRefused(f"http_{exc.code}") from None
@@ -175,6 +211,8 @@ class OpenCodeRuntime:
             raise RuntimeUnavailable("connection_failed") from None
         except OSError:
             raise RuntimeAmbiguous("connection_lost") from None
+        if len(raw) > MAX_RESPONSE_BYTES:
+            raise RuntimeRefused("response_too_large")
         if not raw:
             return None
         try:
@@ -193,37 +231,50 @@ class OpenCodeRuntime:
             raise RuntimeNotConfigured(problem)
         binary = self._binary()
         workdir = self._root / session_id
-        workdir.mkdir(parents=True, exist_ok=False)  # an empty ROSC-owned directory: no repository is exposed
-        (self._root / "logs").mkdir(parents=True, exist_ok=True)
+        workdir.mkdir(parents=True, exist_ok=False, mode=0o700)  # empty: no repository is exposed
+        self._root.chmod(0o700)
+        workdir.chmod(0o700)
+        isolated = {name: workdir / name for name in ("home", "config", "data", "cache", "state", "tmp")}
+        for path in isolated.values():
+            path.mkdir(mode=0o700)
+            path.chmod(0o700)
         with socket.socket() as probe:
             probe.bind(("127.0.0.1", 0))
             port = probe.getsockname()[1]
-        env = {key: value for key, value in self._environ.items()
-               if key in ("HOME", "PATH", "XDG_CONFIG_HOME", "XDG_DATA_HOME", "XDG_CACHE_HOME", "XDG_STATE_HOME",
-                          "LANG", "LC_ALL", "TMPDIR")}
+        # Never fall back to the Owner's global OpenCode config, credentials or sessions.  A future live setup must
+        # provision this session-local home explicitly; until then model/provider checks fail truthfully.
+        env = {key: value for key, value in self._environ.items() if key in ("PATH", "LANG", "LC_ALL")}
+        env.update({"HOME": str(isolated["home"]), "XDG_CONFIG_HOME": str(isolated["config"]),
+                    "XDG_DATA_HOME": str(isolated["data"]), "XDG_CACHE_HOME": str(isolated["cache"]),
+                    "XDG_STATE_HOME": str(isolated["state"]), "TMPDIR": str(isolated["tmp"])})
         env[ENV_PASSWORD] = self._password()  # type: ignore[assignment]
         env[ENV_MARKER] = session_id
-        log = open(self._root / "logs" / f"{session_id}.log", "ab")
         try:
             child = subprocess.Popen([binary, "serve", "--hostname", "127.0.0.1", "--port", str(port)],  # type: ignore[list-item]
-                                     cwd=workdir, env=env, stdin=subprocess.DEVNULL, stdout=log, stderr=log,
+                                     cwd=workdir, env=env, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                                     stderr=subprocess.DEVNULL,
                                      start_new_session=True)
         except OSError:
             raise RuntimeUnavailable("spawn_failed") from None
-        finally:
-            log.close()
         self._children[session_id] = child
         ticks = process_ticks(child.pid)
+        provisional = RuntimeHandle(child.pid, ticks or 0, port, "")
         try:
             self._await_identity(port, child)
             if ticks is None:
                 raise RuntimeUnavailable("process_identity_unproven")
             self._require_model(port, provider_id, model_id)
             runtime_session = self._create_session(port, provider_id, model_id, workdir)
-        except RuntimeProblem:
-            self._terminate(child)
-            self._children.pop(session_id, None)
-            raise
+        except RuntimeProblem as exc:
+            if self._terminate(session_id, provisional, child):
+                self._children.pop(session_id, None)
+                raise
+            raise RuntimeStartUnresolved("start_cleanup_unconfirmed", provisional) from exc
+        except Exception as exc:
+            if self._terminate(session_id, provisional, child):
+                self._children.pop(session_id, None)
+                raise RuntimeUnavailable("runtime_failure") from None
+            raise RuntimeStartUnresolved("start_cleanup_unconfirmed", provisional) from exc
         return RuntimeHandle(child.pid, ticks, port, runtime_session)
 
     def _await_identity(self, port: int, child: subprocess.Popen) -> None:
@@ -259,10 +310,11 @@ class OpenCodeRuntime:
             raise RuntimeRefused("malformed_response")
         if created.get("permissions") != DENY_ALL:
             raise RuntimeUnavailable("restricted_mode_unconfirmed")  # never send a model request unrestricted
-        decision = self._data(self._call(port, "POST", f"/api/session/{created['id']}/permission",
-                                         {"action": "shell", "resources": ["*"]}))
-        if not isinstance(decision, dict) or decision.get("effect") != "deny":
-            raise RuntimeUnavailable("restricted_mode_unconfirmed")
+        for action in RESTRICTED_ACTIONS:
+            decision = self._data(self._call(port, "POST", f"/api/session/{created['id']}/permission",
+                                             {"action": action, "resources": ["*"]}))
+            if not isinstance(decision, dict) or decision.get("effect") != "deny":
+                raise RuntimeUnavailable("restricted_mode_unconfirmed")
         return created["id"]
 
     def probe(self, session_id: str, handle: RuntimeHandle) -> bool:
@@ -290,63 +342,146 @@ class OpenCodeRuntime:
         result = self.lookup(handle, runtime_message_id)
         if result.status == "reply" and result.text:
             return result.text
-        if result.status == "in_progress":
+        if result.status in ("in_progress", "uncertain"):
             raise RuntimeAmbiguous("timeout")
         raise RuntimeRefused("no_reply")
 
     def lookup(self, handle: RuntimeHandle, runtime_message_id: str) -> ReplyLookup:
-        payload = self._data(self._call(handle.port, "GET",
-                                        f"/api/session/{handle.runtime_session_id}/message?order=asc&limit=200"))
-        if not isinstance(payload, list):
-            raise RuntimeRefused("malformed_response")
+        """Traverse the verified OpenCode cursor API.  ``absent`` requires the terminal page."""
+        cursor: str | None = None
+        cursors: set[str] = set()
         seen = False
-        for item in payload:
-            if not isinstance(item, dict):
-                continue
-            if item.get("id") == runtime_message_id:
-                seen = True
-            elif seen and item.get("type") == "assistant":
-                if item.get("error") or item.get("finish") not in ("stop",):
-                    if (item.get("time") or {}).get("completed") is None and not item.get("error"):
+        count = 0
+        for _ in range(MAX_LOOKUP_PAGES):
+            if cursor is None:
+                query = urllib.parse.urlencode({"order": "asc", "limit": LOOKUP_PAGE_SIZE})
+            else:
+                query = urllib.parse.urlencode({"cursor": cursor, "limit": LOOKUP_PAGE_SIZE})
+            try:
+                payload = self._call(handle.port, "GET",
+                                     f"/api/session/{handle.runtime_session_id}/message?{query}")
+            except RuntimeRefused as exc:
+                if exc.code.startswith("http_"):
+                    raise RuntimeAmbiguous("lookup_failed") from None
+                raise
+            if not isinstance(payload, dict) or not isinstance(payload.get("data"), list):
+                raise RuntimeRefused("malformed_response")
+            page_cursor = payload.get("cursor")
+            if not isinstance(page_cursor, dict) or page_cursor.get("next") is not None and not isinstance(
+                    page_cursor.get("next"), str):
+                raise RuntimeRefused("malformed_response")
+            for item in payload["data"]:
+                count += 1
+                if count > MAX_LOOKUP_MESSAGES:
+                    return ReplyLookup("uncertain")
+                if not isinstance(item, dict) or not isinstance(item.get("id"), str):
+                    raise RuntimeRefused("malformed_response")
+                if item.get("id") == runtime_message_id:
+                    if seen or item.get("type") != "user":
+                        return ReplyLookup("uncertain")
+                    seen = True
+                    continue
+                if seen and item.get("type") == "user":
+                    # An assistant after this point could belong to the later user message.
+                    return ReplyLookup("uncertain")
+                if seen and item.get("type") == "assistant":
+                    completed = (item.get("time") or {}).get("completed") if isinstance(item.get("time"), dict) else None
+                    if completed is None and not item.get("error"):
                         return ReplyLookup("in_progress")
-                    raise RuntimeRefused("provider_error")
-                parts = [c.get("text") for c in item.get("content") or []
-                         if isinstance(c, dict) and c.get("type") == "text" and isinstance(c.get("text"), str)]
-                text = "\n".join(p for p in parts if p).strip()
-                if not text:
-                    raise RuntimeRefused("empty_reply")
-                return ReplyLookup("reply", text)
-        return ReplyLookup("in_progress" if seen else "absent")
+                    if item.get("error") or item.get("finish") != "stop":
+                        raise RuntimeRefused("provider_error")
+                    content = item.get("content")
+                    if not isinstance(content, list):
+                        raise RuntimeRefused("malformed_response")
+                    parts = [part.get("text") for part in content
+                             if isinstance(part, dict) and part.get("type") == "text"
+                             and isinstance(part.get("text"), str)]
+                    text = "\n".join(part for part in parts if part).strip()
+                    if not text:
+                        raise RuntimeRefused("empty_reply")
+                    if len(text) > MAX_REPLY_CHARS:
+                        raise RuntimeRefused("reply_too_large")
+                    return ReplyLookup("reply", text)
+            next_cursor = page_cursor.get("next")
+            if next_cursor is None:
+                return ReplyLookup("in_progress" if seen else "absent")
+            if not next_cursor or next_cursor in cursors:
+                return ReplyLookup("uncertain")
+            cursors.add(next_cursor)
+            cursor = next_cursor
+        return ReplyLookup("uncertain")
 
     # -- shutdown -------------------------------------------------------------------------------------------------
     @staticmethod
-    def _terminate(child: subprocess.Popen) -> None:
+    def _group_absent(pgid: int) -> bool:
         try:
-            os.killpg(child.pid, signal.SIGTERM)
-            child.wait(timeout=5)
-        except (OSError, subprocess.TimeoutExpired):
+            os.killpg(pgid, 0)
+        except ProcessLookupError:
+            return True
+        except OSError as exc:
+            return exc.errno == errno.ESRCH
+        return False
+
+    @classmethod
+    def _termination_confirmed(cls, handle: RuntimeHandle) -> bool:
+        """The original PID identity and its process group must both be gone (or the PID reliably reused)."""
+        if not cls._group_absent(handle.pid):
+            return False
+        identity = process_group_identity(handle.pid)
+        if identity is not None:
+            return identity[0] != handle.ticks
+        try:
+            os.kill(handle.pid, 0)
+        except ProcessLookupError:
+            return True
+        except OSError:
+            return False
+        return False
+
+    @classmethod
+    def _wait_group_absent(cls, handle: RuntimeHandle, timeout: float,
+                           child: subprocess.Popen | None = None) -> bool:
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            if child is not None:
+                child.poll()  # reap a terminated direct child so its process group can disappear
+            if cls._termination_confirmed(handle):
+                return True
+            time.sleep(0.1)
+        if child is not None:
+            child.poll()
+        return cls._termination_confirmed(handle)
+
+    @classmethod
+    def _terminate(cls, session_id: str, handle: RuntimeHandle,
+                   child: subprocess.Popen | None = None) -> bool:
+        """Signal only a freshly re-proven owned group; success requires the whole group to be absent."""
+        if cls._termination_confirmed(handle):
+            return True
+        for sig in (signal.SIGTERM, signal.SIGKILL):
+            if not owned_group_leader(handle.pid, handle.ticks, session_id):
+                return False
             try:
-                os.killpg(child.pid, signal.SIGKILL)
-                child.wait(timeout=5)
-            except (OSError, subprocess.TimeoutExpired):
-                pass
+                os.killpg(handle.pid, sig)
+            except ProcessLookupError:
+                return cls._termination_confirmed(handle)
+            except OSError:
+                return False
+            if cls._wait_group_absent(handle, 5.0, child):
+                if child is not None:
+                    try:
+                        child.wait(timeout=0)
+                    except (subprocess.TimeoutExpired, OSError):
+                        pass
+                return True
+        return False
 
     def stop(self, session_id: str, handle: RuntimeHandle) -> bool:
         """Stop the process only if ROSC can prove it launched it. Returns False for anything it cannot prove."""
-        if not owned_process(handle.pid, handle.ticks, session_id):
+        child = self._children.get(session_id)
+        if child is not None and child.pid != handle.pid:
             return False
-        child = self._children.pop(session_id, None)
-        if child is not None and child.pid == handle.pid:
-            self._terminate(child)
-            return True
-        try:
-            os.kill(handle.pid, signal.SIGTERM)
-            for _ in range(50):
-                if process_ticks(handle.pid) != handle.ticks:
-                    return True
-                time.sleep(0.1)
-            if owned_process(handle.pid, handle.ticks, session_id):
-                os.kill(handle.pid, signal.SIGKILL)
-        except OSError:
-            pass
-        return True
+        stopped = self._terminate(session_id, handle, child)
+        if stopped:
+            self._children.pop(session_id, None)
+        return stopped

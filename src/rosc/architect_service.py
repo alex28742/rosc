@@ -27,7 +27,8 @@ from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError, OperationalError
 from sqlalchemy.orm import Session, sessionmaker
 
-from .architect_runtime import (ADAPTER_NAME, ArchitectRuntime, RuntimeAmbiguous, RuntimeHandle, RuntimeProblem)
+from .architect_runtime import (ADAPTER_NAME, ArchitectRuntime, RuntimeAmbiguous, RuntimeHandle, RuntimeProblem,
+                                RuntimeStartUnresolved)
 from .authorization import (ARCHITECT_ACTIVATE, ARCHITECT_DEACTIVATE, ARCHITECT_REPLY_COMMIT, ARCHITECT_STATUS,
                             CONVERSATION_DELIVERY_RECONCILE, ActorContext, AuthorizationPolicy, ResourceScope,
                             evaluate)
@@ -157,15 +158,27 @@ class ArchitectService:
                 pair = self._assignment(session, project.id)
                 still_assigned = pair is not None and pair[0].assignment_id == live.assignment_id
                 if live.state == SESSION_STARTING:
-                    # A starting row seen outside an in-flight activation belongs to a dead ROSC process.
-                    self._finish(session, live, SESSION_ERROR, "interrupted")
+                    # ``starting`` is also the persisted fail-closed blocker.  A previous ROSC process may have
+                    # spawned the runtime before it could commit readiness; never release the unique live slot merely
+                    # because the current process lacks enough evidence to resolve that identity.
+                    if not still_assigned:
+                        stopped = self._stop_owned(live, self._handle(live))
+                        self._finish(session, live, SESSION_STOPPED if stopped else SESSION_STARTING,
+                                     "assignment_changed" if stopped else "stop_unconfirmed")
+                    elif live.error_code is None:
+                        self._finish(session, live, SESSION_STARTING, "interrupted")
                 else:
                     handle = self._handle(live)
                     if not still_assigned:
-                        self._stop_owned(live, handle)
-                        self._finish(session, live, SESSION_STOPPED, "assignment_changed")
-                    elif handle is None or not self._runtime.probe(live.session_id, handle):
-                        self._finish(session, live, SESSION_ERROR, "runtime_not_alive")
+                        stopped = self._stop_owned(live, handle)
+                        self._finish(session, live, SESSION_STOPPED if stopped else SESSION_STARTING,
+                                     "assignment_changed" if stopped else "stop_unconfirmed")
+                    elif handle is None:
+                        self._finish(session, live, SESSION_STARTING, "runtime_identity_missing")
+                    elif not self._probe_owned(live, handle):
+                        # A failed HTTP/liveness probe is not proof of process exit.  Preserve both identity and the
+                        # unique slot so a later activation cannot create a duplicate runtime.
+                        self._finish(session, live, SESSION_STARTING, "runtime_status_unknown")
                     else:
                         live.verified_at = _now()
                         session.commit()
@@ -177,7 +190,8 @@ class ArchitectService:
         latest = live or self._latest(session, project_id)
         problem = self._configuration(pair)
         if live is not None:
-            state, detail = live.state, live.error_code
+            state = SESSION_ERROR if live.state == SESSION_STARTING and live.error_code is not None else live.state
+            detail = live.error_code
         elif latest is not None and latest.state == SESSION_ERROR and problem is None:
             state, detail = SESSION_ERROR, latest.error_code
         elif problem is not None:
@@ -199,9 +213,21 @@ class ArchitectService:
         row.state, row.error_code, row.updated_at = state, code, _now()
         session.commit()
 
-    def _stop_owned(self, row: ArchitectSession, handle: RuntimeHandle | None) -> None:
-        if handle is not None:
-            self._runtime.stop(row.session_id, handle)
+    def _stop_owned(self, row: ArchitectSession, handle: RuntimeHandle | None) -> bool:
+        if handle is None:
+            return False
+        try:
+            return self._runtime.stop(row.session_id, handle)
+        except Exception:
+            log.warning("Architect runtime stop failed unexpectedly")
+            return False
+
+    def _probe_owned(self, row: ArchitectSession, handle: RuntimeHandle) -> bool:
+        try:
+            return self._runtime.probe(row.session_id, handle)
+        except Exception:
+            log.warning("Architect runtime probe failed unexpectedly")
+            return False
 
     # -- activation -----------------------------------------------------------------------------------------------
     def activate(self, actor: ActorContext, project_id: object) -> dict:
@@ -235,24 +261,32 @@ class ArchitectService:
                 provider_id, model_id, session_id = agent.provider_id, agent.model_id, row.session_id
             handle: RuntimeHandle | None = None
             code: str | None = None
+            unresolved_without_handle = False
             try:
                 handle = self._runtime.start(session_id, provider_id, model_id)
+            except RuntimeStartUnresolved as exc:
+                handle, code = exc.handle, exc.code
             except RuntimeProblem as exc:
                 code = exc.code
             except Exception:  # an adapter bug must still leave an honest, non-secret state
                 log.warning("Architect runtime start failed unexpectedly")
                 code = "runtime_failure"
+                unresolved_without_handle = True
             with self._sessions() as session:
                 row = session.get(ArchitectSession, session_id)
                 if handle is None:
-                    self._finish(session, row, SESSION_ERROR, code)
+                    self._finish(session, row, SESSION_STARTING if unresolved_without_handle else SESSION_ERROR, code)
                 else:
-                    if not self._runtime.probe(session_id, handle):
-                        self._runtime.stop(session_id, handle)
-                        self._finish(session, row, SESSION_ERROR, "runtime_not_alive")
+                    row.process_pid, row.process_ticks, row.port = handle.pid, handle.ticks, handle.port
+                    row.runtime_session_id = handle.runtime_session_id
+                    if code is not None:
+                        self._finish(session, row, SESSION_STARTING, code)
+                        return self._view(session, pid)
+                    if not self._probe_owned(row, handle):
+                        stopped = self._stop_owned(row, handle)
+                        self._finish(session, row, SESSION_ERROR if stopped else SESSION_STARTING,
+                                     "runtime_not_alive" if stopped else "stop_unconfirmed")
                     else:
-                        row.process_pid, row.process_ticks, row.port = handle.pid, handle.ticks, handle.port
-                        row.runtime_session_id = handle.runtime_session_id
                         row.verified_at = _now()
                         self._finish(session, row, SESSION_READY, None)
                 return self._view(session, pid)
@@ -265,11 +299,13 @@ class ArchitectService:
                 self._project(session, pid)
                 live = self._live(session, pid)
                 if live is not None:
-                    stopped = live.state != SESSION_READY or self._handle(live) is None or self._runtime.stop(
-                        live.session_id, self._handle(live))  # type: ignore[arg-type]
-                    # An unprovable process is left alone and reported; it is never adopted or signalled.
-                    self._finish(session, live, SESSION_STOPPED if stopped else SESSION_ERROR,
-                                 None if stopped else "process_not_owned")
+                    handle = self._handle(live)
+                    stopped = self._stop_owned(live, handle)
+                    # An unavailable identity or failed stop stays in the unique live slot.  It can be inspected and
+                    # explicitly deactivated again, but cannot be replaced by a duplicate process.
+                    self._finish(session, live, SESSION_STOPPED if stopped else SESSION_STARTING,
+                                 None if stopped else ("runtime_identity_missing" if handle is None
+                                                       else "stop_unconfirmed"))
                 return self._view(session, pid)
 
     # -- delivery -------------------------------------------------------------------------------------------------
@@ -358,7 +394,7 @@ class ArchitectService:
             message = session.get(ConversationMessage, message_id)
             conversation = session.get(Conversation, message.conversation_id)
             project = self._project(session, project_id)
-            if handle is None or conversation.project_id != project.id or not self._runtime.probe(live.session_id, handle):
+            if handle is None or conversation.project_id != project.id or not self._probe_owned(live, handle):
                 self._set(message_id, DELIVERY_FAILED, "session_not_ready")
                 return
             text, categories = self._build_context(session, project, message)
@@ -448,7 +484,7 @@ class ArchitectService:
                 live = self._live(session, pid)
                 handle = self._handle(live) if live is not None else None
                 if (live is None or handle is None or live.session_id != row.architect_session_id
-                        or not self._runtime.probe(live.session_id, handle)):
+                        or not self._probe_owned(live, handle)):
                     return delivery_view(row)  # cannot ask the provider: stays unknown (human recovery)
                 runtime_id, live_id = row.runtime_message_id, live.session_id
             try:
@@ -492,12 +528,15 @@ class ArchitectService:
 
     # -- restart recovery -------------------------------------------------------------------------------------------
     def recover(self) -> None:
-        """Database-only repair at startup: in-flight work of a dead process becomes ``unknown``/``error``. Nothing is
-        re-sent and no process is started or signalled here."""
+        """Database-only repair at startup.  Nothing is re-sent, started or signalled here.
+
+        A prior ``starting`` row stays in the unique live slot: a crash may have happened after spawn but before the
+        handle was committed, so absence of identity is not proof that no process exists.
+        """
         with self._sessions() as session:
             for row in session.scalars(select(ConversationDelivery).where(
                     ConversationDelivery.state == DELIVERY_PENDING)):
                 row.state, row.error_code, row.updated_at = DELIVERY_UNKNOWN, "interrupted", _now()
             for row in session.scalars(select(ArchitectSession).where(ArchitectSession.state == SESSION_STARTING)):
-                row.state, row.error_code, row.updated_at = SESSION_ERROR, "interrupted", _now()
+                row.error_code, row.updated_at = row.error_code or "interrupted", _now()
             session.commit()
