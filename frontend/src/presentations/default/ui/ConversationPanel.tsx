@@ -74,6 +74,9 @@ const REASONS: Record<string, string> = {
   runtime_status_unknown: 'Runtime не отвечает; возможно живой процесс сохранён для безопасного разрешения.',
   runtime_identity_missing: 'Недостаточно данных, чтобы безопасно остановить runtime.',
   stop_unconfirmed: 'Остановка runtime не подтверждена; повторный запуск заблокирован.',
+  reply_too_large: 'Ответ был создан, но старая версия ROSC отказалась его сохранить из-за длины. Его можно восстановить без нового запроса к модели, пока сессия Architect активна.',
+  reply_retrieval_resources: 'Ответ создан, но сейчас не хватает ресурсов, чтобы получить его целиком. Повторный запрос к модели не выполнялся — проверьте результат позже.',
+  reply_storage_resources: 'Ответ создан, но сейчас не хватает ресурсов, чтобы сохранить его целиком. Повторный запрос к модели не выполнялся — проверьте результат позже.',
   start_cleanup_unconfirmed: 'Запуск не завершён, а остановка процесса не подтверждена.',
 };
 const reason = (code: string | null) => (code ? REASONS[code] ?? `Код: ${code}` : '');
@@ -296,9 +299,9 @@ export function ConversationPanel({ projectId, conversation, collapsed, onCollap
               {delivery.can_retry && <button type="button" className="rosc-btn rosc-btn--small"
                 onClick={async () => setDeliveryFailure(await conversation.onRetryDelivery(message.message_id) ?? '')}>
                 Повторить отправку</button>}
-              {delivery.can_reconcile && delivery.state === 'unknown' && <button type="button" className="rosc-btn rosc-btn--small"
+              {delivery.can_reconcile && (delivery.state === 'unknown' || delivery.state === 'failed') && <button type="button" className="rosc-btn rosc-btn--small"
                 onClick={async () => setDeliveryFailure(await conversation.onReconcile(message.message_id) ?? '')}>
-                Проверить результат</button>}
+                {delivery.state === 'failed' ? 'Восстановить ответ' : 'Проверить результат'}</button>}
             </p>}
           </div>
         </article>;

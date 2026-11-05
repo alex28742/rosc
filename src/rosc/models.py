@@ -426,7 +426,7 @@ CONVERSATION_KIND_TASK = "task"
 PARTICIPANT_OWNER = "owner"
 PARTICIPANT_ARCHITECT = "architect"
 PARTICIPANT_WORKER = "worker"
-MAX_MESSAGE_BODY = 4000
+MAX_MESSAGE_BODY = 4000  # Owner-authored input only (API + ``conversation._body``); Architect replies have no cap
 MAX_CLIENT_KEY = 128
 
 
@@ -495,7 +495,7 @@ class ConversationMessage(Base):
     __tablename__ = "conversation_messages"
     __table_args__ = (
         CheckConstraint("ordinal >= 1", name="ck_conversation_messages_ordinal"),
-        CheckConstraint(f"length(body) BETWEEN 1 AND {MAX_MESSAGE_BODY}", name="ck_conversation_messages_body"),
+        CheckConstraint("length(body) >= 1", name="ck_conversation_messages_body"),
         CheckConstraint(f"length(client_key) BETWEEN 8 AND {MAX_CLIENT_KEY}", name="ck_conversation_messages_key"),
         UniqueConstraint("conversation_id", "ordinal", name="uq_conversation_messages_ordinal"),
         UniqueConstraint("conversation_id", "client_key", name="uq_conversation_messages_client_key"),

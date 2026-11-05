@@ -170,6 +170,30 @@ describe('Architect reply and delivery status', () => {
     expect(api.retryDelivery).not.toHaveBeenCalled();
   });
 
+  it('offers recovery (not a re-send) for a historical reply_too_large failure', async () => {
+    const getConversation = vi.fn(async () => conversationPage({ messages: [
+      conversationMessage('Вопрос', { ordinal: 1, delivery: delivery({ state: 'failed', error_code: 'reply_too_large', can_reconcile: true }) })] }));
+    const api = open({ getArchitect: vi.fn(async () => ready), getConversation });
+    render(<App api={api} />);
+    expect(screen.queryByText('Повторить отправку')).toBeNull();
+    fireEvent.click(await screen.findByText('Восстановить ответ'));
+    await waitFor(() => expect(api.reconcileDelivery).toHaveBeenCalledWith('P0001', 'message-1'));
+    expect(api.retryDelivery).not.toHaveBeenCalled();
+  });
+
+  it('renders a very long Architect reply completely as escaped plain text', async () => {
+    const long = `${'Привет 😀 '.repeat(40_000)}<script id="x">window.pwned=1</script> конец`;
+    const reply = conversationMessage(long, { ordinal: 2, message_id: 'message-2', sender: architectParticipant });
+    const getConversation = vi.fn(async () => conversationPage({ messages: [
+      conversationMessage('Вопрос', { ordinal: 1 }), reply] }));
+    render(<App api={open({ getArchitect: vi.fn(async () => ready), getConversation })} />);
+    await screen.findByText('Вопрос');
+    const body = panel().querySelector('[data-message-id="message-2"] .rosc-chat-body') as HTMLElement;
+    expect(body.textContent).toBe(long);
+    expect(panel().querySelector('script')).toBeNull();
+    expect((window as unknown as { pwned?: number }).pwned).toBeUndefined();
+  });
+
   it('reports a delivery action failure without hiding the conversation', async () => {
     const reconcileDelivery = vi.fn().mockRejectedValue(new ApiError('Не удалось связаться с ядром ROSC.', 'network', null));
     const getConversation = vi.fn(async () => conversationPage({ messages: [

@@ -29,6 +29,16 @@ def mode() -> str:
 STATE: dict = {"session": None, "messages": []}
 
 
+def synthetic_reply() -> dict:
+    """``reply.json`` beside the launcher (test-controlled): ``{"parts": [...], "before": [...]}``.  ``parts`` are the
+    assistant's text parts for the next prompt; ``before`` are unrelated earlier assistant messages (possibly huge)."""
+    try:
+        with open(os.path.join(os.path.dirname(os.path.realpath(sys.argv[0])), "reply.json"), encoding="utf-8") as handle:
+            return json.load(handle)
+    except (OSError, ValueError):
+        return {"parts": [], "before": []}
+
+
 class Handler(BaseHTTPRequestHandler):
     def log_message(self, *args) -> None:  # silence
         pass
@@ -84,6 +94,11 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/api/session":
             permissions = [] if mode() == "unrestricted" else body.get("permissions")
             STATE["session"] = {"id": "ses_fake", "permissions": permissions}
+            if mode() == "file_reply":
+                STATE["messages"] = [
+                    {"id": f"msg_before_{index}", "type": "assistant", "finish": "stop", "time": {"completed": 1},
+                     "content": [{"type": "text", "text": text}]}
+                    for index, text in enumerate(synthetic_reply().get("before", []))]
             if mode() in ("long_history", "long_match", "pagination_error"):
                 STATE["messages"] = [
                     {"id": f"msg_history_{index}", "type": "assistant", "finish": "stop",
@@ -100,6 +115,11 @@ class Handler(BaseHTTPRequestHandler):
                 STATE["messages"].append({"id": "msg_a1", "type": "assistant", "finish": "stop",
                                           "time": {"completed": 1},
                                           "content": [{"type": "text", "text": "Fake architect reply"}]})
+            elif mode() == "file_reply":
+                STATE["messages"].append({"id": "msg_a1", "type": "assistant", "finish": "stop",
+                                          "time": {"completed": 1},
+                                          "content": [{"type": "text", "text": part}
+                                                      for part in synthetic_reply().get("parts", [])]})
             elif mode() == "refuse":
                 STATE["messages"].append({"id": "msg_a1", "type": "assistant", "finish": "error",
                                           "error": {"name": "x"}, "time": {"completed": 1}, "content": []})

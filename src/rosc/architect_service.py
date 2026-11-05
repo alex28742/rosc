@@ -24,7 +24,7 @@ from concurrent.futures import Future, ThreadPoolExecutor
 from datetime import datetime, timezone
 
 from sqlalchemy import func, select
-from sqlalchemy.exc import IntegrityError, OperationalError
+from sqlalchemy.exc import DataError, IntegrityError, OperationalError
 from sqlalchemy.orm import Session, sessionmaker
 
 from .architect_runtime import (ADAPTER_NAME, ArchitectRuntime, RuntimeAmbiguous, RuntimeHandle, RuntimeProblem,
@@ -32,7 +32,7 @@ from .architect_runtime import (ADAPTER_NAME, ArchitectRuntime, RuntimeAmbiguous
 from .authorization import (ARCHITECT_ACTIVATE, ARCHITECT_DEACTIVATE, ARCHITECT_REPLY_COMMIT, ARCHITECT_STATUS,
                             CONVERSATION_DELIVERY_RECONCILE, ActorContext, AuthorizationPolicy, ResourceScope,
                             evaluate)
-from .conversation import (SAFE_RETRY_CODES, ConversationConflict, ConversationDenied, ConversationNotFound, ConversationStoreError, InvalidConversationInput, UnsafeProjectIdentity, _body, _utc_iso, delivery_state_view)
+from .conversation import (SAFE_RETRY_CODES, ConversationConflict, ConversationDenied, ConversationNotFound, ConversationStoreError, InvalidConversationInput, UnsafeProjectIdentity, _architect_body, _utc_iso, delivery_state_view, recoverable_failure)
 from .models import (ASSIGNMENT_ACTIVE, ASSURANCE_ADAPTER_VERIFIED, CONVERSATION_KIND_PROJECT, DELIVERY_DELIVERED,
                      DELIVERY_FAILED, DELIVERY_PENDING, DELIVERY_UNKNOWN, PARTICIPANT_ARCHITECT, PARTICIPANT_OWNER,
                      ROLE_ARCHITECT, SESSION_ERROR, SESSION_READY, SESSION_STARTING, SESSION_STOPPED, AgentDefinition,
@@ -47,6 +47,7 @@ CONTEXT_MESSAGES = 10
 CONTEXT_MESSAGE_CHARS = 1500
 CONTEXT_TOTAL_CHARS = 10000
 # Failure codes after which nothing can have reached the provider, so an explicit retry cannot duplicate a turn.
+RECOVERABLE_RETRIEVAL_CODES = frozenset({"reply_retrieval_resources", "reply_storage_resources", "lookup_failed", "timeout", "connection_lost"})
 CATEGORY_IDENTITY = "project_identity"
 CATEGORY_RECENT = "recent_messages"
 
@@ -419,12 +420,15 @@ class ArchitectService:
                       reply: str) -> bool:
         try:
             self._authorize(actor, ARCHITECT_REPLY_COMMIT, project_id)
-            text = _body(reply)
+            text = _architect_body(reply)
         except ArchitectDenied:
             self._set(message_id, DELIVERY_FAILED, "not_authorized")
             return False
         except InvalidConversationInput:
             self._set(message_id, DELIVERY_FAILED, "malformed_reply")
+            return False
+        except MemoryError:  # cannot even normalize it right now: the generated reply stays recoverable at the provider
+            self._set(message_id, DELIVERY_UNKNOWN, "reply_storage_resources")
             return False
         with self._sessions() as session:
             try:
@@ -469,6 +473,10 @@ class ArchitectService:
                 return True
             except (OperationalError, IntegrityError):
                 session.rollback()
+            except (DataError, MemoryError):  # the host/SQLite genuinely cannot hold this reply right now
+                session.rollback()
+                self._set(message_id, DELIVERY_UNKNOWN, "reply_storage_resources")
+                return False
         self._set(message_id, DELIVERY_UNKNOWN, "persist_failed")
         return False
 
@@ -480,7 +488,8 @@ class ArchitectService:
         with self._lock(pid, "turn"):
             with self._sessions() as session:
                 row = self._owned_delivery(session, pid, message_id)
-                if row.state not in (DELIVERY_UNKNOWN, DELIVERY_PENDING):
+                legacy = recoverable_failure(row)
+                if row.state not in (DELIVERY_UNKNOWN, DELIVERY_PENDING) and not legacy:
                     return delivery_view(row)
                 live = self._live(session, pid)
                 handle = self._handle(live) if live is not None else None
@@ -488,14 +497,19 @@ class ArchitectService:
                         or not self._probe_owned(live, handle)):
                     return delivery_view(row)  # cannot ask the provider: stays unknown (human recovery)
                 runtime_id, live_id = row.runtime_message_id, live.session_id
+            problem: str | None = None
             try:
                 found = self._runtime.lookup(handle, runtime_id)  # type: ignore[arg-type]
-            except RuntimeProblem:
-                found = None
+            except RuntimeProblem as exc:
+                found, problem = None, exc.code
             if found is not None and found.status == "reply" and found.text:
                 self._commit_reply(actor, pid, message_id, live_id, found.text)
+            elif legacy:
+                pass  # a historical failed row is never rewritten unless its reply is actually recovered
             elif found is not None and found.status == "absent":
                 self._set(message_id, DELIVERY_FAILED, "not_received")
+            elif problem in RECOVERABLE_RETRIEVAL_CODES:
+                self._set(message_id, DELIVERY_UNKNOWN, problem)  # actionable, non-secret reason; no re-send
             with self._sessions() as session:
                 return delivery_view(session.get(ConversationDelivery, message_id))
 

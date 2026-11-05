@@ -81,11 +81,12 @@ SECRETS_DIRNAME = ".secrets"
 _SESSION_ID = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$")
 START_TIMEOUT = 25.0
 REQUEST_TIMEOUT = 15.0
-MAX_RESPONSE_BYTES = 4_000_000
+MAX_RESPONSE_BYTES = 4_000_000  # control calls and ordinary 200-message lookup pages only; never a reply-size limit
 LOOKUP_PAGE_SIZE = 200
+SINGLE_MESSAGE_PAGE = 1  # fallback page size: one message at a time, so a huge reply never drags unrelated ones along
+READ_CHUNK_BYTES = 1 << 20
 MAX_LOOKUP_PAGES = 25
 MAX_LOOKUP_MESSAGES = 5_000
-MAX_REPLY_CHARS = 4_000
 RUNTIME_AGENT = "plan"
 DENY_ALL = [{"action": "*", "resource": "*", "effect": "deny"}]
 RESTRICTED_ACTIONS = ("shell", "edit", "read", "webfetch", "subagent")
@@ -380,7 +381,10 @@ class OpenCodeRuntime:
 
     # -- HTTP ---------------------------------------------------------------------------------------------------
     def _call(self, session_id: str, port: int, method: str, path: str, body: object | None = None,
-              timeout: float = REQUEST_TIMEOUT) -> object:
+              timeout: float = REQUEST_TIMEOUT, max_bytes: int | None = MAX_RESPONSE_BYTES) -> object:
+        """``max_bytes=None`` reads one response of whatever size the server sends (only used for a single-message
+        page of a completed reply).  It is read in chunks; real exhaustion of memory surfaces as
+        ``RuntimeAmbiguous('reply_retrieval_resources')``, never as a completed or failed reply."""
         password = self._password(session_id)
         if password is None:
             raise RuntimeNotConfigured("runtime_secret_missing")
@@ -391,12 +395,17 @@ class OpenCodeRuntime:
             headers={"Authorization": f"Basic {token}", "Content-Type": "application/json"})
         try:
             with _OPENER.open(request, timeout=timeout) as response:
-                raw = response.read(MAX_RESPONSE_BYTES + 1)
+                if max_bytes is None:
+                    raw = self._read_all(response)
+                else:
+                    raw = response.read(max_bytes + 1)
         except urllib.error.HTTPError as exc:
             exc.read(1024)
             if 300 <= exc.code < 400:  # never followed; the body and Location are neither read further nor reported
                 raise RuntimeRefused("redirect_refused") from None
             raise RuntimeRefused(f"http_{exc.code}") from None
+        except MemoryError:
+            raise RuntimeAmbiguous("reply_retrieval_resources") from None
         except (TimeoutError, socket.timeout):
             raise RuntimeAmbiguous("timeout") from None
         except urllib.error.URLError as exc:
@@ -405,7 +414,7 @@ class OpenCodeRuntime:
             raise RuntimeUnavailable("connection_failed") from None
         except OSError:
             raise RuntimeAmbiguous("connection_lost") from None
-        if len(raw) > MAX_RESPONSE_BYTES:
+        if max_bytes is not None and len(raw) > max_bytes:
             raise RuntimeRefused("response_too_large")
         if not raw:
             return None
@@ -413,6 +422,17 @@ class OpenCodeRuntime:
             return json.loads(raw)
         except ValueError:
             raise RuntimeRefused("malformed_response") from None
+        except MemoryError:
+            raise RuntimeAmbiguous("reply_retrieval_resources") from None
+
+    @staticmethod
+    def _read_all(response) -> bytes:
+        chunks = bytearray()
+        while True:
+            chunk = response.read(READ_CHUNK_BYTES)
+            if not chunk:
+                return bytes(chunks)
+            chunks += chunk
 
     @staticmethod
     def _data(payload: object) -> object:
@@ -540,6 +560,24 @@ class OpenCodeRuntime:
         return isinstance(found, dict) and found.get("id") == handle.runtime_session_id
 
     # -- conversation ---------------------------------------------------------------------------------------------
+    def _page(self, handle: RuntimeHandle, query: str, max_bytes: int | None = MAX_RESPONSE_BYTES) -> object:
+        return self._call(handle.rosc_session_id, handle.port, "GET",
+                          f"/api/session/{handle.runtime_session_id}/message?{query}", max_bytes=max_bytes)
+
+    def _single_message_page(self, handle: RuntimeHandle, cursor: str | None) -> object:
+        """Re-read the cursor that exceeded the control cap as a one-message page, without a byte cap: the message
+        may be a complete reply of any size the provider produced.  Memory is bounded by that one message, not by a
+        batch of unrelated ones; there is deliberately no fixed reply-size ceiling here.  A transport failure is
+        ``RuntimeAmbiguous`` (recoverable by reconciling), never a verdict on the reply."""
+        params = {"order": "asc", "limit": SINGLE_MESSAGE_PAGE} if cursor is None else {
+            "cursor": cursor, "limit": SINGLE_MESSAGE_PAGE}
+        try:
+            return self._page(handle, urllib.parse.urlencode(params), max_bytes=None)
+        except RuntimeRefused as exc:
+            if exc.code.startswith("http_"):
+                raise RuntimeAmbiguous("lookup_failed") from None
+            raise
+
     def ask(self, handle: RuntimeHandle, runtime_message_id: str, text: str, timeout: float) -> str:
         sid = handle.runtime_session_id
         self._call(handle.rosc_session_id, handle.port, "POST", f"/api/session/{sid}/prompt",
@@ -561,18 +599,25 @@ class OpenCodeRuntime:
         cursors: set[str] = set()
         seen = False
         count = 0
-        for _ in range(MAX_LOOKUP_PAGES):
+        pages = 0
+        while pages < MAX_LOOKUP_PAGES:
+            pages += 1
             if cursor is None:
                 query = urllib.parse.urlencode({"order": "asc", "limit": LOOKUP_PAGE_SIZE})
             else:
                 query = urllib.parse.urlencode({"cursor": cursor, "limit": LOOKUP_PAGE_SIZE})
             try:
-                payload = self._call(handle.rosc_session_id, handle.port, "GET",
-                                     f"/api/session/{handle.runtime_session_id}/message?{query}")
+                payload = self._page(handle, query)
             except RuntimeRefused as exc:
-                if exc.code.startswith("http_"):
+                if exc.code == "response_too_large":
+                    # A page of 200 messages exceeded the control-call cap.  That is a transport property, not a
+                    # verdict on any reply: fetch this same cursor again one message at a time, each read in full.
+                    payload = self._single_message_page(handle, cursor)
+                    pages -= 1  # a scan-length bound, not a reply bound: fallback pages do not consume it
+                elif exc.code.startswith("http_"):
                     raise RuntimeAmbiguous("lookup_failed") from None
-                raise
+                else:
+                    raise
             if not isinstance(payload, dict) or not isinstance(payload.get("data"), list):
                 raise RuntimeRefused("malformed_response")
             page_cursor = payload.get("cursor")
@@ -608,8 +653,6 @@ class OpenCodeRuntime:
                     text = "\n".join(part for part in parts if part).strip()
                     if not text:
                         raise RuntimeRefused("empty_reply")
-                    if len(text) > MAX_REPLY_CHARS:
-                        raise RuntimeRefused("reply_too_large")
                     return ReplyLookup("reply", text)
             next_cursor = page_cursor.get("next")
             if next_cursor is None:

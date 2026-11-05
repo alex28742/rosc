@@ -512,7 +512,7 @@ class AuthorizationTests(ProvenanceCase):
 class MigrationTests(ProvenanceCase):
     def test_single_head_and_fresh_schema(self) -> None:
         from alembic.script import ScriptDirectory
-        self.assertEqual(ScriptDirectory.from_config(self.alembic).get_heads(), ["0006_architect_runtime_sessions"])
+        self.assertEqual(ScriptDirectory.from_config(self.alembic).get_heads(), ["0007_architect_reply_unbounded_body"])
         names = {r[0] for r in self.fetch("SELECT name FROM sqlite_master WHERE type='table'")}
         self.assertTrue(set(OWNED_TABLES) <= names)
         with sqlite3.connect(self.data / "rosc.db") as connection:

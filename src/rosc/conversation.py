@@ -41,6 +41,7 @@ MIN_CLIENT_KEY = 8
 _CLIENT_KEY = re.compile(r"[A-Za-z0-9._:-]{%d,%d}" % (MIN_CLIENT_KEY, MAX_CLIENT_KEY), re.ASCII)
 # Text may contain newlines and tabs; other C0 controls and DEL are refused instead of being persisted.
 _CONTROL = re.compile(r"[\x00-\x08\x0b-\x1f\x7f]")
+_UNSTORABLE = re.compile(r"[\x00-\x08\x0b-\x1f\x7f\ud800-\udfff]")  # Architect replies: replaced, not rejected
 
 
 class ConversationError(Exception):
@@ -118,6 +119,22 @@ def _body(value: object) -> str:
     return text
 
 
+def _architect_body(value: object) -> str:
+    """Normalize a COMPLETED Architect reply for storage.  There is deliberately NO length limit: the reply was already
+    generated (and paid for) and is stored exactly as produced; only the real resources of the host, SQLite and the
+    provider bound it.  Owner input keeps its own 4000-character rule in ``_body``.
+
+    Only representation is normalized: CRLF/CR become LF, and characters that cannot be stored or shown as plain text
+    (C0 controls other than tab/newline, DEL, NUL, unpaired surrogates) become U+FFFD instead of discarding the whole
+    reply.  Never echoes the content in an error."""
+    if not isinstance(value, str):
+        raise InvalidConversationInput("Message body must be text")
+    text = value.replace("\r\n", "\n").replace("\r", "\n").strip()
+    if not text:
+        raise InvalidConversationInput("Message body must not be blank")
+    return _UNSTORABLE.sub("\ufffd", text)
+
+
 def participant_view(participant: ConversationParticipant) -> dict:
     """Public participant identity. A participant is attribution history, not liveness or authority."""
     display_name = {PARTICIPANT_OWNER: "Owner", PARTICIPANT_ARCHITECT: "Architect",
@@ -143,6 +160,14 @@ def conversation_view(conversation: Conversation) -> dict:
     }
 
 
+LEGACY_REPLY_TOO_LARGE = "reply_too_large"  # P015-P017.2 stored a generated, unlimited-length reply as ``failed``
+
+
+def recoverable_failure(row: ConversationDelivery) -> bool:
+    """A historical delivery that failed only because the (already generated) reply exceeded the old 4000 cap."""
+    return row.state == "failed" and row.error_code == LEGACY_REPLY_TOO_LARGE and row.reply_message_id is None
+
+
 def delivery_state_view(row: ConversationDelivery | None) -> dict:
     """Delivery of one Owner message. No row means only stored: nothing was ever sent (see P015 / M3-B)."""
     if row is None:
@@ -150,7 +175,7 @@ def delivery_state_view(row: ConversationDelivery | None) -> dict:
                 "can_reconcile": False}
     return {"state": row.state, "error_code": row.error_code, "reply_message_id": row.reply_message_id,
             "can_retry": row.state == "failed" and row.error_code in SAFE_RETRY_CODES,
-            "can_reconcile": row.state in ("unknown", "pending")}
+            "can_reconcile": row.state in ("unknown", "pending") or recoverable_failure(row)}
 
 
 def message_view(message: ConversationMessage, sender: ConversationParticipant,

@@ -354,10 +354,10 @@ class DeliveryTests(ArchitectCase):
         sent = self.send(key="key-00000200").json()["message"]
         self.architect.drain()
         self.assertEqual(self.delivery(sent["message_id"])["error_code"], "malformed_reply")
-        self.runtime.reply = "x" * 4001
+        self.runtime.reply = "x" * 4001  # P018: no application-level reply cap; a long reply is stored, not refused
         sent = self.send(key="key-00000201").json()["message"]
         self.architect.drain()
-        self.assertEqual(self.delivery(sent["message_id"])["error_code"], "malformed_reply")
+        self.assertEqual(self.delivery(sent["message_id"])["state"], "delivered")
 
     def test_ambiguous_attempt_is_never_auto_resent_and_reconcile_persists_a_seen_reply(self) -> None:
         self.activate()
