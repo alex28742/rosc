@@ -672,6 +672,28 @@ class PrivateDataRootTests(ContextCase):
         self.assertEqual(outcome["error"]["code"], "root_unavailable")
         self.assertNotIn(MARK_SRC, json.dumps(outcome))
 
+    def test_a_checkout_inside_the_private_root_is_refused_but_siblings_and_prefix_lookalikes_are_not(self) -> None:
+        a = self.roots["a"]
+        inside = pc.ProjectContextBroker(self.sessions, self.data / "workspace", self.lib, private_roots=(a.parent,))
+        outcome = inside.call(self.session_id, "source_read", {"path": "README.md"})
+        self.assertEqual(outcome["error"]["code"], "root_unavailable")
+        self.assertNotIn(MARK_SRC, json.dumps(outcome))
+        for tool, args in (("source_list", {}), ("source_search", {"query": "entry"}), ("source_git", {})):
+            self.assertEqual(inside.call(self.session_id, tool, args)["error"]["code"], "root_unavailable", tool)
+        # an unrelated private root, and one whose NAME merely starts with the checkout's name, do not block it
+        lookalike = a.parent / (a.name + "-private")
+        for private in (self.base / "elsewhere", lookalike):
+            other = pc.ProjectContextBroker(self.sessions, self.data / "workspace", self.lib, private_roots=(private,))
+            self.assertIn(MARK_SRC, other.call(self.session_id, "source_read", {"path": "README.md"})["result"]["content"])
+
+    def test_registering_the_rosc_repository_itself_stays_possible_and_readable(self) -> None:
+        repo = Path(__file__).resolve().parents[1]
+        outside = pc.ProjectContextBroker(self.sessions, self.data / "workspace", self.lib, private_roots=(self.data,))
+        # a source root that is a checkout whose private data lives elsewhere (the usual ROSC layout) is unaffected
+        self.assertTrue(outside.call(self.session_id, "source_list", {})["ok"])
+        created = self.register(repo, mode="existing", name="ROSC itself")
+        self.assertEqual(created.status_code, 201, created.text)
+
     def test_git_facts_do_not_name_private_paths(self) -> None:
         if not HAVE_GIT:
             self.skipTest("git unavailable")

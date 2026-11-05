@@ -619,13 +619,14 @@ class ProjectContextBroker:
             raise ToolError("root_binding_changed", "The Project Root Binding changed; reactivate the Architect")
         if not os.path.isabs(binding.root_path):
             raise ToolError("root_unavailable", "The bound root is not available")
-        real = os.path.realpath(binding.root_path)
+        real = Path(os.path.realpath(binding.root_path))
         excluded: list[tuple[str, ...]] = []
-        for private in self._private_roots:
-            if private == real:
-                raise ToolError("root_unavailable", "The bound root is ROSC's own private data location")
-            if private.startswith(real + os.sep):
-                excluded.append(tuple(Path(private).relative_to(real).parts))
+        for private in map(Path, self._private_roots):
+            if real == private or private in real.parents:
+                # the checkout IS ROSC's private data or lies inside it: nothing there is source
+                raise ToolError("root_unavailable", "The bound root is inside ROSC's own private data location")
+            if real in private.parents:
+                excluded.append(private.relative_to(real).parts)
         return binding.root_path, binding.version, tuple(excluded)
 
     @staticmethod
