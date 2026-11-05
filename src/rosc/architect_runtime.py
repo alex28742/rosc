@@ -17,7 +17,19 @@ Projects.  So a restarted backend can still probe an owned child that survived, 
 links) and deleted only after termination of that child is confirmed.  A missing, foreign-owned, group/world-accessible or
 malformed file means "no credential": probes answer False (the persisted ``starting`` blocker stays), ``ask``/``lookup``
 refuse, and ``stop`` still works because it relies on /proc identity, not on the password.  This is a local-only
-credential for a loopback server; it is not the OpenCode Go / provider credential, which ROSC does not handle at all.
+credential for a loopback server; it is not the OpenCode Go / provider credential.
+
+Provider credential (P017.2): OpenCode 2.2.5 keeps interactive ``auth login`` credentials in the same SQLite database
+as its sessions (``<XDG_DATA_HOME>/opencode/opencode.db``; ``OPENCODE_DB`` only relocates that whole database), the
+legacy ``auth.json`` is NOT read, and there is no auth-only/read-only hook.  Pointing every Architect at one
+enrolled profile would therefore share one mutable session store across Projects, so ROSC never does that.  The only
+source-verified channel that carries a provider credential without a database is the ``OPENCODE_API_KEY`` environment
+variable (it makes the ``opencode-go`` provider available with source "environment").  The Owner opts in with
+``ROSC_OPENCODE_PROVIDER_KEY_FILE`` (absolute path of a private 0600 file holding only the key).  The file is
+inspected (metadata only) for configuration status and read solely inside ``start()`` - i.e. after the explicit Owner
+activation - then handed to that one child's environment, and only for provider ``opencode-go``.  It is never copied,
+stored, logged, sent to an API/UI, or inherited by another process; the ambient ``OPENCODE_API_KEY`` of ROSC's own
+environment is not inherited.  Each child still has its own empty ``data`` directory, so sessions never mix.
 * ``GET /api/info`` reports the server ``pid``; that is how ROSC proves the endpoint is the process it launched.
 * ``GET /api/model`` lists provider/model pairs; ``POST /api/session`` accepts ``agent``, ``model``, ``location`` and a
   ``permissions`` rule list; a deny-all rule is enforced by the server (``POST /api/session/{id}/permission`` returns
@@ -57,6 +69,11 @@ ENV_PASSWORD = "OPENCODE_PASSWORD"
 ENV_BINARY = "ROSC_OPENCODE_BIN"
 ENV_APPROVED_MODEL = "ROSC_OPENCODE_APPROVED_MODEL"  # "provider/model" the Owner approved for outbound content
 ENV_MARKER = "ROSC_ARCHITECT_OWNER"
+ENV_PROVIDER_KEY_FILE = "ROSC_OPENCODE_PROVIDER_KEY_FILE"  # opt-in: absolute path of a private file holding the key
+ENV_PROVIDER_KEY = "OPENCODE_API_KEY"  # child-only; the variable OpenCode 2.2.5 reads for the opencode-go provider
+PROVIDER_KEY_PROVIDER = "opencode-go"
+MAX_PROVIDER_KEY_FILE = 4096
+_PROVIDER_KEY = re.compile(r"^[\x21-\x7e]{8,512}$")  # one printable token, no whitespace/control characters
 ADAPTER_NAME = "opencode"
 MIN_PASSWORD = 16
 SECRET_BYTES = 32  # 256 bits from the OS CSPRNG
@@ -298,11 +315,67 @@ class OpenCodeRuntime:
             except OSError:
                 pass
 
+    # -- provider credential (opt-in, file based, child-environment only) ---------------------------------------------
+    def _provider_key_file_problem(self) -> tuple[str | None, Path | None]:
+        """Metadata-only check of the configured key file (never opens or reads it): ``(code, path)``."""
+        configured = self._environ.get(ENV_PROVIDER_KEY_FILE)
+        if not configured:
+            return "provider_key_not_configured", None
+        if not os.path.isabs(configured) or "\0" in configured or os.path.normpath(configured) != configured:
+            return "provider_key_unsafe", None
+        path = Path(configured)
+        try:
+            parent = os.lstat(path.parent)
+            info = os.lstat(path)
+        except FileNotFoundError:
+            return "provider_key_missing", None
+        except OSError:
+            return "provider_key_unsafe", None
+        uid = os.getuid()
+        if (not stat.S_ISDIR(parent.st_mode) or parent.st_uid != uid or parent.st_mode & 0o022
+                or not stat.S_ISREG(info.st_mode) or info.st_uid != uid or info.st_mode & 0o077
+                or info.st_nlink != 1 or os.path.realpath(path.parent) != str(path.parent)):
+            return "provider_key_unsafe", None
+        if not 0 < info.st_size <= MAX_PROVIDER_KEY_FILE:
+            return "provider_key_invalid", None
+        return None, path
+
+    def _read_provider_key(self) -> str:
+        """Read the key at activation time only.  Raises a non-secret code; the value is returned, never stored."""
+        problem, path = self._provider_key_file_problem()
+        if problem or path is None:
+            raise RuntimeNotConfigured(problem or "provider_key_unsafe")
+        fd: int | None = None
+        try:
+            fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+            info = os.fstat(fd)
+            if (not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid() or info.st_mode & 0o077
+                    or info.st_nlink != 1):
+                raise RuntimeNotConfigured("provider_key_unsafe")
+            raw = os.read(fd, MAX_PROVIDER_KEY_FILE + 1)
+        except OSError:
+            raise RuntimeNotConfigured("provider_key_unsafe") from None
+        finally:
+            if fd is not None:
+                try:
+                    os.close(fd)
+                except OSError:
+                    pass
+        try:
+            key = raw.decode("ascii").strip()
+        except UnicodeDecodeError:
+            raise RuntimeNotConfigured("provider_key_invalid") from None
+        if len(raw) > MAX_PROVIDER_KEY_FILE or not _PROVIDER_KEY.match(key):
+            raise RuntimeNotConfigured("provider_key_invalid")
+        return key
+
     def configuration_problem(self, provider_id: str, model_id: str) -> str | None:
         if self._binary() is None:
             return "runtime_binary_missing"
         if self._environ.get(ENV_APPROVED_MODEL) != f"{provider_id}/{model_id}":
             return "model_not_approved"
+        if provider_id == PROVIDER_KEY_PROVIDER:
+            return self._provider_key_file_problem()[0]
         return None
 
     # -- HTTP ---------------------------------------------------------------------------------------------------
@@ -351,6 +424,7 @@ class OpenCodeRuntime:
         if problem:
             raise RuntimeNotConfigured(problem)
         binary = self._binary()
+        provider_key = self._read_provider_key() if provider_id == PROVIDER_KEY_PROVIDER else None  # before any side effect
         workdir = self._root / session_id
         workdir.mkdir(parents=True, exist_ok=False, mode=0o700)  # empty: no repository is exposed
         self._root.chmod(0o700)
@@ -370,6 +444,9 @@ class OpenCodeRuntime:
                     "XDG_DATA_HOME": str(isolated["data"]), "XDG_CACHE_HOME": str(isolated["cache"]),
                     "XDG_STATE_HOME": str(isolated["state"]), "TMPDIR": str(isolated["tmp"])})
         env[ENV_PASSWORD] = secret  # child-local only; the ambient OPENCODE_PASSWORD is deliberately not inherited
+        if provider_key is not None:
+            env[ENV_PROVIDER_KEY] = provider_key  # this child only; ambient OPENCODE_API_KEY is never inherited
+            provider_key = None
         env[ENV_MARKER] = session_id
         try:
             child = subprocess.Popen([binary, "serve", "--hostname", "127.0.0.1", "--port", str(port)],  # type: ignore[list-item]

@@ -57,7 +57,10 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/api/info":
             return self._send({"version": "2.2.5", "pid": os.getpid(), "urls": []})
         if path == "/api/model":
-            return self._send({"data": [{"providerID": "prov", "id": "model-a"}]})
+            models = [{"providerID": "prov", "id": "model-a"}]
+            if os.environ.get("OPENCODE_API_KEY"):  # like the real 2.2.5: the env key makes opencode-go available
+                models.append({"providerID": "opencode-go", "id": "deepseek-v4.1-flash"})
+            return self._send({"data": models})
         if path == "/api/session/ses_fake":
             return self._send({"data": STATE["session"]})
         if path == "/api/session/ses_fake/message":
