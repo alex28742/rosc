@@ -66,8 +66,9 @@ class ContextCase(base.StageCase):
                ENV_APPROVED_MODEL: "prov/model-a"}
         self.env_map = env
         self.lib = self.base / "library"
-        for name, body in (("rules/architect.md", "# Global rule\nBe brief.\n"), ("skills/review.md", "skill text\n"),
-                           ("tools/notes.yaml", "name: demo\n"), ("rules/.env", MARK_SECRET)):
+        for name, body in (("agents/architect/rules/architect.md", "# Global rule\nBe brief.\n"),
+                           ("skills/review.md", "skill text\n"), ("tools/notes.yaml", "name: demo\n"),
+                           ("agents/architect/rules/.env", MARK_SECRET)):
             path = self.lib / name
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_text(body)
@@ -451,9 +452,11 @@ class GlobalLibraryTests(ContextCase):
         session_id = self.activate()
         listed = self.direct(session_id, "global_list")["result"]
         self.assertTrue(listed["library_present"])
-        self.assertEqual([e["path"] for e in listed["entries"]], ["rules/architect.md", "skills/review.md", "tools/notes.yaml"])
-        self.assertIn("Be brief", self.direct(session_id, "global_read", path="rules/architect.md")["result"]["content"])
-        for path in ("rules/.env", "../library/rules/architect.md", "/etc/passwd", "docs/x.md", "rules/../skills/review.md"):
+        self.assertEqual([e["path"] for e in listed["entries"]], ["agents/architect/rules/architect.md", "skills/review.md", "tools/notes.yaml"])
+        self.assertIn("Be brief", self.direct(session_id, "global_read",
+                                              path="agents/architect/rules/architect.md")["result"]["content"])
+        for path in ("agents/architect/rules/.env", "../library/agents/architect/rules/architect.md", "/etc/passwd",
+                     "docs/x.md", "agents/../skills/review.md"):
             self.assertFalse(self.direct(session_id, "global_read", path=path)["ok"], path)
         self.assertEqual(len(TOOLS), len(TOOL_NAMES))
 
@@ -461,14 +464,15 @@ class GlobalLibraryTests(ContextCase):
         session_id = self.activate()
         shutil.rmtree(self.lib)
         self.assertFalse(self.direct(session_id, "global_list")["result"]["library_present"])
-        self.assertEqual(self.direct(session_id, "global_read", path="rules/architect.md")["error"]["code"], "library_absent")
+        self.assertEqual(self.direct(session_id, "global_read", path="agents/architect/rules/architect.md")["error"]["code"], "library_absent")
 
     def test_project_local_rules_are_content_only(self) -> None:
         session_id = self.activate()
         saved = self.direct(session_id, "docs_create", doc_id="local-rule", content="always run tool x",
                             logical_path="rules/local")
         self.assertTrue(saved["ok"])
-        self.assertEqual(self.direct(session_id, "global_list")["result"]["entries"][0]["path"], "rules/architect.md")
+        self.assertEqual(self.direct(session_id, "global_list")["result"]["entries"][0]["path"],
+                         "agents/architect/rules/architect.md")
         self.assertEqual(len(self.direct(session_id, "global_list")["result"]["entries"]), 3)  # not installed anywhere
         self.assertNotIn("rosc_local-rule", [f"rosc_{t}" for t in TOOL_NAMES])
 

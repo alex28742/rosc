@@ -3,6 +3,7 @@ from __future__ import annotations
 import ipaddress
 import logging
 import re
+import threading
 import uuid
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
@@ -24,7 +25,7 @@ from .architect_runtime import ArchitectRuntime, OpenCodeRuntime
 from .architect_service import ArchitectService
 from .architect_tools import ToolHost
 from .project_context import ProjectContextBroker
-from .config import data_dir
+from .config import data_dir, global_library_dir, repo_private_paths
 from .conversation import (DEFAULT_PAGE_SIZE, ConversationConflict, ConversationDenied, ConversationError,
                            ConversationNotFound, ConversationStoreError, InvalidConversationInput,
                            ProjectConversationService, UnsafeProjectIdentity as UnsafeConversationIdentity)
@@ -214,7 +215,7 @@ class ConversationMessageInput(BaseModel):
 
 
 CONVERSATION_PATH = re.compile(r"^/api/projects/[^/]+/(conversation(/messages(/[^/]+/(reconcile|retry))?)?|architect/(activate|deactivate)|architect(/context-access)?)$")
-DEFAULT_GLOBAL_LIBRARY = Path(__file__).resolve().parents[2]  # rules/, skills/ and tools/ below it, once they exist
+DEFAULT_GLOBAL_LIBRARY = global_library_dir()  # <checkout>/global (Git-tracked); None for a non-editable install
 
 
 def sanitized_validation_response(exc: RequestValidationError) -> JSONResponse:
@@ -352,7 +353,7 @@ def create_app(db_path: Path | None = None, workspace_root: Path | None = None, 
     conversation = ProjectConversationService(sessions, policy)
     # The runtime is a Python-level composition seam like the policy: no request can select or configure it.
     context_broker = ProjectContextBroker(sessions, workspace_root, global_library_root or DEFAULT_GLOBAL_LIBRARY,
-                                        private_roots=(db_path.parent, db_path))
+                                        private_roots=(db_path.parent, db_path, *repo_private_paths()))
     tool_host = ToolHost(context_broker.call)  # loopback listener starts lazily, only at an Owner activation
     architect = ArchitectService(sessions, policy, architect_runtime or OpenCodeRuntime(db_path.parent),
                                  tools=tool_host, context=context_broker)
@@ -682,4 +683,18 @@ def create_app(db_path: Path | None = None, workspace_root: Path | None = None, 
     return app
 
 
-app = create_app()
+_default_app: FastAPI | None = None
+_default_app_lock = threading.Lock()
+
+
+def __getattr__(name: str) -> FastAPI:
+    """``uvicorn rosc.app:app`` still works, but the default application (which resolves and creates the data root) is
+    built on first attribute access, never as an import side effect: importing this module must not create a data
+    directory, least of all the repo-local default."""
+    global _default_app
+    if name != "app":
+        raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+    with _default_app_lock:
+        if _default_app is None:
+            _default_app = create_app()
+        return _default_app

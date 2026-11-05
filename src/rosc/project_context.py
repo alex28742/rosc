@@ -43,6 +43,7 @@ from pathlib import Path
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session, sessionmaker
 
+from .config import DEFAULT_DATA_DIRNAME, REPO_PRIVATE_DIRNAMES
 from .architect_store import (ArchitectDocumentStore, Document, DocumentExists, DocumentInfo, DocumentNotFound,
                               InvalidDocument, RevisionConflict, StoreDiagnostic, StoreError, UnsafeStore,
                               CommitUncertain, normalize_doc_id)
@@ -72,8 +73,12 @@ MAX_PATH_LENGTH = 512
 MAX_DEPTH = 32
 GIT_TIMEOUT = 10.0
 GIT_OUTPUT_LIMIT = 200_000
-GLOBAL_LIBRARY_DIRS = ("rules", "skills", "tools")
+# Top-level namespaces of the Git-tracked ``global/`` library (see global/README.md).  Anything else beside them
+# (README, scratch files, unknown directories) is neither listed nor readable.
+GLOBAL_LIBRARY_DIRS = ("principles", "agents", "skills", "tools")
 GLOBAL_SUFFIXES = (".md", ".txt", ".yaml", ".yml", ".json")
+MAX_GLOBAL_DEPTH = 8          # directory levels below ``global/``
+MAX_GLOBAL_SCAN = 2_000       # directory entries examined by one listing
 
 # Well-known secret stores and VCS internals; matched against every path component.
 _SECRET_NAME = re.compile(
@@ -413,38 +418,86 @@ class ProjectContextBroker:
         return str(root) if root is not None and root.is_dir() else None
 
     def tool_global_list(self, session: Session, caller: Caller, args: dict) -> dict:
+        """Bounded, read-only hierarchical listing of definition files below ``global/`` (optionally below ``path``).
+
+        Lists regular files of approved types only; symlinks, secret-named entries, VCS internals, oversized files and
+        unknown top-level entries are skipped (counted, never named).  This is documentation discovery, not a grant:
+        nothing listed becomes an invocable tool or an automatically loaded rule."""
         self._require(caller, CAP_CONTEXT_READ)
         root = self._global()
-        entries: list[dict] = []
+        base = _clean_relative(args.get("path"), allow_empty=True)
+        if base and base[0] not in GLOBAL_LIBRARY_DIRS:
+            raise ToolError("path_excluded", "Only principles/, agents/, skills/ and tools/ are listed")
+        offset = _bounded_int(args.get("offset"), 0, 0, 10 ** 9)
+        limit = _bounded_int(args.get("limit"), 100, 1, MAX_LIST)
+        files: list[dict] = []
+        stats = {"entries_scanned": 0, "skipped_unsafe": 0, "skipped_oversized": 0, "skipped_too_deep": 0}
+        stopped: str | None = None
         if root is not None:
             root_fd = _open_dir(root)
             try:
-                for kind in GLOBAL_LIBRARY_DIRS:
-                    try:
-                        directory = _walk_dir(root_fd, [kind])
-                    except ToolError:
-                        continue
-                    try:
-                        for entry in sorted(os.scandir(directory), key=lambda e: e.name):
-                            if entry.is_file(follow_symlinks=False) and entry.name.lower().endswith(GLOBAL_SUFFIXES) \
-                                    and not _SECRET_NAME.match(entry.name):
-                                entries.append({"path": f"{kind}/{entry.name}",
-                                                "size": entry.stat(follow_symlinks=False).st_size})
-                    finally:
-                        os.close(directory)
-            finally:
+                start = _walk_dir(root_fd, base)
+            except BaseException:
                 os.close(root_fd)
+                raise
+            os.close(root_fd)
+            try:
+                stopped = self._global_walk(start, list(base), files, stats)
+            finally:
+                os.close(start)
+        page = files[offset:offset + limit]
         return {"kind": "global_definitions", "library_present": root is not None, "access": "read_only",
-                "entries": entries[:MAX_LIST], "complete": len(entries) <= MAX_LIST, "fetched_at": _iso()}
+                "path": "/".join(base), "entries": page, "total": len(files),
+                "next_offset": offset + len(page) if offset + len(page) < len(files) else None,
+                "complete": stopped is None, "stopped_reason": stopped, "coverage": stats, "fetched_at": _iso()}
+
+    def _global_walk(self, directory: int, parts: list[str], files: list[dict], stats: dict[str, int]) -> str | None:
+        """Depth-first, name-sorted walk; returns a stop reason when the scan budget ran out.  Owns no fds."""
+        for entry in sorted(os.scandir(directory), key=lambda e: e.name):
+            stats["entries_scanned"] += 1
+            if stats["entries_scanned"] > MAX_GLOBAL_SCAN:
+                return "scan_limit"
+            if not parts and entry.name not in GLOBAL_LIBRARY_DIRS:
+                continue
+            if entry.name.lower() == ".git" or _SECRET_NAME.match(entry.name):
+                continue
+            if entry.is_symlink():
+                stats["skipped_unsafe"] += 1
+                continue
+            rel = "/".join([*parts, entry.name])
+            if entry.is_dir(follow_symlinks=False):
+                if len(parts) + 1 >= MAX_GLOBAL_DEPTH:
+                    stats["skipped_too_deep"] += 1
+                    continue
+                try:
+                    child = os.open(entry.name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC,
+                                    dir_fd=directory)
+                except OSError:
+                    stats["skipped_unsafe"] += 1
+                    continue
+                try:
+                    reason = self._global_walk(child, [*parts, entry.name], files, stats)
+                finally:
+                    os.close(child)
+                if reason:
+                    return reason
+            elif entry.is_file(follow_symlinks=False) and entry.name.lower().endswith(GLOBAL_SUFFIXES):
+                size = entry.stat(follow_symlinks=False).st_size
+                if size > MAX_SOURCE_FILE_BYTES:
+                    stats["skipped_oversized"] += 1
+                    continue
+                files.append({"path": rel, "size": size})
+        return None
 
     def tool_global_read(self, session: Session, caller: Caller, args: dict) -> dict:
         self._require(caller, CAP_CONTEXT_READ)
         root = self._global()
         if root is None:
-            raise ToolError("library_absent", "The global rules/skills/tools library does not exist yet")
+            raise ToolError("library_absent", "The global definition library does not exist yet")
         parts = _clean_relative(args.get("path"), allow_empty=False)
         if parts[0] not in GLOBAL_LIBRARY_DIRS or not parts[-1].lower().endswith(GLOBAL_SUFFIXES):
-            raise ToolError("path_excluded", "Only rules/, skills/ and tools/ definition files are readable")
+            raise ToolError("path_excluded", "Only definition files below principles/, agents/, skills/ and tools/ "
+                                             "are readable")
         root_fd = _open_dir(root)
         try:
             text, data, info = _read_text_file(root_fd, parts, MAX_SOURCE_FILE_BYTES)
@@ -452,8 +505,8 @@ class ProjectContextBroker:
             os.close(root_fd)
         return {"kind": "global_definition", "access": "read_only", "path": "/".join(parts),
                 "sha256": hashlib.sha256(data).hexdigest(), "fetched_at": _iso(),
-                "note": "Definition text only; it is documentation, not an invocable tool.", **_slice(
-                    text, args.get("offset"), args.get("max_chars"))}
+                "note": "Definition text only; it is documentation, not an invocable tool and not an instruction "
+                        "to load automatically.", **_slice(text, args.get("offset"), args.get("max_chars"))}
 
     # -- ROSC-private Project documents -------------------------------------------------------------------------------
     @staticmethod
@@ -627,6 +680,13 @@ class ProjectContextBroker:
                 raise ToolError("root_unavailable", "The bound root is inside ROSC's own private data location")
             if real in private.parents:
                 excluded.append(private.relative_to(real).parts)
+        if _is_rosc_checkout(real):
+            # A bound root that VERIFIES as a ROSC source checkout keeps its developer-private folders (and the
+            # repo-local default data root) out of SourceRead even when this process runs against another data root.
+            # Scoped to such checkouts only: other Projects' ``data``/``stail`` folders are ordinary source.
+            for name in (*REPO_PRIVATE_DIRNAMES, DEFAULT_DATA_DIRNAME):
+                if (name,) not in excluded:
+                    excluded.append((name,))
         return binding.root_path, binding.version, tuple(excluded)
 
     @staticmethod
@@ -840,6 +900,23 @@ class ProjectContextBroker:
             return False
 
 
+_ROSC_PYPROJECT_NAME = re.compile(r'^name\s*=\s*"rosc"\s*$', re.MULTILINE)
+
+
+def _is_rosc_checkout(real: Path) -> bool:
+    """True only for a directory that is a ROSC source checkout: ``pyproject.toml`` named ``rosc`` plus
+    ``src/rosc/config.py`` as regular files (not symlinks).  A name alone never qualifies."""
+    try:
+        marker, config = real / "pyproject.toml", real / "src" / "rosc" / "config.py"
+        if marker.is_symlink() or config.is_symlink() or not marker.is_file() or not config.is_file():
+            return False
+        with open(marker, "rb") as handle:
+            head = handle.read(65_536).decode("utf-8", "replace")
+    except OSError:
+        return False
+    return bool(_ROSC_PYPROJECT_NAME.search(head))
+
+
 def _read_text_file_fd(directory_fd: int, name: str, limit: int) -> str:
     try:
         fd = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC, dir_fd=directory_fd)
@@ -854,7 +931,7 @@ def _read_text_file_fd(directory_fd: int, name: str, limit: int) -> str:
 
 
 ACCESS_MATRIX = [
-    {"resource": "global rules/skills/tools", "operations": "list, read", "mode": "read_only"},
+    {"resource": "global definitions (principles, agents, skills, tools)", "operations": "list, read", "mode": "read_only"},
     {"resource": "this Project's ROSC-private documents", "operations": "list, search, read, create, update, delete (recoverable)",
      "mode": "read_write"},
     {"resource": "other registered Projects' ROSC-private documents", "operations": "list, search, read", "mode": "read_only"},

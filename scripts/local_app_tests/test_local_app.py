@@ -84,7 +84,7 @@ class ConfigTests(Base):
     def test_data_dir_follows_config_rule_without_creating(self):
         target = self.root / "nope"
         self.assertEqual(la.resolve_data_dir({"ROSC_DATA_DIR": str(target)}), target.resolve())
-        self.assertEqual(la.resolve_data_dir({}), (Path.home() / ".local/share/rosc").resolve())
+        self.assertEqual(la.resolve_data_dir({}, self.root), (self.root / "data").resolve())  # repo-local default
         self.assertFalse(target.exists())
 
     def test_commands_are_loopback_strict_and_secret_free(self):
@@ -122,7 +122,7 @@ class DatabaseTests(Base):
         conn.commit()
         conn.close()
         la.check_database(self.cfg)  # at head: no error
-        self.assertEqual(la.alembic_head(la.ROOT), "0006_architect_runtime_sessions")  # was a stale 0003 pin before P015
+        self.assertEqual(la.alembic_head(la.ROOT), "0008_project_context_access")  # pinned head; was stale (0006) before P020
         self.assertEqual([p.name for p in self.cfg.data_dir.iterdir()], ["rosc.db"])
         self.assertNotEqual(before[0], b"")
 

@@ -7,5 +7,6 @@ Files under `docs/` hold stable, general repository-work rules for development a
 1. [`docs/development_workflow.md`](development_workflow.md) for repository changes and managed runs.
 2. For prompt/report transport or telemetry, [`docs/agent_reporting.md`](agent_reporting.md).
 3. The relevant source, tests and migrations for the area being changed.
+4. Only when planning or performing a data-root move: [`docs/runbooks/data-root-cutover.md`](runbooks/data-root-cutover.md) (an unexecuted proposal, not an authorization).
 
 Read triggered dependencies only. Search is not a substitute for the routing document. Keep `contract`, `decision`, `proposal`, `implemented`, and `verified` distinct. If a managed prompt conflicts with local instructions or code, identify the conflict and ask for an Owner decision.

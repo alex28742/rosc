@@ -4,6 +4,8 @@ __pycache__/
 .pytest_cache/
 .local-data/
 .local-dev/
+/data/
+/stail/
 *.db
 *.db-shm
 *.db-wal

@@ -57,10 +57,12 @@ class LauncherError(Exception):
 
 # --------------------------------------------------------------------------------------------- configuration
 
-def resolve_data_dir(environ: dict[str, str] | None = None) -> Path:
-    """Same rule as ``rosc.config.data_dir`` but WITHOUT its mkdir side effect."""
+def resolve_data_dir(environ: dict[str, str] | None = None, root: Path = ROOT) -> Path:
+    """Same rule as ``rosc.config.resolve_data_dir`` (pinned by a parity test) and, like it, WITHOUT any mkdir:
+    a non-empty ``ROSC_DATA_DIR`` wins, else ``<checkout>/data``. The launcher always runs from a checkout."""
     env = os.environ if environ is None else environ
-    return Path(env.get("ROSC_DATA_DIR", "~/.local/share/rosc")).expanduser().resolve()
+    explicit = (env.get("ROSC_DATA_DIR") or "").strip()
+    return (Path(explicit).expanduser() if explicit else Path(root) / "data").resolve()
 
 
 @dataclass
@@ -767,7 +769,7 @@ def _configure_up(p: argparse.ArgumentParser) -> None:
                    help=f"Vite port (default {DEFAULT_FRONTEND_PORT}; only {' or '.join(map(str, ALLOWED_FRONTEND_PORTS))} "
                         f"are accepted by the backend Origin allowlist)")
     p.epilog = ("Starts BOTH the backend and the Vite frontend. Uses the existing database in ROSC_DATA_DIR "
-                "(default ~/.local/share/rosc); never creates or migrates it.")
+                "(default <checkout>/data); never creates or migrates it.")
 
 
 def _configure_logs(p: argparse.ArgumentParser) -> None:
@@ -866,11 +868,11 @@ def build_config(args: argparse.Namespace, environ: dict[str, str], root: Path) 
     backend_raw = getattr(args, "backend_port", None) or environ.get("ROSC_BACKEND_PORT")
     frontend_raw = getattr(args, "frontend_port", None) or environ.get("ROSC_FRONTEND_PORT")
     return Config(
-        root=root, data_dir=resolve_data_dir(environ),
+        root=root, data_dir=resolve_data_dir(environ, root),
         backend_port=parse_port(backend_raw, "backend port") if backend_raw else DEFAULT_BACKEND_PORT,
         frontend_port=parse_port(frontend_raw, "frontend port") if frontend_raw else DEFAULT_FRONTEND_PORT,
         backend_explicit=bool(backend_raw), frontend_explicit=bool(frontend_raw),
-        data_dir_explicit="ROSC_DATA_DIR" in environ)
+        data_dir_explicit=bool((environ.get("ROSC_DATA_DIR") or "").strip()))
 
 
 def main(argv: list[str] | None = None, *, root: Path = ROOT, environ: dict[str, str] | None = None) -> int:

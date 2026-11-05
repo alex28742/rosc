@@ -28,6 +28,10 @@ Run `make agent-sync-check` and `make read-path-check` for offline verification.
 
 Requirements: Python 3.11+, Node.js 24+, npm. Use a disposable data directory while testing.
 
+**Data root.** ROSC's private runtime data lives in one directory: `ROSC_DATA_DIR` if set (non-empty), otherwise `<source checkout>/data/` (git-ignored; derived from the checkout's location, no user path embedded). Layout: `rosc.db`, `workspace/`, `architect-runtime/`, optional `backups/`. **The repo-local default is a code default only: `data/` is not operational until the separately approved Stage 2 cutover**, and an existing installation that stores its data elsewhere must keep exporting `ROSC_DATA_DIR` (or keep running its launcher-recorded pair) until then; moving data is a manual, backed-up procedure, see `docs/runbooks/data-root-cutover.md` (unexecuted proposal). A non-editable (installed) package has no checkout, so there `ROSC_DATA_DIR` is mandatory. Always use an explicit disposable `ROSC_DATA_DIR` for tests and experiments (the test suites do). Importing `rosc.app` never creates a data directory; the default `app` object is built on first access (`uvicorn rosc.app:app`).
+
+**Global definitions.** `global/` (Git-tracked) is the canonical home of future global principles, Architect/Worker rules, skills and tool definitions (`global/README.md` states what exists: only a scaffold). The Architect's read-only `rosc_global_list` / `rosc_global_read` Tools list and read definition files below `principles/`, `agents/`, `skills/`, `tools/`; this grants no tool or right and loads no rule automatically. When the ROSC checkout itself is a registered Project, SourceRead never serves the configured data root, `.local-dev/`, `.local-data/`, `stail/` or `.agent-telemetry/` of that checkout (`.gitignore` is not a boundary).
+
 ```bash
 python -m venv .venv
 . .venv/bin/activate
@@ -66,7 +70,7 @@ local-app help up             # same as: local-app up --help
 
 Make shortcuts remain: `make local-up`, `local-down`, `local-status`, `local-logs`, `local-app-check`; pass options with `ARGS=`, e.g. `make local-up ARGS="-p 8050"`.
 
-The launcher uses the same data directory rule as the backend: `ROSC_DATA_DIR`, else `~/.local/share/rosc` (the database is `<dir>/rosc.db`). It prints the resolved path before starting and never silently substitutes another. If the database is missing or not at head it refuses and prints the command to run yourself, e.g. `ROSC_DATA_DIR=<dir> .venv/bin/alembic upgrade head` (back up first). It only reads the schema version read-only.
+The launcher uses the same data directory rule as the backend: `ROSC_DATA_DIR`, else `<checkout>/data` (the database is `<dir>/rosc.db`; the previous default `~/.local/share/rosc` is no longer implied: a pair that was started with it keeps it, because `status`/`down` and idempotent `up` use the recorded path, but a fresh `up` without `ROSC_DATA_DIR` now looks at `<checkout>/data` and refuses if it is missing). It prints the resolved path before starting and never silently substitutes another. If the database is missing or not at head it refuses and prints the command to run yourself, e.g. `ROSC_DATA_DIR=<dir> .venv/bin/alembic upgrade head` (back up first). It only reads the schema version read-only.
 
 Exit codes: `0` success/RUNNING, `1` failure, `2` usage, `3` STOPPED, `4` DEGRADED, `5` UNKNOWN. `up` is idempotent: a healthy managed pair is reported, not restarted, and a plain `local-app up` accepts a pair that was started with `-p 8050`. An explicit different port or data dir while a pair is running is refused without changing anything (run `down` first). `status` and `down` always use the ports and data dir recorded when the pair was started, not the current shell's defaults.
 

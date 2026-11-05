@@ -40,8 +40,11 @@ def _schema(properties: dict, required: list[str] | None = None) -> dict:
 TOOLS: list[dict] = [
     {"name": "briefing", "description": "Current Project briefing: identity, bound source route, document references and "
      "the access matrix. Start here.", "inputSchema": _schema({})},
-    {"name": "global_list", "description": "List the read-only global rules/skills/tools definition library.",
-     "inputSchema": _schema({})},
+    {"name": "global_list", "description": "List definition files of the read-only global library "
+     "(principles/, agents/, skills/, tools/), recursively; optional path narrows to a sub-directory. Listing grants "
+     "nothing: definitions are documentation, not tools or automatically loaded rules.",
+     "inputSchema": _schema({"path": {"type": "string"}, "offset": {"type": "integer", "minimum": 0},
+                             "limit": {"type": "integer", "minimum": 1}})},
     {"name": "global_read", "description": "Read one global definition file (read-only documentation).",
      "inputSchema": _schema({"path": {"type": "string"}, **_PAGING}, ["path"])},
     {"name": "docs_list", "description": "List ROSC-private documents of the current Project (read/write) or of another "
