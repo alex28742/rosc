@@ -74,6 +74,17 @@ DENY_ALL = [{"action": "*", "resource": "*", "effect": "deny"}]
 RESTRICTED_ACTIONS = ("shell", "edit", "read", "webfetch", "subagent")
 
 
+class _NoRedirect(urllib.request.HTTPRedirectHandler):
+    """Never follow a redirect: the request carries the local server credential, so a 3xx must not move it anywhere."""
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):  # noqa: D401
+        return None  # the 3xx then surfaces as an HTTPError and is refused by ``_call``
+
+
+# No environment proxy either (the credential must go to the loopback server only); no redirect following.
+_OPENER = urllib.request.build_opener(urllib.request.ProxyHandler({}), _NoRedirect)
+
+
 class RuntimeProblem(Exception):
     """Base class. ``code`` is a short machine-readable, non-secret reason."""
 
@@ -207,6 +218,8 @@ class OpenCodeRuntime:
         path = self._secret_path(session_id)
         if path is None:
             raise RuntimeUnavailable("secret_provisioning_failed")
+        fd: int | None = None
+        created: tuple[int, int] | None = None  # (st_dev, st_ino) of the file THIS attempt exclusively created
         try:
             secret = secrets.token_urlsafe(SECRET_BYTES)
             self._root.mkdir(parents=True, exist_ok=True, mode=0o700)
@@ -217,15 +230,35 @@ class OpenCodeRuntime:
                 raise OSError(errno.EPERM, "unsafe secret directory")
             self._secrets.chmod(0o700)
             fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)  # never overwrites
-            try:
-                os.write(fd, secret.encode())
-            finally:
-                os.close(fd)
+            made = os.fstat(fd)
+            created = (made.st_dev, made.st_ino)
+            data = secret.encode()
+            if os.write(fd, data) != len(data):
+                raise OSError(errno.EIO, "short write")
         except (OSError, NotImplementedError):
-            self._discard_secret(session_id)
+            # Failing before/at the exclusive create (EEXIST, unsafe path, CSPRNG, directory setup) owns nothing:
+            # an existing file or another incarnation's in-memory credential is never touched.  After a successful
+            # create only that very file (same device/inode) is removed, so no partial secret stays reusable.
+            if created is not None:
+                self._remove_created(path, created)
             raise RuntimeUnavailable("secret_provisioning_failed") from None
+        finally:
+            if fd is not None:
+                try:
+                    os.close(fd)
+                except OSError:
+                    pass
         self._passwords[session_id] = secret
         return secret
+
+    @staticmethod
+    def _remove_created(path: Path, created: tuple[int, int]) -> None:
+        try:
+            current = os.lstat(path)
+            if stat.S_ISREG(current.st_mode) and (current.st_dev, current.st_ino) == created:
+                os.unlink(path)
+        except OSError:
+            pass
 
     def _password(self, session_id: str) -> str | None:
         """This incarnation's secret from memory, else from the private file after a strict ownership/mode check."""
@@ -284,10 +317,12 @@ class OpenCodeRuntime:
             data=None if body is None else json.dumps(body).encode(),
             headers={"Authorization": f"Basic {token}", "Content-Type": "application/json"})
         try:
-            with urllib.request.urlopen(request, timeout=timeout) as response:
+            with _OPENER.open(request, timeout=timeout) as response:
                 raw = response.read(MAX_RESPONSE_BYTES + 1)
         except urllib.error.HTTPError as exc:
             exc.read(1024)
+            if 300 <= exc.code < 400:  # never followed; the body and Location are neither read further nor reported
+                raise RuntimeRefused("redirect_refused") from None
             raise RuntimeRefused(f"http_{exc.code}") from None
         except (TimeoutError, socket.timeout):
             raise RuntimeAmbiguous("timeout") from None

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import errno
 import os
 import stat
 import sys
@@ -785,15 +786,194 @@ class OpenCodeAdapterTests(unittest.TestCase):
         session_id, handle = self.start()
         sent = []
 
-        def fake_urlopen(request, timeout=None):
-            sent.append((request.full_url, dict(request.header_items())))
-            raise urllib.error.URLError("stop")
+        class FakeOpener:
+            def open(self, request, timeout=None):
+                sent.append((request.full_url, dict(request.header_items())))
+                raise urllib.error.URLError("stop")
         import urllib.error
-        with patch.object(runtime_module.urllib.request, "urlopen", fake_urlopen):
+        with patch.object(runtime_module, "_OPENER", FakeOpener()):
             with self.assertRaises(RuntimeUnavailable):
                 self.runtime._call(session_id, handle.port, "GET", "/api/info")
         self.assertTrue(sent[0][0].startswith(f"http://127.0.0.1:{handle.port}/"))
         self.assertNotIn(self.secret(session_id), sent[0][0])
+
+    # -- P017.1 F1: an authenticated request must never be redirected anywhere -----------------------------------
+    @staticmethod
+    def _loopback_server(handler):
+        from http.server import ThreadingHTTPServer
+        server = ThreadingHTTPServer(("127.0.0.1", 0), handler)
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        return server
+
+    def _redirect_pair(self):
+        """Disposable loopback pair: ``source`` answers every request with a redirect to ``destination``."""
+        from http.server import BaseHTTPRequestHandler
+        seen = {"destination": [], "source": []}
+        outer = self
+
+        class Destination(BaseHTTPRequestHandler):
+            def _record(self):
+                seen["destination"].append((self.command, self.path, self.headers.get("Authorization")))
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.end_headers()
+                self.wfile.write(b'{"leaked": true}')
+            do_GET = do_POST = do_PUT = _record
+
+            def log_message(self, *args):
+                pass
+
+        destination = self._loopback_server(Destination)
+        self.addCleanup(destination.shutdown)
+        self.addCleanup(destination.server_close)
+
+        class Source(BaseHTTPRequestHandler):
+            code = 302
+
+            def _redirect(self):
+                seen["source"].append((self.command, self.headers.get("Authorization")))
+                length = int(self.headers.get("Content-Length") or 0)
+                self.rfile.read(length)
+                self.send_response(outer.redirect_code)
+                self.send_header("Location", f"http://127.0.0.1:{destination.server_address[1]}/stolen")
+                self.send_header("Content-Length", "0")
+                self.end_headers()
+            do_GET = do_POST = do_PUT = _redirect
+
+            def log_message(self, *args):
+                pass
+
+        source = self._loopback_server(Source)
+        self.addCleanup(source.shutdown)
+        self.addCleanup(source.server_close)
+        return source.server_address[1], seen
+
+    def test_authenticated_requests_never_follow_redirects(self) -> None:
+        sid = str(uuid.uuid4())
+        password = "synthetic-redirect-password-" + "q" * 16
+        self.runtime._passwords[sid] = password
+        source_port, seen = self._redirect_pair()
+        for code in (301, 302, 303, 307, 308):
+            self.redirect_code = code
+            for method, body in (("GET", None), ("POST", {"parts": []})):
+                with self.subTest(code=code, method=method):
+                    with self.assertRaises(RuntimeRefused) as caught:
+                        self.runtime._call(sid, source_port, method, "/api/info", body)
+                    self.assertEqual(caught.exception.code, "redirect_refused")
+                    self.assertNotIn(password, repr(caught.exception.code))
+        self.assertEqual(seen["destination"], [])  # not a single request, authenticated or not, reached the target
+        self.assertEqual(len(seen["source"]), 10)  # each was sent exactly once: nothing was retried
+
+    def test_direct_authenticated_loopback_response_still_works(self) -> None:
+        from http.server import BaseHTTPRequestHandler
+        sid = str(uuid.uuid4())
+        password = "synthetic-direct-password-" + "r" * 16
+        self.runtime._passwords[sid] = password
+        got = []
+
+        class Direct(BaseHTTPRequestHandler):
+            def _answer(self):
+                length = int(self.headers.get("Content-Length") or 0)
+                got.append((self.command, self.headers.get("Authorization"), self.rfile.read(length)))
+                payload = b'{"data": {"ok": true}}'
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(payload)))
+                self.end_headers()
+                self.wfile.write(payload)
+            do_GET = do_POST = _answer
+
+            def log_message(self, *args):
+                pass
+
+        server = self._loopback_server(Direct)
+        self.addCleanup(server.shutdown)
+        self.addCleanup(server.server_close)
+        port = server.server_address[1]
+        self.assertEqual(self.runtime._call(sid, port, "GET", "/api/info"), {"data": {"ok": True}})
+        self.assertEqual(self.runtime._call(sid, port, "POST", "/api/x", {"a": 1}), {"data": {"ok": True}})
+        import base64
+        expected = "Basic " + base64.b64encode(f"opencode:{password}".encode()).decode()
+        self.assertEqual([(m, a) for m, a, _ in got], [("GET", expected), ("POST", expected)])
+        self.assertEqual(got[1][2], b'{"a": 1}')
+
+    # -- P017.1 F2: a failed exclusive create never touches an existing secret --------------------------------------
+    def test_failed_provisioning_never_alters_an_existing_secret(self) -> None:
+        session_id, handle = self.start()
+        path = self.secrets_dir() / session_id
+        before = (path.read_bytes(), stat.S_IMODE(path.stat().st_mode), path.stat().st_ino)
+        cached = self.runtime._passwords[session_id]
+        with self.assertRaises(RuntimeUnavailable) as caught:
+            self.runtime._provision_secret(session_id)  # O_EXCL collision with the live incarnation's secret
+        self.assertEqual(caught.exception.code, "secret_provisioning_failed")
+        self.assertEqual((path.read_bytes(), stat.S_IMODE(path.stat().st_mode), path.stat().st_ino), before)
+        self.assertEqual(before[1], 0o600)
+        self.assertEqual(self.runtime._passwords[session_id], cached)  # the in-memory credential survives too
+        self.assertTrue(self.runtime.probe(session_id, handle))
+        self.assertTrue(self.restarted().probe(session_id, handle))  # and so does restart recovery
+
+    def test_collision_with_synthetic_file_and_unrelated_files_is_untouched(self) -> None:
+        self.runtime._secrets.mkdir(parents=True, exist_ok=True, mode=0o700)
+        mine, other = str(uuid.uuid4()), str(uuid.uuid4())
+        for name, content in ((mine, b"synthetic-existing-secret-" + b"s" * 20), (other, b"synthetic-other-" + b"o" * 20)):
+            (self.secrets_dir() / name).write_bytes(content)
+            (self.secrets_dir() / name).chmod(0o600)
+        stray = self.secrets_dir() / "unrelated.txt"
+        stray.write_bytes(b"keep")
+        with self.assertRaises(RuntimeUnavailable):
+            self.runtime._provision_secret(mine)
+        self.assertEqual((self.secrets_dir() / mine).read_bytes(), b"synthetic-existing-secret-" + b"s" * 20)
+        self.assertEqual((self.secrets_dir() / other).read_bytes(), b"synthetic-other-" + b"o" * 20)
+        self.assertEqual(stray.read_bytes(), b"keep")
+        self.assertEqual(stat.S_IMODE((self.secrets_dir() / mine).stat().st_mode), 0o600)
+
+    def test_write_failure_after_create_removes_only_the_new_partial_file(self) -> None:
+        self.runtime._secrets.mkdir(parents=True, exist_ok=True, mode=0o700)
+        sid, other = str(uuid.uuid4()), str(uuid.uuid4())
+        (self.secrets_dir() / other).write_bytes(b"synthetic-neighbour-" + b"n" * 20)
+        (self.secrets_dir() / other).chmod(0o600)
+        for failure in (OSError(errno.EIO, "disk"), 3):  # hard error, and a short (partial) write
+            with self.subTest(failure=failure), patch.object(runtime_module.os, "write", side_effect=[failure]):
+                with self.assertRaises(RuntimeUnavailable) as caught:
+                    self.runtime._provision_secret(sid)
+                self.assertEqual(caught.exception.code, "secret_provisioning_failed")
+                self.assertFalse((self.secrets_dir() / sid).exists())  # no reusable partial secret
+                self.assertNotIn(sid, self.runtime._passwords)
+            self.assertEqual((self.secrets_dir() / other).read_bytes(), b"synthetic-neighbour-" + b"n" * 20)
+
+    def test_cleanup_after_write_failure_does_not_remove_a_replaced_file(self) -> None:
+        self.runtime._secrets.mkdir(parents=True, exist_ok=True, mode=0o700)
+        sid = str(uuid.uuid4())
+        path = self.secrets_dir() / sid
+
+        def swap_then_fail(fd, data):
+            path.unlink()  # someone else replaces the path after our exclusive create
+            path.write_bytes(b"synthetic-replacement")
+            raise OSError(errno.EIO, "disk")
+        with patch.object(runtime_module.os, "write", side_effect=swap_then_fail):
+            with self.assertRaises(RuntimeUnavailable):
+                self.runtime._provision_secret(sid)
+        self.assertEqual(path.read_bytes(), b"synthetic-replacement")  # not ours: left alone
+
+    def test_directory_setup_and_path_failures_do_not_delete_anything(self) -> None:
+        self.runtime._secrets.mkdir(parents=True, exist_ok=True, mode=0o700)
+        sid = str(uuid.uuid4())
+        path = self.secrets_dir() / sid
+        path.write_bytes(b"synthetic-existing-" + b"e" * 24)
+        path.chmod(0o600)
+        with patch.object(runtime_module.os, "lstat", side_effect=OSError(errno.EACCES, "denied")):
+            with self.assertRaises(RuntimeUnavailable):
+                self.runtime._provision_secret(sid)
+        self.assertEqual(path.read_bytes(), b"synthetic-existing-" + b"e" * 24)
+        link = self.secrets_dir() / str(uuid.uuid4())
+        target = Path(self.tmp.name) / "elsewhere"
+        target.write_bytes(b"keep")
+        link.symlink_to(target)
+        with self.assertRaises(RuntimeUnavailable):
+            self.runtime._provision_secret(link.name)
+        self.assertTrue(link.is_symlink())
+        self.assertEqual(target.read_bytes(), b"keep")
 
 
 class MigrationTests(ArchitectCase):
