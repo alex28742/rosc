@@ -4,6 +4,7 @@ import os
 import stat
 import sys
 import threading
+import time
 import unittest
 import uuid
 from pathlib import Path
@@ -500,7 +501,7 @@ class OpenCodeAdapterTests(unittest.TestCase):
                             "import fake_opencode\nfake_opencode.main()\n")
         launcher.chmod(launcher.stat().st_mode | stat.S_IXUSR)
         self.env = {"PATH": os.environ.get("PATH", ""), "HOME": self.tmp.name, ENV_BINARY: str(launcher),
-                    ENV_PASSWORD: "p" * 24, ENV_APPROVED_MODEL: "prov/model-a"}
+                    ENV_APPROVED_MODEL: "prov/model-a"}
         self.runtime = OpenCodeRuntime(root / "data", self.env)
         self.handles: list[tuple[str, RuntimeHandle]] = []
 
@@ -518,18 +519,20 @@ class OpenCodeAdapterTests(unittest.TestCase):
     def test_configuration_is_honest(self) -> None:
         self.assertIsNone(self.runtime.configuration_problem("prov", "model-a"))
         self.assertEqual(self.runtime.configuration_problem("prov", "other"), "model_not_approved")
-        for key, problem in ((ENV_PASSWORD, "runtime_credential_missing"), (ENV_BINARY, "runtime_binary_missing"),
-                             (ENV_APPROVED_MODEL, "model_not_approved")):
+        for key, problem in ((ENV_BINARY, "runtime_binary_missing"), (ENV_APPROVED_MODEL, "model_not_approved")):
             env = {k: v for k, v in self.env.items() if k != key}
             if key == ENV_BINARY:
                 env["PATH"] = ""
             self.assertEqual(OpenCodeRuntime(Path(self.tmp.name), env).configuration_problem("prov", "model-a"),
                              problem)
-        short = dict(self.env, **{ENV_PASSWORD: "short"})
-        self.assertEqual(OpenCodeRuntime(Path(self.tmp.name), short).configuration_problem("prov", "model-a"),
-                         "runtime_credential_missing")
+        unapproved = {k: v for k, v in self.env.items() if k != ENV_APPROVED_MODEL}
         with self.assertRaises(RuntimeNotConfigured):
-            OpenCodeRuntime(Path(self.tmp.name), short).start(str(uuid.uuid4()), "prov", "model-a")
+            OpenCodeRuntime(Path(self.tmp.name), unapproved).start(str(uuid.uuid4()), "prov", "model-a")
+
+    def test_no_ambient_password_is_needed_and_configuration_never_creates_a_secret(self) -> None:
+        self.assertNotIn(ENV_PASSWORD, self.env)
+        self.assertIsNone(self.runtime.configuration_problem("prov", "model-a"))
+        self.assertFalse((Path(self.tmp.name) / "data" / "architect-runtime" / ".secrets").exists())
 
     def test_start_proves_identity_probe_ask_and_ownership_stop(self) -> None:
         session_id, handle = self.start()
@@ -563,7 +566,7 @@ class OpenCodeAdapterTests(unittest.TestCase):
     def test_password_is_not_in_the_process_command_line(self) -> None:
         session_id, handle = self.start()
         cmdline = Path(f"/proc/{handle.pid}/cmdline").read_bytes()
-        self.assertNotIn(self.env[ENV_PASSWORD].encode(), cmdline)
+        self.assertNotIn(self.secret(session_id).encode(), cmdline)
         self.assertIn(b"127.0.0.1", cmdline)
 
     def test_child_home_xdg_and_logs_are_session_local_and_private(self) -> None:
@@ -630,10 +633,167 @@ class OpenCodeAdapterTests(unittest.TestCase):
             self.assertFalse(self.runtime.stop("owner", handle))
             killpg.assert_not_called()
 
-    def test_wrong_password_cannot_talk_to_the_server(self) -> None:
+    def secrets_dir(self) -> Path:
+        return Path(self.tmp.name) / "data" / "architect-runtime" / ".secrets"
+
+    def secret(self, session_id: str) -> str:
+        return (self.secrets_dir() / session_id).read_text()
+
+    def restarted(self, env: dict | None = None) -> OpenCodeRuntime:
+        """A new backend object over the same data directory: no in-memory state survives."""
+        fresh = OpenCodeRuntime(Path(self.tmp.name) / "data", self.env if env is None else env)
+        # Only so the test process can reap the child it spawned (a real orphan is reaped by init); no secret is shared.
+        fresh._children = self.runtime._children
+        return fresh
+
+    def test_wrong_secret_cannot_talk_to_the_server(self) -> None:
         session_id, handle = self.start()
-        intruder = OpenCodeRuntime(Path(self.tmp.name), dict(self.env, **{ENV_PASSWORD: "q" * 24}))
-        self.assertFalse(intruder.probe(session_id, handle))
+        other_id, other_handle = self.start()  # a second Project's runtime has its own, different secret
+        self.assertNotEqual(self.secret(session_id), self.secret(other_id))
+        fresh = self.restarted()
+        fresh._passwords[session_id] = self.secret(other_id)  # present Project B's secret to Project A's server
+        with self.assertRaises(RuntimeRefused) as caught:
+            fresh._call(session_id, handle.port, "GET", "/api/info")
+        self.assertEqual(caught.exception.code, "http_401")
+        self.assertFalse(fresh.probe(session_id, handle))
+        # no Authorization header at all is rejected as well
+        import urllib.error
+        import urllib.request
+        with self.assertRaises(urllib.error.HTTPError) as unauth:
+            urllib.request.urlopen(f"http://127.0.0.1:{handle.port}/api/info", timeout=3)
+        self.assertEqual(unauth.exception.code, 401)
+
+    def test_secret_is_generated_per_incarnation_strong_and_private(self) -> None:
+        first_id, first = self.start()
+        second_id, second = self.start()
+        a, b = self.secret(first_id), self.secret(second_id)
+        self.assertNotEqual(a, b)
+        self.assertGreaterEqual(len(a), 43)  # 32 random bytes, urlsafe base64
+        self.assertEqual(stat.S_IMODE(self.secrets_dir().stat().st_mode), 0o700)
+        self.assertEqual(stat.S_IMODE((self.secrets_dir() / first_id).stat().st_mode), 0o600)
+        child_env = dict(item.split(b"=", 1) for item in Path(f"/proc/{first.pid}/environ").read_bytes().split(b"\0")
+                         if b"=" in item)
+        self.assertEqual(child_env[b"OPENCODE_PASSWORD"].decode(), a)  # the client uses the very same value
+        self.assertEqual(self.runtime.ask(first, "msg_rosc1", "hi", 5), "Fake architect reply")
+
+    def test_ambient_password_is_ignored_and_never_shared(self) -> None:
+        ambient = dict(self.env, **{ENV_PASSWORD: "ambient-" + "x" * 24, "OPENCODE_SERVER_PASSWORD": "y" * 24})
+        runtime = OpenCodeRuntime(Path(self.tmp.name) / "data", ambient)
+        (self.bin / "mode").write_text("ok")
+        sid = str(uuid.uuid4())
+        handle = runtime.start(sid, "prov", "model-a")
+        self.addCleanup(runtime.stop, sid, handle)
+        self.assertNotEqual(self.secret(sid), ambient[ENV_PASSWORD])
+        environ = Path(f"/proc/{handle.pid}/environ").read_bytes()
+        self.assertNotIn(b"ambient-", environ)
+        self.assertNotIn(b"OPENCODE_SERVER_PASSWORD", environ)
+
+    def test_restarted_backend_recovers_probe_and_stop_with_the_private_secret(self) -> None:
+        session_id, handle = self.start()
+        fresh = self.restarted()
+        self.assertTrue(fresh.probe(session_id, handle))
+        self.assertEqual(fresh.ask(handle, "msg_rosc9", "hi", 5), "Fake architect reply")
+        self.assertTrue(fresh.stop(session_id, handle))
+        self.assertFalse((self.secrets_dir() / session_id).exists())  # removed only after confirmed termination
+        self.assertFalse(Path(f"/proc/{handle.pid}").exists())
+
+    def test_missing_or_unsafe_recovery_secret_fails_closed_but_stop_still_works(self) -> None:
+        session_id, handle = self.start()
+        path = self.secrets_dir() / session_id
+        good = path.read_text()
+        for damage in ("missing", "world_readable", "symlink", "short"):
+            path.unlink(missing_ok=True)
+            if damage == "world_readable":
+                path.write_text(good)
+                path.chmod(0o644)
+            elif damage == "symlink":
+                target = Path(self.tmp.name) / "elsewhere"
+                target.write_text(good)
+                target.chmod(0o600)
+                path.symlink_to(target)
+            elif damage == "short":
+                path.write_text("abc")
+                path.chmod(0o600)
+            fresh = self.restarted()
+            self.assertFalse(fresh.probe(session_id, handle), damage)  # not proof the child died
+            with self.assertRaises(RuntimeNotConfigured) as caught:
+                fresh.ask(handle, "msg_rosc3", "hi", 5)
+            self.assertEqual(caught.exception.code, "runtime_secret_missing")
+            self.assertTrue(owned_process(handle.pid, handle.ticks, session_id), damage)  # still running
+        path.unlink(missing_ok=True)
+        path.write_text(good)
+        path.chmod(0o600)
+        self.assertTrue(self.restarted().probe(session_id, handle))
+        path.unlink()
+        self.assertTrue(self.restarted().stop(session_id, handle))  # /proc identity, not the password, authorizes stop
+
+    def test_secret_path_cannot_be_traversed_or_overwritten(self) -> None:
+        for bad in ("../x", "a/b", "", "..", "not-a-uuid"):
+            self.assertIsNone(self.runtime._secret_path(bad))
+            with self.assertRaises(RuntimeUnavailable) as caught:
+                self.runtime._provision_secret(bad)
+            self.assertEqual(caught.exception.code, "secret_provisioning_failed")
+        session_id = str(uuid.uuid4())
+        self.runtime._provision_secret(session_id)
+        with self.assertRaises(RuntimeUnavailable):  # exclusive create: a collision is never reused
+            self.runtime._provision_secret(session_id)
+        self.runtime._discard_secret(session_id)
+
+    def test_csprng_failure_spawns_nothing(self) -> None:
+        (self.bin / "mode").write_text("ok")
+        sid = str(uuid.uuid4())
+        with patch.object(runtime_module.secrets, "token_urlsafe", side_effect=NotImplementedError()), \
+                patch.object(runtime_module.subprocess, "Popen") as popen:
+            with self.assertRaises(RuntimeUnavailable) as caught:
+                self.runtime.start(sid, "prov", "model-a")
+        self.assertEqual(caught.exception.code, "secret_provisioning_failed")
+        popen.assert_not_called()
+        self.assertFalse((self.secrets_dir() / sid).exists())
+
+    def test_failed_startup_with_confirmed_stop_removes_the_secret(self) -> None:
+        sid = str(uuid.uuid4())
+        (self.bin / "mode").write_text("unrestricted")
+        with self.assertRaises(RuntimeUnavailable):
+            self.runtime.start(sid, "prov", "model-a")
+        self.assertFalse((self.secrets_dir() / sid).exists())
+
+    def test_unconfirmed_stop_keeps_the_secret_for_later_recovery(self) -> None:
+        session_id, handle = self.start()
+        with patch.object(runtime_module.OpenCodeRuntime, "_terminate", return_value=False):
+            self.assertFalse(self.runtime.stop(session_id, handle))
+        self.assertTrue((self.secrets_dir() / session_id).exists())
+
+    def test_server_rejecting_our_secret_is_reported_distinctly_and_quickly(self) -> None:
+        sid = str(uuid.uuid4())
+        (self.bin / "mode").write_text("ok")
+        real = runtime_module.OpenCodeRuntime._provision_secret
+
+        def provision_then_diverge(runtime, session_id):
+            real(runtime, session_id)
+            runtime._passwords[session_id] = "z" * 43  # the client now disagrees with the child
+            return real_secret(runtime, session_id)
+
+        real_secret = lambda runtime, session_id: "c" * 43  # noqa: E731  (child receives a value the client lacks)
+        with patch.object(runtime_module.OpenCodeRuntime, "_provision_secret", provision_then_diverge):
+            started = time.monotonic()
+            with self.assertRaises(RuntimeUnavailable) as caught:
+                self.runtime.start(sid, "prov", "model-a")
+        self.assertEqual(caught.exception.code, "server_auth_failed")
+        self.assertLess(time.monotonic() - started, 10)
+
+    def test_http_client_sends_the_secret_only_to_loopback_without_following_redirects(self) -> None:
+        session_id, handle = self.start()
+        sent = []
+
+        def fake_urlopen(request, timeout=None):
+            sent.append((request.full_url, dict(request.header_items())))
+            raise urllib.error.URLError("stop")
+        import urllib.error
+        with patch.object(runtime_module.urllib.request, "urlopen", fake_urlopen):
+            with self.assertRaises(RuntimeUnavailable):
+                self.runtime._call(session_id, handle.port, "GET", "/api/info")
+        self.assertTrue(sent[0][0].startswith(f"http://127.0.0.1:{handle.port}/"))
+        self.assertNotIn(self.secret(session_id), sent[0][0])
 
 
 class MigrationTests(ArchitectCase):

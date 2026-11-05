@@ -82,9 +82,8 @@ Workspace manifests (`project.yaml`, `task.yaml`) are projections of SQLite. Ord
 
 ### Project Architect (OpenCode) configuration
 
-Verified against OpenCode 2.2.5 offline (no model call). Offline tests use a test-only fake server; **a live provider reply has not been verified**. To enable activation the Owner sets, in the environment of the ROSC backend process (never in Git, argv or a URL):
+Verified against OpenCode 2.2.5 offline (no model call). Offline tests use a test-only fake server; **a live provider reply has not been verified**. The Owner does **not** set an OpenCode server password. On each explicit Owner activation ROSC draws a fresh 256-bit secret from the OS CSPRNG, gives it only to its own `opencode serve` child (environment) and uses the same value for its loopback Basic-auth calls (user `opencode`). So a restarted backend can still probe and stop a surviving child, the secret is kept in `<ROSC_DATA_DIR>/architect-runtime/.secrets/<session-id>` (mode 0600, directory 0700, never in Git, argv, a URL, the database, logs or any API) and removed only after the child's termination is confirmed; a missing or unsafe file keeps the Project blocked (`starting`) until an explicit deactivation proves the stop. An `OPENCODE_PASSWORD` already present in ROSC's own environment is ignored (never required, never inherited, never shared between Projects). This password protects only the local server; it is **not** an OpenCode Go/provider credential, and ROSC does not yet provision provider authorization for the isolated child (live model replies are not verified). Set, in the environment of the ROSC backend process (never in Git, argv or a URL):
 
-- `OPENCODE_PASSWORD`: at least 16 characters; ROSC passes it to its own `opencode serve` child and uses it for HTTP Basic auth (user `opencode`).
 - `ROSC_OPENCODE_APPROVED_MODEL=<provider>/<model>`: the model the Owner approves for outbound conversation content. It must equal the assigned Agent's `provider_id/model_id`, otherwise the state is `not_configured`.
 - Optionally `ROSC_OPENCODE_BIN`: absolute path of the `opencode` executable (otherwise found on `PATH`).
 

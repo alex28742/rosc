@@ -3,8 +3,21 @@
 Verified interface (OpenCode 2.2.5, ``opencode serve``, checked against the installed binary, no model call):
 
 * ``opencode serve --hostname 127.0.0.1 --port N`` starts a loopback HTTP server. The password is read from the
-  ``OPENCODE_PASSWORD`` environment variable and clients use HTTP Basic auth, user ``opencode``. Without the header every
-  route answers 401. ROSC never puts the password in argv, a URL, a log line, the database or an API response.
+  ``OPENCODE_PASSWORD`` environment variable (``OPENCODE_SERVER_PASSWORD`` is its documented fallback in the binary; if
+  neither is set the server invents its own, so ROSC always sets one) and clients use HTTP Basic auth, user ``opencode``.
+  Without the header every route answers 401. ROSC never puts the password in argv, a URL, a log line, the database or an
+  API response.
+
+Local server credential (P017-A): the password belongs to ROSC, not to the Owner.  ``start()`` (reached only through the
+explicit Owner activation) draws a fresh 256-bit secret from the OS CSPRNG for that one runtime incarnation, hands it only
+to the owned child's environment and uses the same value for ROSC's Basic-auth calls.  An ambient ``OPENCODE_PASSWORD`` in
+ROSC's own environment is ignored: it is neither required nor reused, so it cannot create a credential shared between
+Projects.  So a restarted backend can still probe an owned child that survived, the secret is kept in a ROSC-private file
+(``<data>/architect-runtime/.secrets/<session_id>``, mode 0600, directory 0700, created exclusively without following
+links) and deleted only after termination of that child is confirmed.  A missing, foreign-owned, group/world-accessible or
+malformed file means "no credential": probes answer False (the persisted ``starting`` blocker stays), ``ask``/``lookup``
+refuse, and ``stop`` still works because it relies on /proc identity, not on the password.  This is a local-only
+credential for a loopback server; it is not the OpenCode Go / provider credential, which ROSC does not handle at all.
 * ``GET /api/info`` reports the server ``pid``; that is how ROSC proves the endpoint is the process it launched.
 * ``GET /api/model`` lists provider/model pairs; ``POST /api/session`` accepts ``agent``, ``model``, ``location`` and a
   ``permissions`` rule list; a deny-all rule is enforced by the server (``POST /api/session/{id}/permission`` returns
@@ -25,9 +38,12 @@ import base64
 import errno
 import json
 import os
+import re
+import secrets
 import shutil
 import signal
 import socket
+import stat
 import subprocess
 import time
 import urllib.error
@@ -43,6 +59,9 @@ ENV_APPROVED_MODEL = "ROSC_OPENCODE_APPROVED_MODEL"  # "provider/model" the Owne
 ENV_MARKER = "ROSC_ARCHITECT_OWNER"
 ADAPTER_NAME = "opencode"
 MIN_PASSWORD = 16
+SECRET_BYTES = 32  # 256 bits from the OS CSPRNG
+SECRETS_DIRNAME = ".secrets"
+_SESSION_ID = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$")
 START_TIMEOUT = 25.0
 REQUEST_TIMEOUT = 15.0
 MAX_RESPONSE_BYTES = 4_000_000
@@ -97,6 +116,7 @@ class RuntimeHandle:
     ticks: int
     port: int
     runtime_session_id: str
+    rosc_session_id: str = ""  # ROSC's ArchitectSession id: selects this incarnation's local server credential
 
 
 @dataclass(frozen=True)
@@ -164,6 +184,7 @@ class OpenCodeRuntime:
         self._root = Path(data_dir) / "architect-runtime"
         self._environ = environ if environ is not None else os.environ
         self._children: dict[str, subprocess.Popen] = {}
+        self._passwords: dict[str, str] = {}
 
     # -- configuration ----------------------------------------------------------------------------------------
     def _binary(self) -> str | None:
@@ -173,25 +194,90 @@ class OpenCodeRuntime:
             return None
         return path if os.access(path, os.X_OK) and os.path.isfile(path) else None
 
-    def _password(self) -> str | None:
-        value = self._environ.get(ENV_PASSWORD)
-        return value if value and len(value) >= MIN_PASSWORD else None
+    # -- local server credential (owned by ROSC, one per runtime incarnation) ---------------------------------------
+    @property
+    def _secrets(self) -> Path:
+        return self._root / SECRETS_DIRNAME
+
+    def _secret_path(self, session_id: str) -> Path | None:
+        # Only a canonical UUID may name a file: no separators, dots or traversal can reach this path.
+        return self._secrets / session_id if _SESSION_ID.match(session_id or "") else None
+
+    def _provision_secret(self, session_id: str) -> str:
+        path = self._secret_path(session_id)
+        if path is None:
+            raise RuntimeUnavailable("secret_provisioning_failed")
+        try:
+            secret = secrets.token_urlsafe(SECRET_BYTES)
+            self._root.mkdir(parents=True, exist_ok=True, mode=0o700)
+            self._root.chmod(0o700)
+            self._secrets.mkdir(exist_ok=True, mode=0o700)
+            info = os.lstat(self._secrets)
+            if not stat.S_ISDIR(info.st_mode) or info.st_uid != os.getuid():
+                raise OSError(errno.EPERM, "unsafe secret directory")
+            self._secrets.chmod(0o700)
+            fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)  # never overwrites
+            try:
+                os.write(fd, secret.encode())
+            finally:
+                os.close(fd)
+        except (OSError, NotImplementedError):
+            self._discard_secret(session_id)
+            raise RuntimeUnavailable("secret_provisioning_failed") from None
+        self._passwords[session_id] = secret
+        return secret
+
+    def _password(self, session_id: str) -> str | None:
+        """This incarnation's secret from memory, else from the private file after a strict ownership/mode check."""
+        cached = self._passwords.get(session_id)
+        if cached:
+            return cached
+        path = self._secret_path(session_id)
+        if path is None:
+            return None
+        try:
+            info = os.lstat(path)
+            if (not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid() or info.st_mode & 0o077
+                    or info.st_size > 512):
+                return None
+            parent = os.lstat(self._secrets)
+            if not stat.S_ISDIR(parent.st_mode) or parent.st_uid != os.getuid() or parent.st_mode & 0o077:
+                return None
+            fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
+            try:
+                value = os.read(fd, 513).decode()
+            finally:
+                os.close(fd)
+        except (OSError, ValueError):
+            return None
+        if len(value) < MIN_PASSWORD or not value.isascii() or not value.isprintable():
+            return None
+        self._passwords[session_id] = value
+        return value
+
+    def _discard_secret(self, session_id: str) -> None:
+        self._passwords.pop(session_id, None)
+        path = self._secret_path(session_id)
+        if path is not None:
+            try:
+                if stat.S_ISREG(os.lstat(path).st_mode):
+                    os.unlink(path)
+            except OSError:
+                pass
 
     def configuration_problem(self, provider_id: str, model_id: str) -> str | None:
         if self._binary() is None:
             return "runtime_binary_missing"
-        if self._password() is None:
-            return "runtime_credential_missing"
         if self._environ.get(ENV_APPROVED_MODEL) != f"{provider_id}/{model_id}":
             return "model_not_approved"
         return None
 
     # -- HTTP ---------------------------------------------------------------------------------------------------
-    def _call(self, port: int, method: str, path: str, body: object | None = None,
+    def _call(self, session_id: str, port: int, method: str, path: str, body: object | None = None,
               timeout: float = REQUEST_TIMEOUT) -> object:
-        password = self._password()
+        password = self._password(session_id)
         if password is None:
-            raise RuntimeNotConfigured("runtime_credential_missing")
+            raise RuntimeNotConfigured("runtime_secret_missing")
         token = base64.b64encode(f"opencode:{password}".encode()).decode()
         request = urllib.request.Request(
             f"http://127.0.0.1:{int(port)}{path}", method=method,
@@ -241,13 +327,14 @@ class OpenCodeRuntime:
         with socket.socket() as probe:
             probe.bind(("127.0.0.1", 0))
             port = probe.getsockname()[1]
+        secret = self._provision_secret(session_id)  # fresh per incarnation; only ever reached via explicit activation
         # Never fall back to the Owner's global OpenCode config, credentials or sessions.  A future live setup must
         # provision this session-local home explicitly; until then model/provider checks fail truthfully.
         env = {key: value for key, value in self._environ.items() if key in ("PATH", "LANG", "LC_ALL")}
         env.update({"HOME": str(isolated["home"]), "XDG_CONFIG_HOME": str(isolated["config"]),
                     "XDG_DATA_HOME": str(isolated["data"]), "XDG_CACHE_HOME": str(isolated["cache"]),
                     "XDG_STATE_HOME": str(isolated["state"]), "TMPDIR": str(isolated["tmp"])})
-        env[ENV_PASSWORD] = self._password()  # type: ignore[assignment]
+        env[ENV_PASSWORD] = secret  # child-local only; the ambient OPENCODE_PASSWORD is deliberately not inherited
         env[ENV_MARKER] = session_id
         try:
             child = subprocess.Popen([binary, "serve", "--hostname", "127.0.0.1", "--port", str(port)],  # type: ignore[list-item]
@@ -255,37 +342,45 @@ class OpenCodeRuntime:
                                      stderr=subprocess.DEVNULL,
                                      start_new_session=True)
         except OSError:
+            self._discard_secret(session_id)
             raise RuntimeUnavailable("spawn_failed") from None
         self._children[session_id] = child
         ticks = process_ticks(child.pid)
-        provisional = RuntimeHandle(child.pid, ticks or 0, port, "")
+        provisional = RuntimeHandle(child.pid, ticks or 0, port, "", session_id)
         try:
-            self._await_identity(port, child)
+            self._await_identity(session_id, port, child)
             if ticks is None:
                 raise RuntimeUnavailable("process_identity_unproven")
-            self._require_model(port, provider_id, model_id)
-            runtime_session = self._create_session(port, provider_id, model_id, workdir)
+            self._require_model(session_id, port, provider_id, model_id)
+            runtime_session = self._create_session(session_id, port, provider_id, model_id, workdir)
         except RuntimeProblem as exc:
             if self._terminate(session_id, provisional, child):
                 self._children.pop(session_id, None)
+                self._discard_secret(session_id)
                 raise
             raise RuntimeStartUnresolved("start_cleanup_unconfirmed", provisional) from exc
         except Exception as exc:
             if self._terminate(session_id, provisional, child):
                 self._children.pop(session_id, None)
+                self._discard_secret(session_id)
                 raise RuntimeUnavailable("runtime_failure") from None
             raise RuntimeStartUnresolved("start_cleanup_unconfirmed", provisional) from exc
-        return RuntimeHandle(child.pid, ticks, port, runtime_session)
+        return RuntimeHandle(child.pid, ticks, port, runtime_session, session_id)
 
-    def _await_identity(self, port: int, child: subprocess.Popen) -> None:
+    def _await_identity(self, session_id: str, port: int, child: subprocess.Popen) -> None:
         deadline = time.monotonic() + START_TIMEOUT
         while time.monotonic() < deadline:
             if child.poll() is not None:
                 raise RuntimeUnavailable("process_exited")
             try:
-                info = self._data(self._call(port, "GET", "/api/info", timeout=2.0))
+                info = self._data(self._call(session_id, port, "GET", "/api/info", timeout=2.0))
             except RuntimeNotConfigured:
                 raise
+            except RuntimeRefused as exc:
+                if exc.code == "http_401":  # our own child rejects our own secret: no point waiting
+                    raise RuntimeUnavailable("server_auth_failed") from None
+                time.sleep(0.25)
+                continue
             except RuntimeProblem:
                 time.sleep(0.25)
                 continue
@@ -294,15 +389,15 @@ class OpenCodeRuntime:
             raise RuntimeUnavailable("endpoint_identity_mismatch")
         raise RuntimeUnavailable("start_timeout")
 
-    def _require_model(self, port: int, provider_id: str, model_id: str) -> None:
-        models = self._data(self._call(port, "GET", "/api/model"))
+    def _require_model(self, session_id: str, port: int, provider_id: str, model_id: str) -> None:
+        models = self._data(self._call(session_id, port, "GET", "/api/model"))
         if not isinstance(models, list) or not any(
                 isinstance(m, dict) and m.get("providerID") == provider_id and m.get("id") == model_id
                 for m in models):
             raise RuntimeUnavailable("model_unavailable")
 
-    def _create_session(self, port: int, provider_id: str, model_id: str, workdir: Path) -> str:
-        created = self._data(self._call(port, "POST", "/api/session", {
+    def _create_session(self, session_id: str, port: int, provider_id: str, model_id: str, workdir: Path) -> str:
+        created = self._data(self._call(session_id, port, "POST", "/api/session", {
             "title": "ROSC Project Architect", "agent": RUNTIME_AGENT,
             "model": {"id": model_id, "providerID": provider_id},
             "location": {"directory": str(workdir)}, "permissions": DENY_ALL}))
@@ -311,7 +406,7 @@ class OpenCodeRuntime:
         if created.get("permissions") != DENY_ALL:
             raise RuntimeUnavailable("restricted_mode_unconfirmed")  # never send a model request unrestricted
         for action in RESTRICTED_ACTIONS:
-            decision = self._data(self._call(port, "POST", f"/api/session/{created['id']}/permission",
+            decision = self._data(self._call(session_id, port, "POST", f"/api/session/{created['id']}/permission",
                                              {"action": action, "resources": ["*"]}))
             if not isinstance(decision, dict) or decision.get("effect") != "deny":
                 raise RuntimeUnavailable("restricted_mode_unconfirmed")
@@ -320,11 +415,13 @@ class OpenCodeRuntime:
     def probe(self, session_id: str, handle: RuntimeHandle) -> bool:
         if not owned_process(handle.pid, handle.ticks, session_id):
             return False
+        if handle.rosc_session_id and handle.rosc_session_id != session_id:
+            return False
         try:
-            info = self._data(self._call(handle.port, "GET", "/api/info", timeout=3.0))
+            info = self._data(self._call(session_id, handle.port, "GET", "/api/info", timeout=3.0))
             if not (isinstance(info, dict) and info.get("pid") == handle.pid):
                 return False
-            found = self._data(self._call(handle.port, "GET", f"/api/session/{handle.runtime_session_id}",
+            found = self._data(self._call(session_id, handle.port, "GET", f"/api/session/{handle.runtime_session_id}",
                                           timeout=3.0))
         except RuntimeProblem:
             return False
@@ -333,10 +430,10 @@ class OpenCodeRuntime:
     # -- conversation ---------------------------------------------------------------------------------------------
     def ask(self, handle: RuntimeHandle, runtime_message_id: str, text: str, timeout: float) -> str:
         sid = handle.runtime_session_id
-        self._call(handle.port, "POST", f"/api/session/{sid}/prompt",
+        self._call(handle.rosc_session_id, handle.port, "POST", f"/api/session/{sid}/prompt",
                    {"id": runtime_message_id, "text": text}, timeout=min(timeout, 30.0))
         try:
-            self._call(handle.port, "POST", f"/api/experimental/session/{sid}/wait", timeout=timeout)
+            self._call(handle.rosc_session_id, handle.port, "POST", f"/api/experimental/session/{sid}/wait", timeout=timeout)
         except RuntimeUnavailable:
             raise RuntimeAmbiguous("connection_lost") from None
         result = self.lookup(handle, runtime_message_id)
@@ -358,7 +455,7 @@ class OpenCodeRuntime:
             else:
                 query = urllib.parse.urlencode({"cursor": cursor, "limit": LOOKUP_PAGE_SIZE})
             try:
-                payload = self._call(handle.port, "GET",
+                payload = self._call(handle.rosc_session_id, handle.port, "GET",
                                      f"/api/session/{handle.runtime_session_id}/message?{query}")
             except RuntimeRefused as exc:
                 if exc.code.startswith("http_"):
@@ -484,4 +581,5 @@ class OpenCodeRuntime:
         stopped = self._terminate(session_id, handle, child)
         if stopped:
             self._children.pop(session_id, None)
+            self._discard_secret(session_id)  # only after termination of the whole group is confirmed
         return stopped

@@ -55,7 +55,8 @@ describe('Architect activation control', () => {
       state: 'not_configured', detail: 'runtime_credential_missing', can_activate: false })) });
     render(<App api={api} />);
     expect(await screen.findByText('Architect: не настроен')).toBeTruthy();
-    expect(screen.getByText(/OPENCODE_PASSWORD/)).toBeTruthy();
+    expect(screen.getByText(/ROSC создаёт его при активации/)).toBeTruthy();
+    expect(screen.queryByText(/OPENCODE_PASSWORD/)).toBeNull();
     expect(screen.queryByText('Активировать Architect')).toBeNull();
   });
 

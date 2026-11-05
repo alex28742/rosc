@@ -134,7 +134,8 @@ class ArchitectService:
     def _handle(row: ArchitectSession) -> RuntimeHandle | None:
         if None in (row.process_pid, row.process_ticks, row.port, row.runtime_session_id):
             return None
-        return RuntimeHandle(row.process_pid, row.process_ticks, row.port, row.runtime_session_id)  # type: ignore[arg-type]
+        return RuntimeHandle(row.process_pid, row.process_ticks, row.port, row.runtime_session_id,
+                             row.session_id)  # type: ignore[arg-type]
 
     def _configuration(self, pair: tuple[RoleAssignment, AgentDefinition] | None) -> str | None:
         if pair is None:
