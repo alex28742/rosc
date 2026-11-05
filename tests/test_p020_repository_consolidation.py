@@ -228,6 +228,26 @@ class GlobalLibraryTests(p19.ContextCase):
             self.assertFalse(outcome["ok"], path)
             self.assertNotIn(MARK, json.dumps(outcome))
 
+    def test_a_symlinked_library_root_is_refused_by_both_tools(self) -> None:
+        import shutil
+        external = self.base / "external-lib"
+        (external / "principles").mkdir(parents=True)
+        (external / "principles/leak.md").write_text(f"{MARK}\n")
+        shutil.rmtree(self.lib)
+        os.symlink(external, self.lib)
+        session_id = self.activate()
+        listed = self.direct(session_id, "global_list")
+        read = self.direct(session_id, "global_read", path="principles/leak.md")
+        for outcome in (listed, read, self.direct(session_id, "global_list", path="principles")):
+            self.assertFalse(outcome["ok"])
+            self.assertEqual(outcome["error"]["code"], "library_unsafe")
+            self.assertNotIn(MARK, json.dumps(outcome))
+        # a real directory in the same place works again
+        os.unlink(self.lib)
+        (self.lib / "principles").mkdir(parents=True)
+        (self.lib / "principles/ok.md").write_text("fine\n")
+        self.assertIn("fine", self.direct(session_id, "global_read", path="principles/ok.md")["result"]["content"])
+
     def test_listing_is_paginated_and_scan_budget_is_reported(self) -> None:
         for number in range(5):
             self.put(f"skills/s{number}.md")

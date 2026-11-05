@@ -156,6 +156,16 @@ def _open_dir(root: str) -> int:
     return fd
 
 
+def _open_dir_nofollow(root: str) -> int:
+    """Like ``_open_dir`` but refuses a root that is itself a symlink (``O_NOFOLLOW`` on the final component)."""
+    try:
+        return os.open(root, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC)
+    except OSError as exc:
+        if exc.errno in (errno.ELOOP, errno.ENOTDIR):
+            raise ToolError("library_unsafe", "The global library root is a symlink or not a directory") from None
+        raise ToolError("library_absent", "The global definition library is not available") from None
+
+
 def _walk_dir(root_fd: int, parts: list[str]) -> int:
     """Open ``parts`` below ``root_fd`` without ever following a symlink; returns an owned directory fd."""
     current = os.dup(root_fd)
@@ -415,7 +425,13 @@ class ProjectContextBroker:
     # -- global library (read-only) ---------------------------------------------------------------------------------
     def _global(self) -> str | None:
         root = self._global_root
-        return str(root) if root is not None and root.is_dir() else None
+        if root is None:
+            return None
+        try:
+            mode = os.lstat(root).st_mode  # a symlinked root is never followed: fail closed in the callers
+        except OSError:
+            return None
+        return str(root) if stat.S_ISDIR(mode) or stat.S_ISLNK(mode) else None
 
     def tool_global_list(self, session: Session, caller: Caller, args: dict) -> dict:
         """Bounded, read-only hierarchical listing of definition files below ``global/`` (optionally below ``path``).
@@ -434,7 +450,7 @@ class ProjectContextBroker:
         stats = {"entries_scanned": 0, "skipped_unsafe": 0, "skipped_oversized": 0, "skipped_too_deep": 0}
         stopped: str | None = None
         if root is not None:
-            root_fd = _open_dir(root)
+            root_fd = _open_dir_nofollow(root)
             try:
                 start = _walk_dir(root_fd, base)
             except BaseException:
@@ -498,7 +514,7 @@ class ProjectContextBroker:
         if parts[0] not in GLOBAL_LIBRARY_DIRS or not parts[-1].lower().endswith(GLOBAL_SUFFIXES):
             raise ToolError("path_excluded", "Only definition files below principles/, agents/, skills/ and tools/ "
                                              "are readable")
-        root_fd = _open_dir(root)
+        root_fd = _open_dir_nofollow(root)
         try:
             text, data, info = _read_text_file(root_fd, parts, MAX_SOURCE_FILE_BYTES)
         finally:

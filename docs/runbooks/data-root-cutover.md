@@ -56,6 +56,18 @@ same filesystem as `NEW`'s parent.
 1. Owner deactivates every active Architect through ROSC (the product action) so children stop and `.secrets/<session>`
    files are removed after termination is confirmed. A session that cannot be proven stopped keeps its secret and blocks
    the cutover (do not delete it by hand).
+   **If the backend is not running and an Architect child (`opencode serve`) may still be alive**, the product action is
+   unavailable and the order is blocking, never by an old PID:
+   1. 🟢 Do not signal anything. Treat every PID from earlier notes as a historical observation.
+   2. 🟢 Enumerate candidates read-only (cmdline `opencode serve`, cwd under `OLD/architect-runtime/`) and, for each, prove
+      ROSC ownership as ROSC itself does: pid **and** `/proc/<pid>/stat` start ticks **and** the per-session marker in its
+      environment, matched against the DB row's `process_pid`/ticks and `OLD/architect-runtime/.secrets/<session-id>`.
+      The independent `opencode serve --service` has no such marker/cwd and is excluded.
+   3. If ownership is proven, the only stop path is to start the **same old** ROSC backend (`ROSC_DATA_DIR=OLD`, 🔴 Owner
+      approval) and let the Owner deactivate through the product, which re-verifies identity before signaling. If it
+      cannot be proven (no marker, ticks mismatch, PID reused) the state is **UNKNOWN: Stage 2 stops (BLOCKED)**; no
+      manual `kill`, no deleting `.secrets`, no cutover with a live or unprovable child.
+   4. Continue only when no ROSC-owned child remains and each session row is stopped with its secret file gone.
 2. `scripts/local_app.py down` — it signals only a process group whose recorded identity is still proven. If it reports
    UNKNOWN, stop here; resolve per README "Recovering from UNKNOWN".
 3. Re-run preflight 3–5: backend and Vite absent, ports free, no ROSC-owned `opencode serve`, no `rosc.db-wal` activity
@@ -64,22 +76,37 @@ same filesystem as `NEW`'s parent.
 
 ## 3. Backup (🟡, into `BK`, originals untouched)
 
-1. Archive the **entire** `OLD` tree preserving modes/mtimes (`tar --numeric-owner -C OLD/.. -cpf BK/rosc-data.tar rosc`),
-   including `.secrets/` and `opencode-auth`, then `sha256sum`. Directories 0700, files 0600 (`umask 077`).
-2. `opencode-auth` has a live WAL/SHM held by a process that must **not** be stopped. A raw file copy of a live WAL
-   database is not a consistent backup. Take its copy with the SQLite online-backup API (`sqlite3 SRC '.backup DST'`
-   from a read-only handle) and record that a consistent point-in-time copy was made while the owner stays alive. Decision
-   needed from the Owner: whether `opencode-auth` is part of the move at all, or stays at `OLD` (the independent service's
-   XDG path points there and would break if it were moved). ROSC does not read it (README: provider key bridge).
-3. Verify: restore the tar into a scratch directory, compare file lists and checksums, run `PRAGMA integrity_check` on the
-   restored `rosc.db`. Keep `BK` until the Owner releases it.
+1. **Quiesced ROSC data (consistent file copy).** After section 2 nothing ROSC-owned writes. Archive `OLD` **excluding
+   `opencode-auth/`** preserving modes/mtimes (`tar --numeric-owner --exclude=rosc/opencode-auth -C OLD/.. -cpf
+   BK/rosc-data.tar rosc`; adapt the name to `OLD`'s basename), including `.secrets/`; then `sha256sum` the tar and list
+   every file. For this stopped data, byte-identical checksums of the copy are the right check. Directories 0700,
+   files 0600 (`umask 077`).
+2. **`opencode-auth` (potentially active SQLite; separate procedure).** Its WAL/SHM may be held by a process that must not
+   be stopped, so a raw file copy (including `-wal`/`-shm`) is not a consistent backup. Create the copy only through
+   SQLite's online backup from a read-only handle: `sqlite3 'file:OLD/opencode-auth/<db>?mode=ro' ".backup 'BK/<db>'"`.
+   The result is a logically equivalent database, **not** byte-identical to the source (page layout, WAL state and header
+   counters differ), so do **not** require equal SHA-256. Verify instead: `PRAGMA integrity_check` = `ok` on the backup;
+   same `user_version`/schema (`sqlite_master` rows); equal row counts per table; and a logical comparison of the data
+   (e.g. `sqlite3 ... .dump` of source (read-only) vs backup, sorted and diffed, ignoring volatile timestamp-only tables
+   the Owner names). Record the backup time: writes after it are not in the copy.
+   **Owner decision, both branches defined:**
+   - **A. Move `opencode-auth` to `NEW`.** Only if the Owner confirms no other process (notably the independent OpenCode
+     service) uses `OLD/opencode-auth`, or accepts re-pointing/restarting it (🔴, outside this runbook). Place the verified
+     `.backup` copy at `NEW/opencode-auth/`, keep `OLD/opencode-auth` untouched as rollback, and re-run the logical check
+     against the then-quiesced source if it has been stopped meanwhile.
+   - **B. Keep `opencode-auth` at its prior path (default if no explicit Owner choice).** Nothing is moved; `NEW` has no
+     `opencode-auth` (or an empty 0700 placeholder). The independent service keeps working unchanged. Keep the `.backup`
+     copy in `BK` as a safety snapshot only. ROSC does not read it (provider key bridge is separate).
+3. Verify: restore the tar into a scratch directory, compare file lists and byte checksums (ROSC data only; never for
+   the `.backup` database), run `PRAGMA integrity_check` on the restored `rosc.db`. Keep `BK` until the Owner releases it.
 
 ## 4. Staged copy (🟡 new location only)
 
 1. `umask 077; mkdir -m 700 NEW.staging` beside `NEW` (same filesystem). Copy `OLD/rosc.db` via `sqlite3 .backup` (never
-   copy `-wal`/`-shm` raw), and `workspace/`, `architect-runtime/` (skeleton only if no live sessions), `backups/` with
+   copy `-wal`/`-shm` raw), and `workspace/`, `architect-runtime/` (skeleton only if no live sessions), `backups/` (and `opencode-auth` only under branch A) with
    `cp -a --no-preserve=ownership` / `rsync -a --checksum`, no `--delete`, no overwrite.
-2. Verify: file list + sha256 equals the preflight inventory; modes 0700/0600; `integrity_check` = `ok`;
+2. Verify: file list + sha256 equal the preflight inventory for plain files (a `rosc.db` written through `.backup` is
+   checked logically like `opencode-auth`: `integrity_check`, schema, row counts, not byte equality); modes 0700/0600; `integrity_check` = `ok`;
    `alembic_version` still `0007...`; Project/Task counts equal; the manifest inventory matches.
 3. Atomic placement: `mv NEW.staging NEW` (same filesystem rename). `OLD` is **not** removed, renamed or modified; it is
    the rollback copy. No destructive source removal is part of this runbook.
@@ -120,9 +147,9 @@ Trigger: any failed verification, UNKNOWN process, divergent counts, or Owner re
 
 - Runtime session rows keep `pid` + start ticks; after a restart they are only trusted if the process still proves
   its marker. Old children cannot be migrated: deactivate first.
-- The independent OpenCode service and any other consumer of `OLD/opencode-auth` keep using `OLD`.
+- The independent OpenCode service and any other consumer of `OLD/opencode-auth` keep using `OLD` (branch B) or must be re-pointed by the Owner (branch A).
 - If the ROSC repository is registered as a ROSC Project, its binding encloses `NEW`: the dynamic private-root exclusion
   already hides it, but re-check with a SourceRead of `data/` after the cutover (expect `path_excluded`).
 - `stail/`, `.local-data/`, `.local-dev/`, `.agent-telemetry/` stay in place and are not part of the data move.
-- Open Owner decisions: `opencode-auth` in or out; whether to retire `OLD` and when; where the persistent `ROSC_DATA_DIR`
+- Open Owner decisions: `opencode-auth` branch A (move) or B (stay; default); whether to retire `OLD` and when; where the persistent `ROSC_DATA_DIR`
   environment is exported today.
