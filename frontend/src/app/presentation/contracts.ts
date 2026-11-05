@@ -1,7 +1,7 @@
 // The only surface a presentation package sees. Presentations render these typed view models and call these
 // callbacks; they never reach the API client, the router or Core persistence.
 import type { ComponentType, ReactNode } from 'react';
-import type { AgentDefinition, AgentFormValues, ArchitectStatus, ConversationMessage, Project, ProjectFormValues, RepairConfirmation, RoleAssignment, Task, TaskFormValues } from '../../core/models';
+import type { AgentDefinition, AgentFormValues, ArchitectStatus, ContextAccess, DisclosureCategory, ConversationMessage, Project, ProjectFormValues, RepairConfirmation, RoleAssignment, Task, TaskFormValues } from '../../core/models';
 import type { ScrollRegions } from '../scroll';
 
 export type LoadStatus = 'loading' | 'ready' | 'failed';
@@ -177,9 +177,19 @@ export type ArchitectControlState = {
   error: string;
 };
 
+export type ContextAccessControlState = {
+  status: LoadStatus;
+  info: ContextAccess | null;
+  busy: boolean;
+  error: string;
+};
+
 export type ConversationControls = {
   state: ConversationState;
   architect: ArchitectControlState;
+  contextAccess: ContextAccessControlState;
+  /** Owner-only standing disclosure toggle. Resolves to an error message or null. */
+  onSetDisclosure: (category: DisclosureCategory, enabled: boolean) => Promise<string | null>;
   /** Explicit Owner activation of the Project Architect. Resolves to an error message or null. */
   onActivate: () => Promise<string | null>;
   onDeactivate: () => Promise<string | null>;

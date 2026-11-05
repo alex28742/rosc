@@ -65,6 +65,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Mapping, Protocol
 
+from .architect_tools import PERMISSION_PATTERN, SERVER_NAME, TOOL_NAMES, ToolEndpoint
+
 ENV_PASSWORD = "OPENCODE_PASSWORD"
 ENV_BINARY = "ROSC_OPENCODE_BIN"
 ENV_APPROVED_MODEL = "ROSC_OPENCODE_APPROVED_MODEL"  # "provider/model" the Owner approved for outbound content
@@ -90,6 +92,11 @@ MAX_LOOKUP_MESSAGES = 5_000
 RUNTIME_AGENT = "plan"
 DENY_ALL = [{"action": "*", "resource": "*", "effect": "deny"}]
 RESTRICTED_ACTIONS = ("shell", "edit", "read", "webfetch", "subagent")
+# P019: the ROSC-owned tool server's tools (``rosc_*``) are the ONLY thing allowed on top of DENY_ALL (last rule wins,
+# verified against the installed 2.2.5 permission evaluator).  Native shell/edit/read/webfetch/subagent stay denied.
+ALLOW_ROSC_TOOLS = {"action": PERMISSION_PATTERN, "resource": "*", "effect": "allow"}
+TOOLS_PERMISSIONS = DENY_ALL + [ALLOW_ROSC_TOOLS]
+MCP_CONNECT_TIMEOUT = 15.0
 
 
 class _NoRedirect(urllib.request.HTTPRedirectHandler):
@@ -158,7 +165,8 @@ class ArchitectRuntime(Protocol):
     name: str
 
     def configuration_problem(self, provider_id: str, model_id: str) -> str | None: ...
-    def start(self, session_id: str, provider_id: str, model_id: str) -> RuntimeHandle: ...
+    def start(self, session_id: str, provider_id: str, model_id: str,
+              tools: ToolEndpoint | None = None) -> RuntimeHandle: ...
     def probe(self, session_id: str, handle: RuntimeHandle) -> bool: ...
     def ask(self, handle: RuntimeHandle, runtime_message_id: str, text: str, timeout: float) -> str: ...
     def lookup(self, handle: RuntimeHandle, runtime_message_id: str) -> ReplyLookup: ...
@@ -208,6 +216,7 @@ def owned_group_leader(pid: int, ticks: int, session_id: str) -> bool:
 
 class OpenCodeRuntime:
     name = ADAPTER_NAME
+    supports_tools = True  # the service passes a ToolEndpoint only to runtimes that declare this
 
     def __init__(self, data_dir: Path, environ: Mapping[str, str] | None = None) -> None:
         self._root = Path(data_dir) / "architect-runtime"
@@ -439,7 +448,8 @@ class OpenCodeRuntime:
         return payload.get("data") if isinstance(payload, dict) and "data" in payload else payload
 
     # -- lifecycle ----------------------------------------------------------------------------------------------
-    def start(self, session_id: str, provider_id: str, model_id: str) -> RuntimeHandle:
+    def start(self, session_id: str, provider_id: str, model_id: str,
+              tools: ToolEndpoint | None = None) -> RuntimeHandle:
         problem = self.configuration_problem(provider_id, model_id)
         if problem:
             raise RuntimeNotConfigured(problem)
@@ -484,7 +494,10 @@ class OpenCodeRuntime:
             if ticks is None:
                 raise RuntimeUnavailable("process_identity_unproven")
             self._require_model(session_id, port, provider_id, model_id)
-            runtime_session = self._create_session(session_id, port, provider_id, model_id, workdir)
+            if tools is not None:
+                self._register_tools(session_id, port, tools)
+            runtime_session = self._create_session(session_id, port, provider_id, model_id, workdir,
+                                                   tools is not None)
         except RuntimeProblem as exc:
             if self._terminate(session_id, provisional, child):
                 self._children.pop(session_id, None)
@@ -528,19 +541,47 @@ class OpenCodeRuntime:
                 for m in models):
             raise RuntimeUnavailable("model_unavailable")
 
-    def _create_session(self, session_id: str, port: int, provider_id: str, model_id: str, workdir: Path) -> str:
+    def _register_tools(self, session_id: str, port: int, endpoint: ToolEndpoint) -> None:
+        """Register the ROSC tool server in THIS child only and require it to answer initialize + tools/list."""
+        self._call(session_id, port, "PUT", f"/api/experimental/mcp/{SERVER_NAME}", {"config": {
+            "type": "remote", "url": endpoint.url, "headers": {"Authorization": f"Bearer {endpoint.token}"}}})
+        deadline = time.monotonic() + MCP_CONNECT_TIMEOUT
+        state = "pending"
+        while time.monotonic() < deadline:
+            listed = self._data(self._call(session_id, port, "GET", "/api/mcp", timeout=5.0))
+            entry = next((item for item in listed if isinstance(item, dict) and item.get("name") == SERVER_NAME),
+                         None) if isinstance(listed, list) else None
+            status = entry.get("status") if isinstance(entry, dict) else None
+            state = status.get("status") if isinstance(status, dict) else "pending"
+            if state == "connected":
+                return
+            if state in ("failed", "needs_auth", "disabled"):
+                break
+            time.sleep(0.25)
+        raise RuntimeUnavailable("tools_unavailable")
+
+    def _create_session(self, session_id: str, port: int, provider_id: str, model_id: str, workdir: Path,
+                        with_tools: bool = False) -> str:
+        wanted = TOOLS_PERMISSIONS if with_tools else DENY_ALL
         created = self._data(self._call(session_id, port, "POST", "/api/session", {
             "title": "ROSC Project Architect", "agent": RUNTIME_AGENT,
             "model": {"id": model_id, "providerID": provider_id},
-            "location": {"directory": str(workdir)}, "permissions": DENY_ALL}))
+            "location": {"directory": str(workdir)}, "permissions": wanted}))
         if not isinstance(created, dict) or not isinstance(created.get("id"), str):
             raise RuntimeRefused("malformed_response")
-        if created.get("permissions") != DENY_ALL:
+        if created.get("permissions") != wanted:
             raise RuntimeUnavailable("restricted_mode_unconfirmed")  # never send a model request unrestricted
         for action in RESTRICTED_ACTIONS:
             decision = self._data(self._call(session_id, port, "POST", f"/api/session/{created['id']}/permission",
                                              {"action": action, "resources": ["*"]}))
             if not isinstance(decision, dict) or decision.get("effect") != "deny":
+                raise RuntimeUnavailable("restricted_mode_unconfirmed")
+        # The evaluator itself must agree: every ROSC tool allowed, anything else (even a lookalike) denied.
+        for action, effect in [*((f"{SERVER_NAME}_{name}", "allow" if with_tools else "deny") for name in TOOL_NAMES),
+                               ("other_tool", "deny"), (f"x{SERVER_NAME}_briefing", "deny")]:
+            decision = self._data(self._call(session_id, port, "POST", f"/api/session/{created['id']}/permission",
+                                             {"action": action, "resources": ["*"]}))
+            if not isinstance(decision, dict) or decision.get("effect") != effect:
                 raise RuntimeUnavailable("restricted_mode_unconfirmed")
         return created["id"]
 

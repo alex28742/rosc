@@ -1,7 +1,7 @@
 // Test fixtures shared by the application tests. Not imported by production code.
 import { vi } from 'vitest';
 import type { CoreApi } from '../core/api';
-import type { AgentDefinition, ArchitectStatus, ConversationMessage, ConversationPage, ConversationParticipant, ConversationMessageInput, Project, RoleAssignment, Task } from '../core/models';
+import type { AgentDefinition, ArchitectStatus, ContextAccess, ConversationMessage, ConversationPage, ConversationParticipant, ConversationMessageInput, Project, RoleAssignment, Task } from '../core/models';
 
 export const project = (id: string, over: Partial<Project> = {}): Project => ({
   id, name: `Project ${id}`, description: `About ${id}`, root_path: `/tmp/${id}`, mode: 'existing', docs_entrypoint: null,
@@ -37,6 +37,22 @@ export const architectStatus = (over: Partial<ArchitectStatus> = {}): ArchitectS
   project_id: 'P0001', state: 'stopped', detail: null, can_activate: true, can_deactivate: false,
   agent: { agent_id: 'agent-1', display_name: 'Architect One', provider_id: 'prov', model_id: 'model-a' },
   session: null, ...over,
+});
+
+export const contextAccess = (over: Partial<ContextAccess> = {}): ContextAccess => ({
+  project_id: 'P0001',
+  matrix: [
+    { resource: 'global rules/skills/tools', operations: 'list, read', mode: 'read_only' },
+    { resource: "this Project's ROSC-private documents", operations: 'list, search, read, create, update, delete (recoverable)', mode: 'read_write' },
+    { resource: "other registered Projects' ROSC-private documents", operations: 'list, search, read', mode: 'read_only' },
+    { resource: "this Project's bound source checkout", operations: 'list, search, read, git head/status/log', mode: 'read_only' },
+    { resource: 'other Projects\' source, secrets, host directories, shell, publishing', operations: 'none', mode: 'denied' },
+  ],
+  tools: { transport: 'not_running', names: ['rosc_briefing'] },
+  source: { bound: true, binding_version: 1, docs_entrypoint: 'README.md', access: 'read_only' },
+  disclosure: { default: 'none', categories: ['project_docs_own', 'project_docs_other', 'project_source'],
+    provider_id: 'prov', model_id: 'model-a', scopes: [], note: '' },
+  publication: { automatic_sync: false, architect_git_operations: false, note: '' }, ...over,
 });
 
 const declared = (capabilities: string[]) => capabilities.map(capability => ({ capability, status: 'declared' as const }));
@@ -77,6 +93,8 @@ export function stubApi(over: Partial<{ [K in keyof CoreApi]: ReturnType<typeof 
     getArchitect: vi.fn(async () => architectStatus()),
     activateArchitect: vi.fn(async () => architectStatus({ state: 'ready', can_activate: false, can_deactivate: true })),
     deactivateArchitect: vi.fn(async () => architectStatus()),
+    getContextAccess: vi.fn(async () => contextAccess()),
+    setContextDisclosure: vi.fn(async () => contextAccess()),
     reconcileDelivery: vi.fn(async () => ({ delivery: { state: 'unknown', error_code: null, reply_message_id: null, can_retry: false, can_reconcile: true } })),
     retryDelivery: vi.fn(async () => ({ delivery: { state: 'pending', error_code: null, reply_message_id: null, can_retry: false, can_reconcile: true } })),
     sendConversationMessage: vi.fn(async (_projectId: string, input: ConversationMessageInput) => ({

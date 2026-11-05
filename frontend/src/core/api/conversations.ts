@@ -1,5 +1,5 @@
-import type { ArchitectStatus, ConversationMessageInput, ConversationMessageResult, ConversationPage, DeliveryResult } from '../models';
-import { post, request } from './http';
+import type { ArchitectStatus, ContextAccess, DisclosureCategory, ConversationMessageInput, ConversationMessageResult, ConversationPage, DeliveryResult } from '../models';
+import { post, put, request } from './http';
 
 /** One bounded page of the durable Project Conversation; `before` asks for messages older than that ordinal. */
 export const getConversation = (projectId: string, before?: number) =>
@@ -22,3 +22,9 @@ export const reconcileDelivery = (projectId: string, messageId: string) =>
 /** Re-sends only when Core says the previous attempt provably never reached the provider. */
 export const retryDelivery = (projectId: string, messageId: string) =>
   post<DeliveryResult>(`/projects/${projectId}/conversation/messages/${messageId}/retry`);
+
+/** Read-only effective access summary (access matrix, tool transport state, standing disclosure scope). */
+export const getContextAccess = (projectId: string) => request<ContextAccess>(`/projects/${projectId}/architect/context-access`);
+/** Owner-only: enable or revoke disclosure of one private-content category to the active Architect's provider/model. */
+export const setContextDisclosure = (projectId: string, category: DisclosureCategory, enabled: boolean) =>
+  put<ContextAccess>(`/projects/${projectId}/architect/context-access/disclosure`, { category, covered: 'all', enabled });

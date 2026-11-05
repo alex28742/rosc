@@ -22,6 +22,8 @@ from .agent_registry import (AgentNotFound, AgentRegistryService, AssignmentNotF
                              canonical_agent_id)
 from .architect_runtime import ArchitectRuntime, OpenCodeRuntime
 from .architect_service import ArchitectService
+from .architect_tools import ToolHost
+from .project_context import ProjectContextBroker
 from .config import data_dir
 from .conversation import (DEFAULT_PAGE_SIZE, ConversationConflict, ConversationDenied, ConversationError,
                            ConversationNotFound, ConversationStoreError, InvalidConversationInput,
@@ -211,7 +213,16 @@ class ConversationMessageInput(BaseModel):
     body: str = Field(min_length=1, max_length=4000)
 
 
-CONVERSATION_PATH = re.compile(r"^/api/projects/[^/]+/(conversation(/messages(/[^/]+/(reconcile|retry))?)?|architect/(activate|deactivate)|architect)$")
+class DisclosureInput(BaseModel):
+    """Owner's standing disclosure scope for the active Architect's provider/model; the model is never selectable here."""
+
+    category: str = Field(min_length=1, max_length=24)
+    covered: str = Field(min_length=1, max_length=8)
+    enabled: bool
+
+
+CONVERSATION_PATH = re.compile(r"^/api/projects/[^/]+/(conversation(/messages(/[^/]+/(reconcile|retry))?)?|architect/(activate|deactivate)|architect(/context-access(/disclosure)?)?)$")
+DEFAULT_GLOBAL_LIBRARY = Path(__file__).resolve().parents[2]  # rules/, skills/ and tools/ below it, once they exist
 
 
 def sanitized_validation_response(exc: RequestValidationError) -> JSONResponse:
@@ -332,7 +343,8 @@ def create_app(db_path: Path | None = None, workspace_root: Path | None = None, 
                authorization_policy: authz.AuthorizationPolicy | None = None,
                extra_allowed_hosts: frozenset[str] = frozenset(),
                extra_allowed_origins: frozenset[str] = frozenset(),
-               architect_runtime: ArchitectRuntime | None = None) -> FastAPI:
+               architect_runtime: ArchitectRuntime | None = None,
+               global_library_root: Path | None = None) -> FastAPI:
     """``auth_provider``/``authorization_policy`` and the ``extra_allowed_*`` sets are Python-level composition and
     test seams only. Nothing in a request (body, query, header, cookie) can select an actor, a role or these values,
     and there is deliberately no environment knob."""
@@ -347,7 +359,10 @@ def create_app(db_path: Path | None = None, workspace_root: Path | None = None, 
     registry = AgentRegistryService(sessions, policy)
     conversation = ProjectConversationService(sessions, policy)
     # The runtime is a Python-level composition seam like the policy: no request can select or configure it.
-    architect = ArchitectService(sessions, policy, architect_runtime or OpenCodeRuntime(db_path.parent))
+    context_broker = ProjectContextBroker(sessions, workspace_root, global_library_root or DEFAULT_GLOBAL_LIBRARY)
+    tool_host = ToolHost(context_broker.call)  # loopback listener starts lazily, only at an Owner activation
+    architect = ArchitectService(sessions, policy, architect_runtime or OpenCodeRuntime(db_path.parent),
+                                 tools=tool_host, context=context_broker)
 
     @asynccontextmanager
     async def lifespan(_app: FastAPI):
@@ -356,6 +371,7 @@ def create_app(db_path: Path | None = None, workspace_root: Path | None = None, 
         except OperationalError:
             log.warning("Architect recovery skipped: database is not migrated")
         yield
+        tool_host.shutdown()
 
     app = FastAPI(title="ROSC Core", version="0.1.0", lifespan=lifespan)
     app.state.architect = architect
@@ -655,6 +671,15 @@ def create_app(db_path: Path | None = None, workspace_root: Path | None = None, 
     @app.post("/api/projects/{project_id}/architect/deactivate")
     def architect_deactivate(project_id: str) -> dict:
         return conversation_call(architect.deactivate, current_actor(), numeric_id(project_id, "P"))
+
+    @app.get("/api/projects/{project_id}/architect/context-access")
+    def architect_context_access(project_id: str) -> dict:
+        return conversation_call(architect.context_access, current_actor(), numeric_id(project_id, "P"))
+
+    @app.put("/api/projects/{project_id}/architect/context-access/disclosure")
+    def architect_set_disclosure(project_id: str, data: DisclosureInput) -> dict:
+        return conversation_call(architect.set_disclosure, current_actor(), numeric_id(project_id, "P"),
+                                 category=data.category, covered=data.covered, enabled=data.enabled)
 
     @app.post("/api/projects/{project_id}/conversation/messages/{message_id}/reconcile")
     def reconcile_delivery(project_id: str, message_id: str) -> dict:

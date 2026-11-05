@@ -1,6 +1,6 @@
 import { cleanup, fireEvent, render, screen, within } from '@testing-library/react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { architectStatus, agentDefinition, project, roleAssignment, task } from '../../app/testing';
+import { architectStatus, agentDefinition, contextAccess, project, roleAssignment, task } from '../../app/testing';
 import { DashboardView } from './views/DashboardView';
 import { ProjectView } from './views/ProjectView';
 import { TaskView } from './views/TaskView';
@@ -19,6 +19,8 @@ const conversation = () => ({
   state: { status: 'ready' as const, conversationId: null, messages: [], hasMore: false, nextBefore: null,
     error: '', sending: false, olderLoading: false },
   architect: { status: 'ready' as const, info: architectStatus(), busy: false, error: '' },
+  contextAccess: { status: 'ready' as const, info: contextAccess(), busy: false, error: '' },
+  onSetDisclosure: vi.fn(async () => null),
   onActivate: vi.fn(async () => null), onDeactivate: vi.fn(async () => null),
   onReconcile: vi.fn(async () => null), onRetryDelivery: vi.fn(async () => null),
   onReload: vi.fn(), onLoadOlder: vi.fn(), onSend: vi.fn(async () => null),

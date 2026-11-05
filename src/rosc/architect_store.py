@@ -35,6 +35,7 @@ from .workspace import (READY, ReplaceNotDurable, WorkspaceConflict, _atomic_rep
 FORMAT = "rosc.architect-document.v1"
 CREATE_FORMAT = "rosc.architect-create.v1"
 PENDING_FORMAT = "rosc.architect-pending.v1"
+TRASH_FORMAT = "rosc.architect-trash.v1"
 MAX_DOCUMENT_BYTES = 262_144
 MAX_METADATA_BYTES = 262_144
 MAX_REVISIONS = 1000
@@ -53,6 +54,8 @@ _PATH_PART = re.compile(r"[a-z0-9][a-z0-9._-]{0,127}", re.ASCII)
 _SHA = re.compile(r"[0-9a-f]{64}", re.ASCII)
 _REVISION_FILE = re.compile(r"r([0-9]{4,})\.(?:md|txt)", re.ASCII)
 _OP_ID = re.compile(r"[0-9a-f]{32}", re.ASCII)
+_TRASH_ID = re.compile(r"[a-z0-9][a-z0-9._-]{0,63}\.[0-9a-f]{32}", re.ASCII)
+_TRASH_MARKER = "deleted.json"
 _CREATE_MARKER = ".creation.json"
 _PENDING_MARKER = ".pending.json"
 _CREATE_STAGE = re.compile(r"\.create-([0-9a-f]{32})", re.ASCII)
@@ -147,6 +150,19 @@ class StoreDiagnostic:
     doc_id: str | None = None
     logical_path: str | None = None
     recoverable: bool = False
+
+
+@dataclass(frozen=True)
+class TrashedDocument:
+    """A recoverably deleted document: the whole revision history is preserved under ``architect/trash``."""
+
+    trash_id: str
+    doc_id: str
+    logical_path: str
+    revision: int
+    sha256: str
+    deleted_at: str | None
+    deleted_by: str | None
 
 
 @dataclass(frozen=True)
@@ -700,6 +716,118 @@ class ArchitectDocumentStore:
             raise CommitUncertain("Revision committed but ownership-marker cleanup is not durable; reconcile before retrying",
                                   observed, committed) from exc
         return self._info(meta)
+
+
+    # -- recoverable delete (P019) -------------------------------------------------------------------------------------
+    def _trash_root(self, project_id: int) -> Path:
+        return project_directory(self.workspace_root, project_id) / "architect" / "trash"
+
+    def _locked(self, project_id: int):
+        root = self._prepare_root(project_id)
+        try:
+            lock_fd = os.open(root / ".lock", os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o600)
+        except OSError as exc:
+            raise UnsafeStore("Architect document lock is unsafe or inaccessible") from exc
+        fcntl.flock(lock_fd, fcntl.LOCK_EX)
+        return root, lock_fd
+
+    def delete(self, project_id: int, doc_id: str, *, actor_id: str, expected_revision: int) -> TrashedDocument:
+        """Move the document (all revisions) to the project trash. Nothing is destroyed; ``restore`` reverses it.
+
+        Requires the caller's current revision, so a stale view cannot remove a newer document. The directory
+        rename is atomic on one filesystem and happens under the same lock as every other write.
+        """
+        doc_id = normalize_doc_id(doc_id)
+        if not self._valid_int(expected_revision, 1):
+            raise InvalidDocument("expected_revision must be a positive integer")
+        root, lock_fd = self._locked(project_id)
+        try:
+            directory = root / doc_id
+            if not os.path.lexists(directory):
+                raise DocumentNotFound(f"Document {doc_id} does not exist")
+            info = self._info(self._load_meta(project_id, directory, doc_id))
+            if expected_revision != info.revision:
+                raise RevisionConflict(f"Document {doc_id} is at revision {info.revision}, not {expected_revision}", info.revision)
+            self._read_revision(directory, info.revisions[-1])
+            if self._document_diagnostics(project_id, directory, info):
+                raise UnsafeStore(f"Document {doc_id} has preserved entries requiring reconciliation")
+            trash = self._trash_root(project_id)
+            self._ensure(trash)
+            trash_id = f"{doc_id}.{uuid.uuid4().hex}"
+            target = trash / trash_id
+            try:
+                _rename_noreplace(directory, target)
+            except FileExistsError as exc:
+                raise UnsafeStore("Trash entry already exists") from exc
+            stamp = _now()
+            marker = {"format": TRASH_FORMAT, "project_id": _project_label(project_id), "doc_id": doc_id,
+                      "trash_id": trash_id, "revision": info.revision, "sha256": info.sha256,
+                      "logical_path": info.logical_path, "deleted_at": stamp, "deleted_by": str(actor_id)}
+            try:
+                self._write_exclusive(target / _TRASH_MARKER, _json_bytes(marker))
+            except OSError:
+                pass  # the history itself is intact in trash; the provenance marker is best effort
+            _fsync_directory(root)
+            _fsync_directory(trash)
+            return TrashedDocument(trash_id, doc_id, info.logical_path, info.revision, info.sha256, stamp, str(actor_id))
+        finally:
+            os.close(lock_fd)
+
+    def list_trash(self, project_id: int) -> list[TrashedDocument]:
+        trash = self._trash_root(project_id)
+        if _chain_is_unsafe(trash / "x", self.workspace_root):
+            raise UnsafeStore("Architect trash path contains a symlink or non-directory")
+        if not trash.exists():
+            return []
+        if trash.is_symlink() or not trash.is_dir():
+            raise UnsafeStore("Architect trash root is a symlink or not a directory")
+        result: list[TrashedDocument] = []
+        for child in sorted(trash.iterdir(), key=lambda path: path.name):
+            if not _TRASH_ID.fullmatch(child.name) or child.is_symlink() or not child.is_dir():
+                continue
+            doc_id = child.name.rsplit(".", 1)[0]
+            try:
+                info = self._info(self._load_meta(project_id, child, doc_id))
+            except (UnsafeStore, InvalidDocument, FileNotFoundError):
+                continue
+            try:
+                marker = self._load_json(child / _TRASH_MARKER)
+            except (UnsafeStore, FileNotFoundError, InvalidDocument):
+                marker = {}
+            deleted_at, deleted_by = marker.get("deleted_at"), marker.get("deleted_by")
+            result.append(TrashedDocument(child.name, doc_id, info.logical_path, info.revision, info.sha256,
+                                          deleted_at if isinstance(deleted_at, str) else None,
+                                          deleted_by if isinstance(deleted_by, str) else None))
+        return result
+
+    def restore(self, project_id: int, trash_id: str, *, actor_id: str) -> DocumentInfo:
+        """Return a trashed document with its complete history, unless its id or logical path is in use again."""
+        if not isinstance(trash_id, str) or not _TRASH_ID.fullmatch(trash_id):
+            raise InvalidDocument("Invalid trash id")
+        doc_id = trash_id.rsplit(".", 1)[0]
+        root, lock_fd = self._locked(project_id)
+        try:
+            source = self._trash_root(project_id) / trash_id
+            if not os.path.lexists(source) or source.is_symlink() or not source.is_dir():
+                raise DocumentNotFound(f"Trash entry {trash_id} does not exist")
+            info = self._info(self._load_meta(project_id, source, doc_id))
+            if os.path.lexists(root / doc_id):
+                raise DocumentExists(f"Document {doc_id} exists again; choose another way to recover")
+            owner = self._logical_paths(project_id, root).get(info.logical_path)
+            if owner is not None:
+                raise DocumentExists(f"Logical path {info.logical_path} is already used by {owner}")
+            try:
+                (source / _TRASH_MARKER).unlink()
+            except FileNotFoundError:
+                pass
+            try:
+                _rename_noreplace(source, root / doc_id)
+            except FileExistsError as exc:
+                raise DocumentExists(f"Document {doc_id} appeared during restore") from exc
+            _fsync_directory(root)
+            return self._info(self._load_meta(project_id, root / doc_id, doc_id))
+        finally:
+            os.close(lock_fd)
 
     def reconcile(self, project_id: int, diagnostic_id: str) -> RecoveryResult:
         root = self._prepare_root(project_id)
