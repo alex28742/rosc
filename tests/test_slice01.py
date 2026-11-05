@@ -651,7 +651,7 @@ class HardeningTests(StageCase):
                                   "role_assignments", "assignment_capabilities", "run_records", "run_agent_links",
                                   "report_records", "evidence_records", "conversations", "conversation_participants",
                                   "conversation_messages", "architect_sessions", "conversation_deliveries",
-                                  "provider_disclosure_scopes", "architect_tool_audit", "alembic_version"})
+                                  "architect_tool_audit", "alembic_version"})
 
 
 if __name__ == "__main__":

@@ -50,8 +50,7 @@ export const contextAccess = (over: Partial<ContextAccess> = {}): ContextAccess 
   ],
   tools: { transport: 'not_running', names: ['rosc_briefing'] },
   source: { bound: true, binding_version: 1, docs_entrypoint: 'README.md', access: 'read_only' },
-  disclosure: { default: 'none', categories: ['project_docs_own', 'project_docs_other', 'project_source'],
-    provider_id: 'prov', model_id: 'model-a', scopes: [], note: '' },
+  provider: { provider_id: 'prov', model_id: 'model-a', note: '' },
   publication: { automatic_sync: false, architect_git_operations: false, note: '' }, ...over,
 });
 
@@ -94,7 +93,6 @@ export function stubApi(over: Partial<{ [K in keyof CoreApi]: ReturnType<typeof 
     activateArchitect: vi.fn(async () => architectStatus({ state: 'ready', can_activate: false, can_deactivate: true })),
     deactivateArchitect: vi.fn(async () => architectStatus()),
     getContextAccess: vi.fn(async () => contextAccess()),
-    setContextDisclosure: vi.fn(async () => contextAccess()),
     reconcileDelivery: vi.fn(async () => ({ delivery: { state: 'unknown', error_code: null, reply_message_id: null, can_retry: false, can_reconcile: true } })),
     retryDelivery: vi.fn(async () => ({ delivery: { state: 'pending', error_code: null, reply_message_id: null, can_retry: false, can_reconcile: true } })),
     sendConversationMessage: vi.fn(async (_projectId: string, input: ConversationMessageInput) => ({

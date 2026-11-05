@@ -581,31 +581,7 @@ class ConversationDelivery(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
 
 
-# P019 Project Context Access. The disclosure scope is the Owner's standing, auditable decision about which categories of
-# private ROSC-local content may be returned to which provider/model; the audit rows record WHICH tool operation ran, never
-# its content.
-DISCLOSURE_CATEGORIES = ("project_docs_own", "project_docs_other", "project_source")
-DISCLOSURE_ALL = "all"
-
-
-class ProviderDisclosureScope(Base):
-    __tablename__ = "provider_disclosure_scopes"
-    __table_args__ = (
-        CheckConstraint("category IN ('project_docs_own', 'project_docs_other', 'project_source')",
-                        name="ck_disclosure_scopes_category"),
-        CheckConstraint("enabled IN (0, 1)", name="ck_disclosure_scopes_enabled"),
-        UniqueConstraint("provider_id", "model_id", "category", "covered", name="uq_disclosure_scopes_target"),
-    )
-
-    scope_id: Mapped[str] = mapped_column(String(36), primary_key=True)
-    provider_id: Mapped[str] = mapped_column(String(64))
-    model_id: Mapped[str] = mapped_column(String(128))
-    category: Mapped[str] = mapped_column(String(24))
-    # ``all`` (every registered Project) or one canonical Project id such as ``P0003``.
-    covered: Mapped[str] = mapped_column(String(8))
-    enabled: Mapped[int] = mapped_column(Integer)
-    updated_by: Mapped[str] = mapped_column(String(64))
-    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
+# P019 Project Context Access. The audit rows record WHICH tool operation ran, never its content.
 
 
 class ArchitectToolAudit(Base):

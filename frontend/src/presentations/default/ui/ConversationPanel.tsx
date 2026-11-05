@@ -245,7 +245,7 @@ export function ConversationPanel({ projectId, conversation, collapsed, onCollap
         {[view.hint, architect.error, architectFailure].filter(Boolean).join(' ')}
       </p>}
     </div>
-    <ContextAccessSummary contextAccess={conversation.contextAccess} onSetDisclosure={conversation.onSetDisclosure} />
+    <ContextAccessSummary contextAccess={conversation.contextAccess} />
     {searchOpen && <div className="rosc-conversation__search">
       <input type="search" aria-label="Поиск по сообщениям" placeholder="Найти в переписке…"
         value={searchTerm} autoFocus

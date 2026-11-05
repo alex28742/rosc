@@ -20,7 +20,6 @@ const conversation = () => ({
     error: '', sending: false, olderLoading: false },
   architect: { status: 'ready' as const, info: architectStatus(), busy: false, error: '' },
   contextAccess: { status: 'ready' as const, info: contextAccess(), busy: false, error: '' },
-  onSetDisclosure: vi.fn(async () => null),
   onActivate: vi.fn(async () => null), onDeactivate: vi.fn(async () => null),
   onReconcile: vi.fn(async () => null), onRetryDelivery: vi.fn(async () => null),
   onReload: vi.fn(), onLoadOlder: vi.fn(), onSend: vi.fn(async () => null),

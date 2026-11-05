@@ -74,11 +74,10 @@ ARCHITECT_ACTIVATE = "architect.activate"
 ARCHITECT_DEACTIVATE = "architect.deactivate"
 ARCHITECT_REPLY_COMMIT = "conversation.architect_reply.commit"
 CONVERSATION_DELIVERY_RECONCILE = "conversation.delivery.reconcile"
-# P019 Project Context Access. Reading the effective access summary and configuring the standing provider-disclosure
-# scope are Owner actions only. The Architect's own tool calls are NOT authorized through this policy: they go through
-# the session-scoped broker (``project_context``) which never impersonates the Owner.
+# P019 Project Context Access. Reading the effective access summary is an Owner action only. The Architect's own tool
+# calls are NOT authorized through this policy: they go through the session-scoped broker (``project_context``) which
+# never impersonates the Owner.
 ARCHITECT_CONTEXT_READ = "architect.context.read"
-ARCHITECT_CONTEXT_CONFIGURE = "architect.context.configure"
 
 # Resource shapes: which identifiers an action must carry and which it may carry.
 # (required fields, optional fields); every other field must be absent.
@@ -118,7 +117,6 @@ _SHAPES: dict[str, tuple[frozenset[str], frozenset[str]]] = {
     ARCHITECT_REPLY_COMMIT: (frozenset({"project_id"}), frozenset()),
     CONVERSATION_DELIVERY_RECONCILE: (frozenset({"project_id"}), frozenset()),
     ARCHITECT_CONTEXT_READ: (frozenset({"project_id"}), frozenset()),
-    ARCHITECT_CONTEXT_CONFIGURE: (frozenset({"project_id"}), frozenset()),
 }
 IMPLEMENTED_ACTIONS = frozenset(_SHAPES)
 

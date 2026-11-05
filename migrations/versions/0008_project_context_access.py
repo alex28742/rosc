@@ -1,10 +1,10 @@
-"""Project Context Access: standing provider-disclosure scopes and a content-free tool audit (P019).
+"""Project Context Access: a content-free Architect tool audit (P019).
 
-Additive only: two new tables. No existing row is read, rewritten or deleted.  Never applied at application start;
+Additive only: one new table. No existing row is read, rewritten or deleted.  Never applied at application start;
 the Owner backs up ``rosc.db`` (copy it while ROSC is stopped) and runs ``alembic upgrade head`` against an explicit
-``ROSC_DATA_DIR``.  Until a scope row exists and is enabled nothing private is returned to a provider.
+``ROSC_DATA_DIR``.  Revision 0008 was never applied to real data, so it is edited here rather than superseded.
 
-``downgrade`` drops only these two tables.
+``downgrade`` drops only this table.
 """
 
 from alembic import op
@@ -17,21 +17,6 @@ depends_on = None
 
 
 def upgrade() -> None:
-    op.create_table(
-        "provider_disclosure_scopes",
-        sa.Column("scope_id", sa.String(36), primary_key=True),
-        sa.Column("provider_id", sa.String(64), nullable=False),
-        sa.Column("model_id", sa.String(128), nullable=False),
-        sa.Column("category", sa.String(24), nullable=False),
-        sa.Column("covered", sa.String(8), nullable=False),
-        sa.Column("enabled", sa.Integer(), nullable=False),
-        sa.Column("updated_by", sa.String(64), nullable=False),
-        sa.Column("updated_at", sa.DateTime(timezone=True), nullable=False),
-        sa.CheckConstraint("category IN ('project_docs_own', 'project_docs_other', 'project_source')",
-                           name="ck_disclosure_scopes_category"),
-        sa.CheckConstraint("enabled IN (0, 1)", name="ck_disclosure_scopes_enabled"),
-        sa.UniqueConstraint("provider_id", "model_id", "category", "covered", name="uq_disclosure_scopes_target"),
-    )
     op.create_table(
         "architect_tool_audit",
         sa.Column("audit_id", sa.Integer(), primary_key=True),
@@ -48,4 +33,3 @@ def upgrade() -> None:
 
 def downgrade() -> None:
     op.drop_table("architect_tool_audit")
-    op.drop_table("provider_disclosure_scopes")

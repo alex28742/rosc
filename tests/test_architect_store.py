@@ -605,9 +605,8 @@ class AuthorizationSlotTests(ArchitectStoreCase):
         paths = {getattr(route, "path", "") for route in self.client.app.routes}
         activation = {"/api/projects/{project_id}/architect", "/api/projects/{project_id}/architect/activate",
                       "/api/projects/{project_id}/architect/deactivate",
-                      # P019: Owner-only effective access summary and standing disclosure scope; neither reads a document.
-                      "/api/projects/{project_id}/architect/context-access",
-                      "/api/projects/{project_id}/architect/context-access/disclosure"}
+                      # P019: Owner-only effective access summary; it reads no document.
+                      "/api/projects/{project_id}/architect/context-access"}
         self.assertFalse([p for p in paths - activation if "architect" in p.lower() or "document" in p.lower()], paths)
 
     def test_requires_a_ready_project_workspace(self) -> None:

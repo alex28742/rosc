@@ -992,20 +992,6 @@
   color: var(--rosc-muted);
 }
 
-.rosc-access__disclosure {
-  display: grid;
-  gap: 4px;
-  margin: 6px 0;
-  padding: 6px 8px;
-  border: 1px solid var(--rosc-border, currentColor);
-}
-
-.rosc-access__disclosure label {
-  display: flex;
-  gap: 6px;
-  align-items: flex-start;
-}
-
 .rosc-chat-message--architect {
   margin-right: auto;
 }

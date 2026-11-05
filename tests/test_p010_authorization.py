@@ -63,7 +63,7 @@ class ActorAndPolicyTests(unittest.TestCase):
                                  "task.create", "task.reconcile", "task.repair", "architect_document.list",
                                  "architect_document.read", "architect_document.write", "architect_document.reconcile"})
         self.assertTrue(m2b_actions <= authz.IMPLEMENTED_ACTIONS)
-        self.assertEqual(len(authz.IMPLEMENTED_ACTIONS), 34)
+        self.assertEqual(len(authz.IMPLEMENTED_ACTIONS), 33)
         policy = LocalOwnerPolicy()
         for action in sorted(authz.IMPLEMENTED_ACTIONS):
             self.assertTrue(evaluate(policy, OWNER, action, scope_for(action)).allowed, action)

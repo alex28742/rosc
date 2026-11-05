@@ -97,16 +97,12 @@ export type ArchitectStatus = {
 };
 
 /** Effective Architect access to context (P019). The matrix is Core's statement of what the ROSC Tools allow. */
-export type DisclosureCategory = 'project_docs_own' | 'project_docs_other' | 'project_source';
 export type ContextAccess = {
   project_id: string;
   matrix: { resource: string; operations: string; mode: 'read_only' | 'read_write' | 'denied' }[];
   tools: { transport: 'active' | 'inactive' | 'not_running' | 'not_available'; names: string[] };
   source: { bound: boolean; binding_version: number; docs_entrypoint: string | null; access: 'read_only' };
-  disclosure: {
-    default: 'none'; categories: DisclosureCategory[]; provider_id: string | null; model_id: string | null;
-    scopes: { category: DisclosureCategory; covered: string; enabled: boolean; updated_at: string }[]; note: string;
-  };
+  provider: { provider_id: string | null; model_id: string | null; note: string };
   publication: { automatic_sync: false; architect_git_operations: false; note: string };
 };
 

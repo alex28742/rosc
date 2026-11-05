@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { ApiError, coreApi, describeError, type CoreApi } from '../core/api';
-import { toAgentInput, toAgentUpdateInput, toProjectInput, toTaskInput, type AgentDefinition, type AgentFormValues, type ArchitectStatus, type ContextAccess, type DisclosureCategory, type ConversationMessage, type Project, type ProjectFormValues, type RepairConfirmation, type RepairResult, type RoleAssignment, type Task, type TaskFormValues } from '../core/models';
+import { toAgentInput, toAgentUpdateInput, toProjectInput, toTaskInput, type AgentDefinition, type AgentFormValues, type ArchitectStatus, type ContextAccess, type ConversationMessage, type Project, type ProjectFormValues, type RepairConfirmation, type RepairResult, type RoleAssignment, type Task, type TaskFormValues } from '../core/models';
 import type { Navigation } from './navigation';
 import type { AgentRegistryState, AssignmentIntent, Feedback, LoadStatus, ProjectAssignmentsState, ProjectTab } from './presentation/contracts';
 import { assignmentBaseline, ROLE_REQUIRED_CAPABILITIES } from './presentation/contracts';
@@ -37,8 +37,8 @@ const mergeMessages = (known: ConversationMessage[], incoming: ConversationMessa
   return [...byId.values()].sort((a, b) => a.ordinal - b.ordinal);
 };
 
-type AccessCache = { projectId: string | null; status: LoadStatus; info: ContextAccess | null; busy: boolean; error: string };
-const NO_ACCESS: AccessCache = { projectId: null, status: 'loading', info: null, busy: false, error: '' };
+type AccessCache = { projectId: string | null; status: LoadStatus; info: ContextAccess | null; error: string };
+const NO_ACCESS: AccessCache = { projectId: null, status: 'loading', info: null, error: '' };
 
 type ArchitectCache = { projectId: string | null; status: LoadStatus; info: ArchitectStatus | null; busy: boolean; error: string };
 const NO_ARCHITECT: ArchitectCache = { projectId: null, status: 'loading', info: null, busy: false, error: '' };
@@ -271,7 +271,7 @@ export function useWorkspaceController({ route, routeKey, go }: Navigation, api:
   const patchAccess = useCallback((id: string, patch: Partial<AccessCache>) => {
     setAccess(prev => (prev.projectId === id ? { ...prev, ...patch } : prev));
   }, []);
-  /** Read-only effective access summary; never starts anything and never discloses content. */
+  /** Read-only effective access summary; never starts anything and sends nothing. */
   const loadAccess = useCallback(async (id: string) => {
     const seq = ++accessSeq.current;
     try {
@@ -279,22 +279,6 @@ export function useWorkspaceController({ route, routeKey, go }: Navigation, api:
       if (seq === accessSeq.current) patchAccess(id, { status: 'ready', info, error: '' });
     } catch (e) {
       if (seq === accessSeq.current) patchAccess(id, { status: 'failed', error: describeError(e) });
-    }
-  }, [api, patchAccess]);
-  const changeDisclosure = useCallback(async (category: DisclosureCategory, enabled: boolean): Promise<string | null> => {
-    const id = projectIdOf(routeRef.current);
-    if (!id) return 'Проект не открыт.';
-    patchAccess(id, { busy: true, error: '' });
-    const seq = ++accessSeq.current;
-    try {
-      const info = await api.setContextDisclosure(id, category, enabled);
-      if (seq === accessSeq.current) patchAccess(id, { info, status: 'ready', busy: false, error: '' });
-      else patchAccess(id, { busy: false });
-      return null;
-    } catch (e) {
-      const message = describeError(e);
-      patchAccess(id, { busy: false, error: message });
-      return message;
     }
   }, [api, patchAccess]);
 
@@ -591,10 +575,8 @@ export function useWorkspaceController({ route, routeKey, go }: Navigation, api:
     contextAccess: {
       status: access.projectId === projectId ? access.status : 'loading' as LoadStatus,
       info: access.projectId === projectId ? access.info : null,
-      busy: access.projectId === projectId && access.busy,
       error: access.projectId === projectId ? access.error : '',
     },
-    onSetDisclosure: changeDisclosure,
     onActivate: () => changeArchitect('activate'),
     onDeactivate: () => changeArchitect('deactivate'),
     onReconcile: (messageId: string) => changeDelivery(messageId, 'reconcile'),

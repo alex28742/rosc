@@ -132,14 +132,6 @@ class ContextCase(base.StageCase):
         self.assertEqual(response.json()["state"], "ready", response.json())
         return response.json()["session"]["session_id"]
 
-    def consent(self, category: str, covered: str = "all", enabled: bool = True):
-        return self.client.put("/api/projects/P0001/architect/context-access/disclosure",
-                               json={"category": category, "covered": covered, "enabled": enabled})
-
-    def consent_all(self) -> None:
-        for category in ("project_docs_own", "project_docs_other", "project_source"):
-            self.assertEqual(self.consent(category).status_code, 200)
-
     def model_calls(self, calls: list[dict]) -> list[dict]:
         """Scripted model: the fake performs these through permission check + the real MCP transport."""
         log = self.bin / "tool_log.jsonl"
@@ -175,7 +167,6 @@ class TransportTests(ContextCase):
 
     def test_rosc_tools_work_and_native_tools_stay_denied(self) -> None:
         self.activate()
-        self.consent_all()
         entries = self.model_calls([{"native": name} for name in ("read", "shell", "edit", "webfetch", "subagent")]
                                    + [{"tool": "briefing"}])
         self.assertEqual([e["allowed"] for e in entries], [False] * 5 + [True])
@@ -249,7 +240,6 @@ class TransportTests(ContextCase):
 class OwnDocumentTests(ContextCase):
     def test_crud_with_revisions_conflict_recoverable_delete_and_restart(self) -> None:
         session_id = self.activate()
-        self.consent_all()
         created = self.one("docs_create", doc_id="plan", content=f"# Plan\n{MARK_A}\n", logical_path="plans/main")
         self.assertTrue(created["ok"], created)
         self.assertEqual((created["result"]["revision"], created["result"]["project_id"]), (1, "P0001"))
@@ -287,9 +277,41 @@ class OwnDocumentTests(ContextCase):
         self.assertEqual(self.client.get("/api/projects/P0001/architect/context-access").json()["tools"]["transport"],
                          "inactive")
 
+    def test_text_plain_documents_update_losslessly_through_the_tools(self) -> None:
+        self.activate()
+        created = self.one("docs_create", doc_id="notes-txt", content="plain v1 \u2014 \u043f\u0440\u0438\u0432\u0435\u0442\n",
+                           media_type="text/plain", logical_path="notes/plain")
+        self.assertTrue(created["ok"], created)
+        self.assertEqual((created["result"]["media_type"], created["result"]["revision"]), ("text/plain", 1))
+        self.assertEqual(self.one("docs_read", doc_id="notes-txt")["result"]["content"], "plain v1 \u2014 \u043f\u0440\u0438\u0432\u0435\u0442\n")
+        # an update that says nothing about the format keeps the document's own media type
+        updated = self.one("docs_update", doc_id="notes-txt", content="plain v2\n\n  keep   spacing\n", expected_revision=1)
+        self.assertTrue(updated["ok"], updated)
+        self.assertEqual((updated["result"]["media_type"], updated["result"]["revision"]), ("text/plain", 2))
+        self.assertEqual(self.one("docs_read", doc_id="notes-txt")["result"]["content"], "plain v2\n\n  keep   spacing\n")
+        history = self.one("docs_read", doc_id="notes-txt", revision=1)["result"]
+        self.assertEqual((history["content"], history["revision"], history["current_revision"]),
+                         ("plain v1 \u2014 \u043f\u0440\u0438\u0432\u0435\u0442\n", 1, 2))
+        # the update tool offers no format change at all, and the document keeps its type and content
+        changed = self.one("docs_update", doc_id="notes-txt", content="# md", expected_revision=2, media_type="text/markdown")
+        self.assertEqual((changed["ok"], changed["error"]["code"]), (False, "invalid_argument"))
+        info = self.store().read(1, "notes-txt").info
+        self.assertEqual((info.revision, info.media_type), (2, "text/plain"))
+        self.assertEqual(self.store().read(1, "notes-txt").text, "plain v2\n\n  keep   spacing\n")
+        # a second plain update, then a stale revision is still denied with the current revision reported
+        third = self.one("docs_update", doc_id="notes-txt", content="plain v3", expected_revision=2)["result"]
+        self.assertEqual((third["revision"], third["media_type"]), (3, "text/plain"))
+        stale = self.one("docs_update", doc_id="notes-txt", content="stale", expected_revision=2)
+        self.assertEqual((stale["error"]["code"], stale["error"]["current_revision"]), ("revision_conflict", 3))
+        self.assertEqual(self.store().read(1, "notes-txt").text, "plain v3")
+        # Markdown documents are unaffected
+        self.one("docs_create", doc_id="md-doc", content="# one")
+        md = self.one("docs_update", doc_id="md-doc", content="# two", expected_revision=1)["result"]
+        self.assertEqual((md["media_type"], md["revision"]), ("text/markdown", 2))
+        self.assertEqual(self.one("docs_update", doc_id="absent", content="x", expected_revision=1)["error"]["code"], "not_found")
+
     def test_documents_live_outside_every_checkout_and_other_dirs_are_untouched(self) -> None:
         self.activate()
-        self.consent_all()
         before = {label: sorted(p.name for p in root.iterdir()) for label, root in self.roots.items()}
         self.one("docs_create", doc_id="private", content=MARK_A)
         self.assertEqual(before, {label: sorted(p.name for p in root.iterdir()) for label, root in self.roots.items()})
@@ -299,7 +321,6 @@ class OwnDocumentTests(ContextCase):
 
     def test_trash_restore_refuses_when_the_id_was_reused(self) -> None:
         self.activate()
-        self.consent_all()
         self.one("docs_create", doc_id="n", content="one")
         trash_id = self.one("docs_delete", doc_id="n", expected_revision=1)["result"]["trash_id"]
         self.one("docs_create", doc_id="n", content="two")
@@ -308,7 +329,6 @@ class OwnDocumentTests(ContextCase):
 
     def test_invalid_ids_and_content_are_reported_not_applied(self) -> None:
         self.activate()
-        self.consent_all()
         for doc_id in ("../x", "A/B", "", "a" * 80):
             self.assertFalse(self.one("docs_create", doc_id=doc_id, content="x")["ok"], doc_id)
         self.assertFalse(self.one("docs_create", doc_id="ok-id", content="")["ok"])
@@ -317,7 +337,6 @@ class OwnDocumentTests(ContextCase):
 
     def test_search_finds_own_content_with_provenance(self) -> None:
         self.activate()
-        self.consent_all()
         self.one("docs_create", doc_id="alpha", content=f"intro {MARK_A} tail")
         hit = self.one("docs_search", query=MARK_A.lower())["result"]
         self.assertEqual([m["doc_id"] for m in hit["matches"]], ["alpha"])
@@ -325,75 +344,60 @@ class OwnDocumentTests(ContextCase):
         self.assertIn(MARK_A, hit["matches"][0]["snippet"])
 
 
-class DisclosureTests(ContextCase):
-    def test_nothing_private_is_returned_without_an_enabled_scope(self) -> None:
-        session_id = self.activate()
-        self.store().write(1, "seed", f"{MARK_A}", actor_id="x")
-        self.store().write(2, "seed", f"{MARK_B}", actor_id="x")
-        calls = [("docs_list", {}), ("docs_read", {"doc_id": "seed"}), ("docs_search", {"query": "SYNTH"}),
-                 ("docs_list", {"project": "P0002"}), ("docs_read", {"doc_id": "seed", "project": "P0002"}),
-                 ("source_list", {}), ("source_read", {"path": "README.md"}), ("source_search", {"query": "entry"}),
-                 ("source_git", {})]
-        for tool, args in calls:
-            outcome = self.direct(session_id, tool, **args)
-            self.assertEqual(outcome["error"]["code"], "consent_required", (tool, outcome))
-            blob = json.dumps(outcome)
-            for marker in (MARK_A, MARK_B, MARK_SRC, "seed", "README"):
-                self.assertNotIn(marker, blob)
-        briefing = self.direct(session_id, "briefing")["result"]
-        self.assertEqual(briefing["architect_documents"]["status"], "consent_required")
-        self.assertNotIn("seed", json.dumps(briefing))
+class NoConsentGateTests(ContextCase):
+    """The Owner's provider/model choice plus explicit activation is the only gate; the four-tier matrix does the rest."""
 
-    def test_scope_is_per_provider_model_category_and_project_and_revocable(self) -> None:
+    def test_authorized_reads_work_immediately_without_any_disclosure_step(self) -> None:
         session_id = self.activate()
+        self.store().write(1, "seed", MARK_A, actor_id="x")
         self.store().write(2, "seed", MARK_B, actor_id="x")
-        self.store().write(3, "seed", "gamma-text", actor_id="x")
-        self.assertEqual(self.consent("project_docs_other", "P0003").status_code, 200)
-        self.assertEqual(self.direct(session_id, "docs_read", doc_id="seed", project="P0002")["error"]["code"],
-                         "consent_required")
-        self.assertIn("gamma-text", self.direct(session_id, "docs_read", doc_id="seed", project="P0003")["result"]["content"])
-        # another category is a different decision
-        self.assertEqual(self.direct(session_id, "docs_list")["error"]["code"], "consent_required")
-        self.consent("project_docs_other", "P0003", enabled=False)
-        self.assertEqual(self.direct(session_id, "docs_read", doc_id="seed", project="P0003")["error"]["code"],
-                         "consent_required")
-        # a scope for a DIFFERENT model never applies
-        with self.sessions() as session:
-            from rosc.models import ProviderDisclosureScope
-            session.add(ProviderDisclosureScope(scope_id="11111111-1111-4111-8111-111111111111", provider_id="prov",
-                                                model_id="other-model", category="project_docs_other", covered="all",
-                                                enabled=1, updated_by="x"))
-            session.commit()
-        self.assertEqual(self.direct(session_id, "docs_read", doc_id="seed", project="P0002")["error"]["code"],
-                         "consent_required")
+        own = self.direct(session_id, "docs_read", doc_id="seed")
+        other = self.direct(session_id, "docs_read", doc_id="seed", project="P0002")
+        self.assertIn(MARK_A, own["result"]["content"])
+        self.assertIn(MARK_B, other["result"]["content"])
+        self.assertEqual(other["result"]["scope"], "other_project_read_only")
+        self.assertIn(MARK_SRC, self.direct(session_id, "source_read", path="README.md")["result"]["content"])
+        self.assertTrue(self.direct(session_id, "docs_search", query="SYNTH")["result"]["matches"])
+        briefing = self.direct(session_id, "briefing")["result"]
+        self.assertEqual(briefing["architect_documents"]["status"], "listed")
+        for tool, args in (("docs_list", {}), ("source_list", {}), ("source_search", {"query": "entry"})):
+            self.assertTrue(self.direct(session_id, tool, **args)["ok"], tool)
+        self.assertNotIn("consent_required", json.dumps(self.audit_outcomes()))
 
-    def test_owner_api_validates_input_and_status_reports_defaults(self) -> None:
+    def audit_outcomes(self) -> list[str]:
+        return [row.outcome for row in self.audit()]
+
+    def test_matrix_still_denies_what_it_never_allowed_and_the_disclosure_surface_is_gone(self) -> None:
+        session_id = self.activate()
+        self.assertEqual(self.direct(session_id, "docs_create", doc_id="x", content="c", project="P0002")["error"]["code"],
+                         "write_other_project_denied")
+        self.assertEqual(self.direct(session_id, "source_read", path="README.md", project="P0002")["error"]["code"],
+                         "source_other_project_denied")
+        self.assertEqual(self.client.put("/api/projects/P0001/architect/context-access/disclosure",
+                                         json={"category": "project_source", "covered": "all", "enabled": True}).status_code, 404)
+        self.assertFalse(hasattr(self.architect, "set_disclosure"))
+        import rosc.models as models
+        self.assertFalse(hasattr(models, "ProviderDisclosureScope"))
+
+    def test_access_summary_is_an_owner_readable_description_not_a_set_of_switches(self) -> None:
         self.activate()
         view = self.client.get("/api/projects/P0001/architect/context-access").json()
         self.assertEqual(view["tools"]["transport"], "active")
-        self.assertEqual(view["disclosure"]["default"], "none")
-        self.assertEqual(view["disclosure"]["scopes"], [])
+        self.assertNotIn("disclosure", view)
+        self.assertEqual((view["provider"]["provider_id"], view["provider"]["model_id"]), ("prov", "model-a"))
+        self.assertIn("Owner-selected provider/model", view["provider"]["note"])
         self.assertEqual(view["source"], {"bound": True, "binding_version": 1, "docs_entrypoint": "README.md",
                                           "access": "read_only"})
         self.assertEqual([m["mode"] for m in view["matrix"]], ["read_only", "read_write", "read_only", "read_only", "denied"])
         self.assertFalse(view["publication"]["automatic_sync"])
-        self.assertEqual(self.consent("everything").status_code, 409)
-        self.assertEqual(self.consent("project_source", "P0099").status_code, 409)
-        self.assertEqual(self.consent("project_source", "nonsense").status_code, 409)
-        self.assertEqual(self.client.put("/api/projects/P0001/architect/context-access/disclosure",
-                                         json={"category": "project_source"}).status_code, 422)
-        self.assertEqual(self.consent("project_source").status_code, 200)
-        scopes = self.client.get("/api/projects/P0001/architect/context-access").json()["disclosure"]["scopes"]
-        self.assertEqual([(s["category"], s["covered"], s["enabled"]) for s in scopes], [("project_source", "all", True)])
 
-    def test_agents_have_no_authority_over_the_scope(self) -> None:
+    def test_agents_have_no_authority_over_the_summary(self) -> None:
         agent = ActorContext(ACTOR_AGENT, self.agent["agent_id"], "adapter_verified")
-        for action in ("architect.context.read", "architect.context.configure"):
-            self.assertFalse(evaluate(LocalOwnerPolicy(), agent, action, ResourceScope(project_id=1)).allowed)
+        self.assertFalse(evaluate(LocalOwnerPolicy(), agent, "architect.context.read", ResourceScope(project_id=1)).allowed)
         with self.assertRaises(Exception):
-            self.architect.set_disclosure(agent, 1, category="project_source", covered="all", enabled=True)
+            self.architect.context_access(agent, 1)
 
-    def test_opening_a_project_discloses_nothing_and_starts_nothing(self) -> None:
+    def test_opening_a_project_sends_nothing_and_starts_nothing(self) -> None:
         self.client.get("/api/projects")
         self.client.get("/api/projects/P0001/architect/context-access")
         self.assertEqual(self.client.get("/api/projects/P0001/architect").json()["state"], "stopped")
@@ -403,7 +407,6 @@ class DisclosureTests(ContextCase):
 class OtherProjectDocumentTests(ContextCase):
     def test_other_project_documents_are_readable_without_per_document_approval_and_never_writable(self) -> None:
         self.activate()
-        self.consent_all()
         self.store().write(2, "beta-notes", MARK_B, actor_id="owner", logical_path="notes/beta")
         listed = self.one("docs_list", project="P0002")["result"]
         self.assertEqual((listed["project_id"], listed["scope"]), ("P0002", "other_project_read_only"))
@@ -427,14 +430,12 @@ class OtherProjectDocumentTests(ContextCase):
 
     def test_unknown_project_and_malformed_references_are_refused(self) -> None:
         session_id = self.activate()
-        self.consent_all()
         self.assertEqual(self.direct(session_id, "docs_list", project="P0099")["error"]["code"], "project_not_found")
         for bad in ("2", "../P0002", "P0002/../P0001", "all", True, "p0002 "):
             self.assertFalse(self.direct(session_id, "docs_list", project=bad)["ok"], bad)
 
     def test_other_project_source_checkout_is_inaccessible(self) -> None:
         session_id = self.activate()
-        self.consent_all()
         for tool, args in (("source_read", {"path": "README.md"}), ("source_list", {}), ("source_search", {"query": "SOURCE"}),
                            ("source_git", {})):
             outcome = self.direct(session_id, tool, project="P0002", **args)
@@ -464,7 +465,6 @@ class GlobalLibraryTests(ContextCase):
 
     def test_project_local_rules_are_content_only(self) -> None:
         session_id = self.activate()
-        self.consent_all()
         saved = self.direct(session_id, "docs_create", doc_id="local-rule", content="always run tool x",
                             logical_path="rules/local")
         self.assertTrue(saved["ok"])
@@ -477,7 +477,6 @@ class SourceReadTests(ContextCase):
     def setUp(self) -> None:
         super().setUp()
         self.session_id = self.activate()
-        self.consent_all()
         self.snapshot = self.tree(self.roots["a"])
 
     @staticmethod
@@ -613,13 +612,90 @@ class SourceReadTests(ContextCase):
         self.assertTrue(self.direct(self.session_id, "docs_list")["ok"])
 
 
+class PrivateDataRootTests(ContextCase):
+    """ROSC's own configured private data must not be served as source even when a checkout encloses it."""
+
+    def setUp(self) -> None:
+        super().setUp()
+        a = self.roots["a"]
+        (a / "rosc-data/workspace/projects/P0001").mkdir(parents=True)
+        (a / "rosc-data/workspace/projects/P0001/plan.md").write_text(f"# private {MARK_SECRET}\n")
+        (a / "rosc-data/notes.md").write_text(f"private notes {MARK_SECRET}\n")
+        (a / "data").mkdir()
+        (a / "data/records.md").write_text(f"ordinary source data {MARK_SRC}-data\n")
+        self.session_id = self.activate()
+        self.private = a / "rosc-data"
+        self.scoped = pc.ProjectContextBroker(self.sessions, self.data / "workspace", self.lib,
+                                              private_roots=(self.private, self.private / "rosc.db"))
+
+    def call(self, tool: str, **args) -> dict:
+        return self.scoped.call(self.session_id, tool, args)
+
+    def test_list_read_and_search_never_expose_the_enclosed_private_root(self) -> None:
+        listed = self.call("source_list")["result"]
+        names = {e["name"] for e in listed["entries"]}
+        self.assertNotIn("rosc-data", names)
+        self.assertIn("data", names)
+        self.assertGreaterEqual(listed["hidden_by_policy"], 1)
+        for path in ("rosc-data", "rosc-data/workspace", "rosc-data/workspace/projects/P0001"):
+            self.assertEqual(self.call("source_list", path=path)["error"]["code"], "path_excluded", path)
+        for path in ("rosc-data/notes.md", "rosc-data/workspace/projects/P0001/plan.md"):
+            outcome = self.call("source_read", path=path)
+            self.assertEqual(outcome["error"]["code"], "path_excluded", path)
+            self.assertNotIn(MARK_SECRET, json.dumps(outcome))
+        for kwargs in ({}, {"path": "rosc-data"}):
+            found = self.call("source_search", query=MARK_SECRET, **kwargs)
+            if "path" in kwargs:
+                self.assertEqual(found["error"]["code"], "path_excluded")
+            else:
+                self.assertEqual(found["result"]["matches"], [])  # the root's private files were never scanned
+                self.assertNotIn("rosc-data", json.dumps(found["result"]["matches"]))
+        # the same Tool surface without the configured root WOULD have served it (the exclusion is what protects it)
+        unscoped = self.broker.call(self.session_id, "source_read", {"path": "rosc-data/notes.md"})
+        self.assertIn(MARK_SECRET, unscoped["result"]["content"])
+
+    def test_an_ordinary_data_directory_and_normal_source_stay_readable(self) -> None:
+        self.assertIn(MARK_SRC, self.call("source_read", path="data/records.md")["result"]["content"])
+        self.assertEqual(self.call("source_list", path="data")["result"]["entries"][0]["name"], "records.md")
+        hit = self.call("source_search", query=f"{MARK_SRC}-data")["result"]
+        self.assertEqual([m["path"] for m in hit["matches"]], ["data/records.md"])
+        self.assertIn(MARK_SRC, self.call("source_read", path="README.md")["result"]["content"])
+
+    def test_cross_project_rosc_documents_remain_readable(self) -> None:
+        self.store().write(2, "seed", MARK_B, actor_id="x")
+        self.assertIn(MARK_B, self.call("docs_read", doc_id="seed", project="P0002")["result"]["content"])
+
+    def test_a_checkout_that_is_the_private_root_itself_is_refused(self) -> None:
+        whole = pc.ProjectContextBroker(self.sessions, self.data / "workspace", self.lib,
+                                        private_roots=(self.roots["a"],))
+        outcome = whole.call(self.session_id, "source_read", {"path": "README.md"})
+        self.assertEqual(outcome["error"]["code"], "root_unavailable")
+        self.assertNotIn(MARK_SRC, json.dumps(outcome))
+
+    def test_git_facts_do_not_name_private_paths(self) -> None:
+        if not HAVE_GIT:
+            self.skipTest("git unavailable")
+        a = self.roots["a"]
+        self.git(a, "add", "-f", "rosc-data/notes.md")
+        self.git(a, "-c", "user.name=t", "-c", "user.email=t@example.invalid", "commit", "-q", "-m", "tracked private")
+        (a / "rosc-data/notes.md").write_text("changed\n")
+        (a / "src/app.py").write_text("changed = 1\n")
+        status = self.call("source_git", operation="status")["result"]
+        self.assertEqual(status["changed_files"], ["src/app.py"])
+        self.assertNotIn("rosc-data", json.dumps(status))
+
+    def test_the_application_wires_the_actual_data_and_workspace_roots(self) -> None:
+        wired = self.architect._context._private_roots
+        for expected in (self.data, self.data / "rosc.db", self.data / "workspace"):
+            self.assertIn(os.path.realpath(expected), wired)
+
+
 class GitFactsTests(ContextCase):
     def setUp(self) -> None:
         super().setUp()
         if not HAVE_GIT:
             self.skipTest("git is not installed")
         self.session_id = self.activate()
-        self.consent_all()
 
     def test_head_status_and_log_are_read_only_facts(self) -> None:
         index = self.roots["a"] / ".git/index"
@@ -657,7 +733,6 @@ class GitFactsTests(ContextCase):
 class BriefingAndContextTests(ContextCase):
     def test_briefing_is_core_state_with_source_route_and_no_invented_evidence(self) -> None:
         session_id = self.activate()
-        self.consent_all()
         self.store().write(1, "adr-1", "x", actor_id="owner", logical_path="adr/one")
         briefing = self.direct(session_id, "briefing")["result"]
         self.assertEqual(briefing["kind"], "core_state")
@@ -671,7 +746,6 @@ class BriefingAndContextTests(ContextCase):
 
     def test_prompt_carries_concise_rules_and_route_but_no_documents_or_source(self) -> None:
         self.activate()
-        self.consent_all()
         self.store().write(1, "adr-1", MARK_A, actor_id="owner")
         self.client.post("/api/projects/P0001/conversation/messages", json={"client_key": "plain-0001-xx", "body": "Hello"})
         self.architect.drain()
@@ -717,7 +791,6 @@ class BriefingAndContextTests(ContextCase):
 class AuditAndPublicationTests(ContextCase):
     def test_audit_records_operations_without_content_and_nothing_is_published(self) -> None:
         self.activate()
-        self.consent_all()
         self.one("docs_create", doc_id="secret-plan", content=MARK_A)
         self.one("docs_read", doc_id="secret-plan")
         self.one("docs_update", doc_id="secret-plan", content="x", expected_revision=9)
@@ -733,7 +806,6 @@ class AuditAndPublicationTests(ContextCase):
 
     def test_tool_failures_never_break_the_transport_or_leak_exceptions(self) -> None:
         session_id = self.activate()
-        self.consent_all()
         with patch.object(self.broker._store, "list", side_effect=RuntimeError("boom /private/path")):
             outcome = self.direct(session_id, "docs_list")
         self.assertEqual(outcome, {"ok": False, "error": {"code": "internal_error", "message": "The tool failed"}})
@@ -753,13 +825,14 @@ class MigrationTests(base.StageCase):
         from alembic import command
         self.client.close()
         command.downgrade(self.alembic, "0007_architect_reply_unbounded_body")
-        self.assertFalse({"provider_disclosure_scopes", "architect_tool_audit"} & self.tables())
+        self.assertFalse({"architect_tool_audit"} & self.tables())
         client = TestClient(create_app(self.data / "rosc.db", self.data / "workspace"), base_url="http://localhost")
         self.assertEqual(client.post("/api/projects", json={
             "name": "Kept", "description": "d", "root_path": str(self.new_root()), "mode": "new"}).status_code, 201)
         client.close()
         command.upgrade(self.alembic, "head")
-        self.assertTrue({"provider_disclosure_scopes", "architect_tool_audit"} <= self.tables())
+        self.assertTrue({"architect_tool_audit"} <= self.tables())
+        self.assertNotIn("provider_disclosure_scopes", self.tables())
         client = TestClient(create_app(self.data / "rosc.db", self.data / "workspace"), base_url="http://localhost")
         self.assertEqual([p["name"] for p in client.get("/api/projects").json()], ["Kept"])
         client.close()

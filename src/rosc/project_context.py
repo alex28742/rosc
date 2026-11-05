@@ -15,9 +15,10 @@ collaborators; the point is to prevent plausible *mistakes* and to keep provenan
   versioned ``ArchitectDocumentStore`` (selected by Project id + document id, never by an OS path); the bound external
   checkout is addressed relative to the *current* validated Root Binding only; the global library is read relative to
   one configured directory.
-* Reading local resources is authorized by the matrix; returning private content, names or excerpts to the remote
-  model is *disclosure* and additionally needs an enabled, Owner-configured standing scope for the session's
-  provider/model and the resource category.  Without it a call answers ``consent_required`` with no private payload.
+* Reading local resources is authorized by the matrix alone.  The Owner chose the provider/model and explicitly
+  activated this session, so what the verified session may call may be returned to that model; there is no separate
+  per-category disclosure switch.  Nothing is uploaded at activation: content leaves only as the result of one
+  allowed tool call.
 * Content is evidence, not instructions.  Nothing here publishes, syncs, stages, commits or pushes anything.
 
 No claim of an OS-level sandbox: containment is verified relative-path resolution with ``O_NOFOLLOW`` at every
@@ -45,15 +46,14 @@ from sqlalchemy.orm import Session, sessionmaker
 from .architect_store import (ArchitectDocumentStore, Document, DocumentExists, DocumentInfo, DocumentNotFound,
                               InvalidDocument, RevisionConflict, StoreDiagnostic, StoreError, UnsafeStore,
                               CommitUncertain, normalize_doc_id)
-from .models import (ASSIGNMENT_ACTIVE, DISCLOSURE_ALL, DISCLOSURE_CATEGORIES, ROLE_ARCHITECT, SESSION_READY,
+from .models import (ASSIGNMENT_ACTIVE, ROLE_ARCHITECT, SESSION_READY,
                      AgentDefinition, ArchitectSession, ArchitectToolAudit, Conversation, ConversationMessage,
-                     Project, ProjectIdentityError, ProviderDisclosureScope, RoleAssignment, Task,
+                     Project, ProjectIdentityError, RoleAssignment, Task,
                      validate_project_identity, CONVERSATION_KIND_PROJECT)
 from .workspace import READY, inspect_project
 
 log = logging.getLogger(__name__)
 
-CATEGORY_OWN, CATEGORY_OTHER, CATEGORY_SOURCE = DISCLOSURE_CATEGORIES
 CAP_CONTEXT_READ = "project.context.read"
 CAP_DOC_READ = "architect.document.read"
 CAP_DOC_WRITE = "architect.document.write"
@@ -250,9 +250,12 @@ def _bounded_int(value: object, default: int, low: int, high: int) -> int:
 # -- the broker ----------------------------------------------------------------------------------------------------------
 class ProjectContextBroker:
     def __init__(self, session_factory: sessionmaker[Session], workspace_root: Path,
-                 global_library_root: Path | None = None) -> None:
+                 global_library_root: Path | None = None, private_roots: tuple[Path, ...] = ()) -> None:
         self._sessions = session_factory
         self._workspace = Path(workspace_root)
+        # The configured ROSC-owned private data locations (database, Workspace, runtime).  A bound source checkout that
+        # happens to enclose one of them must never serve it through SourceRead; `.gitignore` is not such a boundary.
+        self._private_roots = tuple(os.path.realpath(root) for root in (self._workspace, *private_roots))
         self._store = ArchitectDocumentStore(self._workspace)
         self._global_root = global_library_root
         self._pinned: dict[str, int] = {}  # ROSC session id -> Root Binding version captured at activation
@@ -319,22 +322,6 @@ class ProjectContextBroker:
             raise ToolError("invalid_argument", "project must be a Project id such as P0001")
         return int(match.group(1))
 
-    # -- disclosure ---------------------------------------------------------------------------------------------------
-    @staticmethod
-    def disclosed(session: Session, caller: Caller, category: str, target_project_id: int) -> bool:
-        rows = session.scalars(select(ProviderDisclosureScope).where(
-            ProviderDisclosureScope.provider_id == caller.provider_id,
-            ProviderDisclosureScope.model_id == caller.model_id,
-            ProviderDisclosureScope.category == category, ProviderDisclosureScope.enabled == 1,
-            ProviderDisclosureScope.covered.in_((DISCLOSURE_ALL, project_label(target_project_id)))))
-        return rows.first() is not None
-
-    def _consent(self, session: Session, caller: Caller, category: str, target_project_id: int) -> None:
-        if not self.disclosed(session, caller, category, target_project_id):
-            raise ToolError("consent_required",
-                            "The Owner has not enabled disclosure of this resource category to this provider/model",
-                            category=category, project_id=project_label(target_project_id))
-
     # -- entry point ---------------------------------------------------------------------------------------------------
     def call(self, session_id: str, tool: str, args: object) -> dict:
         """Run one tool.  Always returns ``{"ok": bool, ...}``; never raises to the transport and never logs content."""
@@ -395,14 +382,10 @@ class ProjectContextBroker:
         self._require(caller, CAP_CONTEXT_READ)
         project = self._project(session, caller.project_id)
         binding = validate_project_identity(project)
-        own_status: dict
-        if self.disclosed(session, caller, CATEGORY_OWN, caller.project_id):
-            docs = [i for i in self._store.list(caller.project_id) if isinstance(i, DocumentInfo)]
-            own_status = {"status": "listed", "count": len(docs),
-                          "documents": [{"doc_id": d.doc_id, "logical_path": d.logical_path, "revision": d.revision}
-                                        for d in docs[:20]], "complete": len(docs) <= 20}
-        else:
-            own_status = {"status": "consent_required", "category": CATEGORY_OWN}
+        docs = [i for i in self._store.list(caller.project_id) if isinstance(i, DocumentInfo)]
+        own_status = {"status": "listed", "count": len(docs),
+                      "documents": [{"doc_id": d.doc_id, "logical_path": d.logical_path, "revision": d.revision}
+                                    for d in docs[:20]], "complete": len(docs) <= 20}
         tasks = session.scalar(select(func.count()).select_from(Task).where(Task.project_id == caller.project_id)) or 0
         messages = session.scalar(select(func.count()).select_from(ConversationMessage).join(
             Conversation, Conversation.conversation_id == ConversationMessage.conversation_id).where(
@@ -479,18 +462,15 @@ class ProjectContextBroker:
                 "sha256": info.sha256, "size": info.size, "media_type": info.media_type,
                 "updated_at": info.updated_at}
 
-    def _docs_scope(self, session: Session, caller: Caller, args: dict) -> tuple[int, str, str]:
-        """Resolve the target Project and its disclosure category; routine local reads need no per-target approval."""
+    def _docs_scope(self, session: Session, caller: Caller, args: dict) -> tuple[int, str]:
+        """Resolve the target Project; routine local reads need no per-target approval."""
         self._require(caller, CAP_DOC_READ)
         target = self._target(caller, args.get("project"))
         self._project(session, target)
-        own = target == caller.project_id
-        category = CATEGORY_OWN if own else CATEGORY_OTHER
-        self._consent(session, caller, category, target)
-        return target, category, "own" if own else "other_project_read_only"
+        return target, "own" if target == caller.project_id else "other_project_read_only"
 
     def tool_docs_list(self, session: Session, caller: Caller, args: dict) -> dict:
-        target, _category, scope = self._docs_scope(session, caller, args)
+        target, scope = self._docs_scope(session, caller, args)
         items = self._store.list(target)
         docs = [self._doc_row(i) for i in items if isinstance(i, DocumentInfo)]
         offset = _bounded_int(args.get("offset"), 0, 0, 10 ** 9)
@@ -507,7 +487,7 @@ class ProjectContextBroker:
         return result
 
     def tool_docs_read(self, session: Session, caller: Caller, args: dict) -> dict:
-        target, _category, scope = self._docs_scope(session, caller, args)
+        target, scope = self._docs_scope(session, caller, args)
         revision = args.get("revision")
         if revision is not None and (isinstance(revision, bool) or not isinstance(revision, int)):
             raise ToolError("invalid_argument", "revision must be an integer")
@@ -539,7 +519,6 @@ class ProjectContextBroker:
             own = target == caller.project_id
             try:
                 self._project(session, target)
-                self._consent(session, caller, CATEGORY_OWN if own else CATEGORY_OTHER, target)
             except ToolError as exc:
                 if scope_arg == "all":
                     skipped.append({"project_id": project_label(target), "reason": exc.code})
@@ -594,8 +573,11 @@ class ProjectContextBroker:
         if isinstance(expected, bool) or not isinstance(expected, int):
             raise ToolError("invalid_argument", "expected_revision (the revision you read) is required")
         existing = normalize_doc_id(str(args.get("doc_id") or ""))
+        # An update never changes the format: keep the document's own media type (a different explicit one is refused
+        # by the store as a format change), so text/plain documents update losslessly with the same revision checks.
+        current = self._store.read(caller.project_id, existing).info.media_type
         info = self._store.write(caller.project_id, existing, self._content(args), actor_id=caller.actor_id,
-                                 expected_revision=expected, media_type=args.get("media_type") or "text/markdown",
+                                 expected_revision=expected, media_type=args.get("media_type") or current,
                                  logical_path=args.get("logical_path"))
         return {"kind": "architect_document_saved", "project_id": project_label(caller.project_id),
                 "scope": "own", "created": False, **self._doc_row(info), "saved_at": _iso()}
@@ -628,7 +610,7 @@ class ProjectContextBroker:
                 "scope": "own", **self._doc_row(info), "restored_at": _iso()}
 
     # -- the bound external source checkout (READ ONLY) -------------------------------------------------------------
-    def _source_root(self, session: Session, caller: Caller) -> tuple[str, int]:
+    def _source_root(self, session: Session, caller: Caller) -> tuple[str, int, tuple[tuple[str, ...], ...]]:
         self._require(caller, CAP_CONTEXT_READ)
         project = self._project(session, caller.project_id, writable_workspace=False)
         binding = validate_project_identity(project)
@@ -637,14 +619,29 @@ class ProjectContextBroker:
             raise ToolError("root_binding_changed", "The Project Root Binding changed; reactivate the Architect")
         if not os.path.isabs(binding.root_path):
             raise ToolError("root_unavailable", "The bound root is not available")
-        self._consent(session, caller, CATEGORY_SOURCE, caller.project_id)
-        return binding.root_path, binding.version
+        real = os.path.realpath(binding.root_path)
+        excluded: list[tuple[str, ...]] = []
+        for private in self._private_roots:
+            if private == real:
+                raise ToolError("root_unavailable", "The bound root is ROSC's own private data location")
+            if private.startswith(real + os.sep):
+                excluded.append(tuple(Path(private).relative_to(real).parts))
+        return binding.root_path, binding.version, tuple(excluded)
+
+    @staticmethod
+    def _private(parts: list[str] | tuple[str, ...], excluded: tuple[tuple[str, ...], ...]) -> bool:
+        return any(tuple(parts[:len(prefix)]) == prefix for prefix in excluded)
+
+    def _deny_private(self, parts: list[str], excluded: tuple[tuple[str, ...], ...]) -> None:
+        if self._private(parts, excluded):
+            raise ToolError("path_excluded", "That path is ROSC-owned private data, not source")
 
     def tool_source_list(self, session: Session, caller: Caller, args: dict) -> dict:
         if args.get("project") not in (None, "", project_label(caller.project_id)):
             raise ToolError("source_other_project_denied", "Only the current Project's bound checkout is readable")
-        root, version = self._source_root(session, caller)
+        root, version, excluded = self._source_root(session, caller)
         parts = _clean_relative(args.get("path"), allow_empty=True)
+        self._deny_private(parts, excluded)
         offset = _bounded_int(args.get("offset"), 0, 0, 10 ** 9)
         limit = _bounded_int(args.get("limit"), 100, 1, MAX_LIST)
         root_fd = _open_dir(root)
@@ -655,7 +652,8 @@ class ProjectContextBroker:
         try:
             entries, hidden = [], 0
             for entry in sorted(os.scandir(directory), key=lambda e: e.name):
-                if entry.name.lower() == ".git" or _SECRET_NAME.match(entry.name):
+                if (entry.name.lower() == ".git" or _SECRET_NAME.match(entry.name)
+                        or self._private([*parts, entry.name], excluded)):
                     hidden += 1
                     continue
                 if entry.is_symlink():
@@ -677,8 +675,9 @@ class ProjectContextBroker:
     def tool_source_read(self, session: Session, caller: Caller, args: dict) -> dict:
         if args.get("project") not in (None, "", project_label(caller.project_id)):
             raise ToolError("source_other_project_denied", "Only the current Project's bound checkout is readable")
-        root, version = self._source_root(session, caller)
+        root, version, excluded = self._source_root(session, caller)
         parts = _clean_relative(args.get("path"), allow_empty=False)
+        self._deny_private(parts, excluded)
         root_fd = _open_dir(root)
         try:
             text, data, info = _read_text_file(root_fd, parts, MAX_SOURCE_FILE_BYTES)
@@ -693,11 +692,12 @@ class ProjectContextBroker:
     def tool_source_search(self, session: Session, caller: Caller, args: dict) -> dict:
         if args.get("project") not in (None, "", project_label(caller.project_id)):
             raise ToolError("source_other_project_denied", "Only the current Project's bound checkout is readable")
-        root, version = self._source_root(session, caller)
+        root, version, excluded = self._source_root(session, caller)
         query = args.get("query")
         if not isinstance(query, str) or not 2 <= len(query) <= 200:
             raise ToolError("invalid_argument", "query must be 2..200 characters")
         parts = _clean_relative(args.get("path"), allow_empty=True)
+        self._deny_private(parts, excluded)
         needle = query.lower()
         deadline = time.monotonic() + MAX_SEARCH_SECONDS
         stats = {"files_scanned": 0, "skipped_large": 0, "skipped_binary": 0, "skipped_unsafe": 0, "bytes": 0}
@@ -722,6 +722,8 @@ class ProjectContextBroker:
                         if entry.name.lower() == ".git" or _SECRET_NAME.match(entry.name) or entry.is_symlink():
                             continue
                         rel = f"{prefix}/{entry.name}" if prefix else entry.name
+                        if self._private(rel.split("/"), excluded):
+                            continue
                         if entry.is_dir(follow_symlinks=False):
                             if rel.count("/") < MAX_DEPTH:
                                 try:
@@ -768,7 +770,7 @@ class ProjectContextBroker:
     def tool_source_git(self, session: Session, caller: Caller, args: dict) -> dict:
         if args.get("project") not in (None, "", project_label(caller.project_id)):
             raise ToolError("source_other_project_denied", "Only the current Project's bound checkout is readable")
-        root, version = self._source_root(session, caller)
+        root, version, excluded = self._source_root(session, caller)
         operation = args.get("operation") or "head"
         if operation not in ("head", "status", "log"):
             return {"kind": "source_git", "operation": str(operation)[:16], "status": "unsupported",
@@ -823,7 +825,8 @@ class ProjectContextBroker:
             commits = [dict(zip(("sha", "author", "date", "subject"), line.split("\t", 3)))
                        for line in outputs["log"].splitlines() if line.count("\t") >= 3]
             return {**base, "status": "ok", "commits": commits}
-        changed = [line[3:] for line in outputs["status"].splitlines() if len(line) > 3]
+        changed = [line[3:] for line in outputs["status"].splitlines()
+                   if len(line) > 3 and not self._private(line[3:].strip('"').split("/"), excluded)]
         return {**base, "status": "ok", "head": outputs["head"].strip(), "dirty": bool(changed),
                 "changed_files": changed[:100], "changed_total": len(changed),
                 "note": "Tracked files only (untracked files are not scanned)."}
