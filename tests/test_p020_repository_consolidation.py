@@ -172,19 +172,18 @@ class GlobalLibraryTests(p19.ContextCase):
         return path
 
     def test_nested_listing_is_hierarchical_sorted_and_bounded_to_the_namespaces(self) -> None:
-        self.put("principles/context-economy.md")
         self.put("agents/workers/rules/worker.md")
         self.put("README.md", "not served")
         self.put("stray/other.md")
         self.put("rules/legacy.md")  # the old flat layout is no longer a namespace
         session_id = self.activate()
         listed = self.direct(session_id, "global_list")["result"]
-        self.assertEqual([e["path"] for e in listed["entries"]], [
-            "agents/architect/rules/architect.md", "agents/workers/rules/worker.md", "principles/context-economy.md",
-            "skills/review.md", "tools/notes.yaml"])
+        self.assertEqual([e["path"] for e in listed["entries"]], self.listed_definitions())
+        self.assertIn("agents/workers/rules/worker.md", self.listed_definitions())
         self.assertTrue(listed["complete"])
         sub = self.direct(session_id, "global_list", path="agents/architect")["result"]
-        self.assertEqual([e["path"] for e in sub["entries"]], ["agents/architect/rules/architect.md"])
+        self.assertEqual([e["path"] for e in sub["entries"]],
+                         [f for f in self.listed_definitions() if f.startswith("agents/architect/")])
         for hidden in ("README.md", "stray", "rules"):
             self.assertFalse([e for e in listed["entries"] if e["path"].split("/")[0] == hidden], hidden)
             self.assertEqual(self.direct(session_id, "global_list", path=hidden)["error"]["code"], "path_excluded")
@@ -192,10 +191,9 @@ class GlobalLibraryTests(p19.ContextCase):
         self.assertEqual(self.direct(session_id, "global_list", path="skills/missing")["error"]["code"], "not_found")
 
     def test_nested_read_and_wrong_source_and_traversal_are_refused(self) -> None:
-        self.put("principles/context-economy.md", "# Context economy\nsynthetic\n")
         session_id = self.activate()
         got = self.direct(session_id, "global_read", path="principles/context-economy.md")["result"]
-        self.assertIn("Context economy", got["content"])
+        self.assertIn("R-14", got["content"])
         self.assertEqual(len(got["sha256"]), 64)
         for path in ("../README.md", "principles/../../x.md", "/etc/passwd", "principles\\x.md", "src/rosc/app.py",
                      "principles/context-economy.py", "principles", "agents/architect/rules/.env", ""):
@@ -233,9 +231,9 @@ class GlobalLibraryTests(p19.ContextCase):
         external = self.base / "external-lib"
         (external / "principles").mkdir(parents=True)
         (external / "principles/leak.md").write_text(f"{MARK}\n")
+        session_id = self.activate()  # activation needs the verified ruleset: swap the root only afterwards
         shutil.rmtree(self.lib)
         os.symlink(external, self.lib)
-        session_id = self.activate()
         listed = self.direct(session_id, "global_list")
         read = self.direct(session_id, "global_read", path="principles/leak.md")
         for outcome in (listed, read, self.direct(session_id, "global_list", path="principles")):
@@ -278,9 +276,15 @@ class GlobalLibraryTests(p19.ContextCase):
         from rosc import app
         self.assertEqual(app.DEFAULT_GLOBAL_LIBRARY, ROOT / "global")
         self.assertTrue((ROOT / "global" / "README.md").is_file())
-        # nothing shipped in the repo is an operative rule: only the README scaffold exists
+        # P021: exactly the approved definitions + manifest + README placeholders ship; nothing else is a rule
         shipped = sorted(p.relative_to(ROOT / "global").as_posix() for p in (ROOT / "global").rglob("*") if p.is_file())
-        self.assertEqual(shipped, ["README.md"])
+        self.assertEqual(shipped, sorted([
+            "README.md", "agents/architect/documentation-standard.yaml", "agents/architect/ruleset.yaml",
+            "agents/architect/templates/README.md", "agents/workers/README.md", "principles/context-economy.md",
+            "skills/README.md", "tools/README.md",
+            *(f"agents/architect/rules/{n}.md" for n in (
+                "role", "onboarding", "context-maintenance", "pipeline-management", "autonomy", "research", "review",
+                "communication", "run-checkpoints", "worker-task-authoring", "task-run-git"))]))
 
 
 class RoscCheckoutPrivacyTests(p19.ContextCase):

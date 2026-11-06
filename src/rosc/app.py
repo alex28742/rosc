@@ -22,6 +22,7 @@ from .agent_registry import (AgentNotFound, AgentRegistryService, AssignmentNotF
                              RegistryConflict, RegistryDenied, RegistryError, RegistryStoreError, UnsafeProjectIdentity,
                              canonical_agent_id)
 from .architect_runtime import ArchitectRuntime, OpenCodeRuntime
+from .architect_rules import ArchitectRulesLoader
 from .architect_service import ArchitectService
 from .architect_tools import ToolHost
 from .project_context import ProjectContextBroker
@@ -352,11 +353,12 @@ def create_app(db_path: Path | None = None, workspace_root: Path | None = None, 
     registry = AgentRegistryService(sessions, policy)
     conversation = ProjectConversationService(sessions, policy)
     # The runtime is a Python-level composition seam like the policy: no request can select or configure it.
-    context_broker = ProjectContextBroker(sessions, workspace_root, global_library_root or DEFAULT_GLOBAL_LIBRARY,
+    library_root = global_library_root or DEFAULT_GLOBAL_LIBRARY
+    context_broker = ProjectContextBroker(sessions, workspace_root, library_root,
                                         private_roots=(db_path.parent, db_path, *repo_private_paths()))
     tool_host = ToolHost(context_broker.call)  # loopback listener starts lazily, only at an Owner activation
     architect = ArchitectService(sessions, policy, architect_runtime or OpenCodeRuntime(db_path.parent),
-                                 tools=tool_host, context=context_broker)
+                                 tools=tool_host, context=context_broker, rules=ArchitectRulesLoader(library_root))
 
     @asynccontextmanager
     async def lifespan(_app: FastAPI):

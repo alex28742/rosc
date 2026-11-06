@@ -11,6 +11,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 import shutil
 import socket
 import stat
@@ -25,6 +26,7 @@ from fastapi.testclient import TestClient
 
 import test_p015_architect_activation as p15
 import test_slice01 as base
+import rosc.config as pc_config
 import rosc.project_context as pc
 from rosc.agent_registry import AgentRegistryService
 from rosc.app import create_app
@@ -66,6 +68,10 @@ class ContextCase(base.StageCase):
                ENV_APPROVED_MODEL: "prov/model-a"}
         self.env_map = env
         self.lib = self.base / "library"
+        # P021: activation verifies the Owner-approved ruleset, so the synthetic library carries a copy of the real one.
+        real = pc_config.global_library_dir()
+        for top in ("principles", "agents"):
+            shutil.copytree(real / top, self.lib / top)
         for name, body in (("agents/architect/rules/architect.md", "# Global rule\nBe brief.\n"),
                            ("skills/review.md", "skill text\n"), ("tools/notes.yaml", "name: demo\n"),
                            ("agents/architect/rules/.env", MARK_SECRET)):
@@ -90,6 +96,16 @@ class ContextCase(base.StageCase):
             self.git(a, "add", "README.md", "src/app.py")
             self.git(a, "-c", "user.name=t", "-c", "user.email=t@example.invalid", "commit", "-q", "-m", "first")
         self.restart(first=True)
+
+    def listed_definitions(self) -> list[str]:
+        """Definition files the library tools are expected to serve: approved suffixes under the four namespaces, no
+        secret-named entries (the synthetic library = copied approved ruleset + the fixture's own files)."""
+        found = []
+        for top in pc.GLOBAL_LIBRARY_DIRS:
+            for dirpath, _dirs, names in os.walk(self.lib / top):
+                found += [str((Path(dirpath) / n).relative_to(self.lib)) for n in names
+                          if n.lower().endswith(pc.GLOBAL_SUFFIXES) and not n.startswith(".env")]
+        return sorted(found)
 
     def git(self, cwd: Path, *args: str) -> str:
         env = {"PATH": os.environ["PATH"], "HOME": str(self.base), "GIT_CONFIG_GLOBAL": "/dev/null",
@@ -452,7 +468,8 @@ class GlobalLibraryTests(ContextCase):
         session_id = self.activate()
         listed = self.direct(session_id, "global_list")["result"]
         self.assertTrue(listed["library_present"])
-        self.assertEqual([e["path"] for e in listed["entries"]], ["agents/architect/rules/architect.md", "skills/review.md", "tools/notes.yaml"])
+        self.assertEqual([e["path"] for e in listed["entries"]], self.listed_definitions())
+        self.assertIn("agents/architect/ruleset.yaml", self.listed_definitions())
         self.assertIn("Be brief", self.direct(session_id, "global_read",
                                               path="agents/architect/rules/architect.md")["result"]["content"])
         for path in ("agents/architect/rules/.env", "../library/agents/architect/rules/architect.md", "/etc/passwd",
@@ -471,9 +488,9 @@ class GlobalLibraryTests(ContextCase):
         saved = self.direct(session_id, "docs_create", doc_id="local-rule", content="always run tool x",
                             logical_path="rules/local")
         self.assertTrue(saved["ok"])
-        self.assertEqual(self.direct(session_id, "global_list")["result"]["entries"][0]["path"],
-                         "agents/architect/rules/architect.md")
-        self.assertEqual(len(self.direct(session_id, "global_list")["result"]["entries"]), 3)  # not installed anywhere
+        listed = self.direct(session_id, "global_list")["result"]["entries"]
+        self.assertEqual([e["path"] for e in listed], self.listed_definitions())  # the project doc is not a definition
+        self.assertNotIn("rules/local", [e["path"] for e in listed])
         self.assertNotIn("rosc_local-rule", [f"rosc_{t}" for t in TOOL_NAMES])
 
 
@@ -783,11 +800,13 @@ class BriefingAndContextTests(ContextCase):
         self.assertNotIn("no tools", prompt)
         for private in (MARK_A, MARK_SRC, "adr-1"):
             self.assertNotIn(private, prompt)
-        self.assertLess(len(prompt), 3500)
+        block = re.search(r"=== ROSC GLOBAL ARCHITECT RULES .*?=== END ROSC GLOBAL ARCHITECT RULES ===\n", prompt, re.S)
+        self.assertIsNotNone(block)  # P021: the verified, bounded global rules reach every turn
+        self.assertLess(len(prompt.replace(block.group(0), "")), 3500)  # the P019 prompt itself stays concise
         with self.sessions() as session:
             categories = session.connection().exec_driver_sql(
                 "SELECT context_categories FROM conversation_deliveries").fetchone()[0]
-        self.assertEqual(categories, "project_identity,tool_rules,recent_messages:1")
+        self.assertEqual(categories, "project_identity,global_rules@0.4.0,tool_rules,recent_messages:1")
 
     def test_runtime_without_tools_keeps_the_legacy_no_tools_prompt(self) -> None:
         runtime = p15.FakeRuntime()

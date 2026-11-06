@@ -1,0 +1,80 @@
+format: rosc.architect.ruleset.v1
+ruleset_id: rosc.architect.global
+version: 0.4.0
+status: approved_definition
+provenance:
+  accepted_by: Owner
+  accepted_on: '2026-11-06'
+  basis: ROSC Project Workspace & Structured Document Standard v0.1 + Global Architect Rules Review r01
+requires_explicit_activation: true
+# Trusted allowlist. Paths are relative to the global/ library root; nothing outside this list is ever loaded.
+# Order is the deterministic order of the composed ruleset digest. A file's presence on disk grants nothing.
+schema_reference:
+  id: documentation-standard
+  path: agents/architect/documentation-standard.yaml
+  source_sha256: 7cd16acbca4e8ab63b13de439cf2a147d304a20725871878cbee046cc8679503
+  sha256: ea55ba926340c1fbb029b538994c5f75a398d93d20ec9169192851105f30214f
+  bytes: 2377
+active_bootstrap:
+  - id: role
+    path: agents/architect/rules/role.md
+    source_sha256: be162d01c9c84ad2fafc7e5d6dd4662e16d51731de0a6a5d1254a5a3cdec6004
+    sha256: dd2a9b179038462665ea7926918daefd799e57e11e0454a02f032d3fca9df569
+    bytes: 2061
+  - id: onboarding
+    path: agents/architect/rules/onboarding.md
+    source_sha256: 59c94119bd0e0b2ca724b1c44dd71491da614447349bca615774e814f80b7b3b
+    sha256: f9a211fd42b1999c0290be66909bae96008015036668d4aa668fab828a6e2b4b
+    bytes: 3369
+  - id: context-maintenance
+    path: agents/architect/rules/context-maintenance.md
+    source_sha256: efcc38096ed5249127c34475c5266bcecea27e2f4021898492d370b083f49968
+    sha256: a9e8786cfaaba6ad9ce22912b9ee54eec74ad071a2826a1a0569b481539f1241
+    bytes: 2316
+  - id: pipeline-management
+    path: agents/architect/rules/pipeline-management.md
+    source_sha256: 06e32a22eae64cc129ce9bb1f4799c39531cf8d3c4aef2c37e4f93bf37f5c993
+    sha256: 9150730f60438d783bb945cfea61015921a753f917e2c49b71f54c3642fdbe7a
+    bytes: 2081
+foundation_principle:
+  id: context-economy
+  path: principles/context-economy.md
+  source_sha256: 8e8dfa23ebf7e9ce5b24d2a8e4f3371c15a929da3d7e461dfbdb6200616c1a64
+  sha256: 8e8dfa23ebf7e9ce5b24d2a8e4f3371c15a929da3d7e461dfbdb6200616c1a64
+  bytes: 4975
+reference_on_demand:
+  - id: autonomy
+    path: agents/architect/rules/autonomy.md
+    source_sha256: e223e29cf581d2647fd78675e96b57d81b2fc7d4be5d5c3897b34827bbd15160
+    sha256: e223e29cf581d2647fd78675e96b57d81b2fc7d4be5d5c3897b34827bbd15160
+    bytes: 1817
+  - id: research
+    path: agents/architect/rules/research.md
+    source_sha256: 130b3ff569053242e1c2e05a9c40fd764f601327e21d55bdcd2ca0d39bd0dff0
+    sha256: 130b3ff569053242e1c2e05a9c40fd764f601327e21d55bdcd2ca0d39bd0dff0
+    bytes: 1576
+  - id: review
+    path: agents/architect/rules/review.md
+    source_sha256: c3b3dc5f452c162449feb05532a45b4326d3d27b0eff595e3699eca32991662a
+    sha256: c3b3dc5f452c162449feb05532a45b4326d3d27b0eff595e3699eca32991662a
+    bytes: 1483
+  - id: communication
+    path: agents/architect/rules/communication.md
+    source_sha256: f6b4b4057cb9d1c036cefb5af7a602be3deb4dc3cbde510e1157647a880ae3ec
+    sha256: f6b4b4057cb9d1c036cefb5af7a602be3deb4dc3cbde510e1157647a880ae3ec
+    bytes: 1243
+  - id: run-checkpoints
+    path: agents/architect/rules/run-checkpoints.md
+    source_sha256: d76bd16a5d169e84c53dffc37b815b79805d571544b2dd8c0604f039f2384437
+    sha256: d76bd16a5d169e84c53dffc37b815b79805d571544b2dd8c0604f039f2384437
+    bytes: 2976
+  - id: worker-task-authoring
+    path: agents/architect/rules/worker-task-authoring.md
+    source_sha256: 84cb338c38e56f4f3aa1eeb3735de36f4fc6a9184f37a183c2d1dee36c1c5e07
+    sha256: 84cb338c38e56f4f3aa1eeb3735de36f4fc6a9184f37a183c2d1dee36c1c5e07
+    bytes: 7157
+  - id: task-run-git
+    path: agents/architect/rules/task-run-git.md
+    source_sha256: 3707e23f503500d0743670fd50c783be5502fc32612fa2c725d9753f767e21c5
+    sha256: 3707e23f503500d0743670fd50c783be5502fc32612fa2c725d9753f767e21c5
+    bytes: 4477

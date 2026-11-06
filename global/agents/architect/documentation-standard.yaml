@@ -1,0 +1,70 @@
+format: rosc.architect.documentation-standard.v1
+version: 0.4.0
+status: approved_definition
+scope: assigned_project_architect
+source_of_truth:
+  project_identity: rosc_core
+  root_binding: rosc_core
+  project_and_task_events: rosc_core
+  task_history: rosc_core_append_only
+  active_pipeline: rosc_core_after_approved_implementation_or_cutover
+  working_handoff: rosc_architect_document_store
+  external_project_docs: external_read_only_unless_separately_authorized
+onboarding:
+  modes: [new_project, existing_project]
+  discovery_tool: project.init_analyze # proposed; not yet implemented
+  initialization_tool: project.initialize # proposed; not yet implemented
+  owner_scope: assigned_project_only
+  baseline: verified_evidence_and_unknowns
+  past_project_documents: never_convert_or_rewrite
+  history_start: project_registration_and_baseline_event
+  readiness: mandatory_resources_valid_and_next_action_known
+required_resources:
+  core:
+    - system/identity
+    - system/onboarding
+    - system/events
+    - pipeline/main
+  architect_documents:
+    - role: working_handoff
+      logical_path: handoff.md
+      protocol: SectionDocument
+      create_on_onboarding: true
+  pipeline:
+    role: main
+    type: RecordSet
+    create_on_onboarding: true
+    initial_state: draft
+    empty_items_allowed: true
+    markdown_export: generated_read_only
+optional_resources:
+  - role: sources_index
+    protocol: ReferenceIndex
+    create_when: discovered_sources_need_persisted_index
+  - role: working_note
+    protocol: PlainNote
+    create_when: required_for_research_or_recovery
+  - role: adr_draft
+    protocol: DecisionDocument
+    create_when: actual_decision_warrants_draft
+  - role: work_log
+    protocol: EventStream
+    create_when: extra_working_log_is_needed
+not_required:
+  - current-state.md
+  - milestones.md
+  - decisions-index.md
+  - open-questions.md
+  - notes/README.md
+  - tasks/Txxxx.md
+  - empty_adr_documents
+  - second_writable_pipeline.md
+runtime_tool_grants: none # descriptors, schemas and skills never confer capability
+compatibility:
+  previous_standard: '0.3.0'
+  migration: explicit_owner_reviewed_non_destructive
+  preserve_existing_working_notes: true
+  preserve_existing_project_source_layouts: true
+  existing_project_root: read_only_by_default
+  no_silent_dual_canonical_masters: true
+  mandatory_resources_on_vnext: new_initialized_projects_only

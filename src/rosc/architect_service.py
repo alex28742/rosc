@@ -27,6 +27,7 @@ from sqlalchemy import func, select
 from sqlalchemy.exc import DataError, IntegrityError, OperationalError
 from sqlalchemy.orm import Session, sessionmaker
 
+from .architect_rules import ArchitectRulesLoader, RulesError, RulesSnapshot
 from .architect_runtime import (ADAPTER_NAME, ArchitectRuntime, RuntimeAmbiguous, RuntimeHandle, RuntimeProblem,
                                 RuntimeStartUnresolved)
 from .architect_tools import TOOL_NAMES, ToolHost
@@ -54,6 +55,7 @@ RECOVERABLE_RETRIEVAL_CODES = frozenset({"reply_retrieval_resources", "reply_sto
 CATEGORY_IDENTITY = "project_identity"
 CATEGORY_RECENT = "recent_messages"
 CATEGORY_TOOL_RULES = "tool_rules"
+CATEGORY_RULES = "global_rules"
 
 
 class ArchitectDenied(ConversationDenied):
@@ -83,12 +85,17 @@ delivery_view = delivery_state_view
 class ArchitectService:
     def __init__(self, session_factory: sessionmaker[Session], policy: AuthorizationPolicy,
                  runtime: ArchitectRuntime, *, reply_timeout: float = REPLY_TIMEOUT, workers: int = 2,
-                 tools: ToolHost | None = None, context: ProjectContextBroker | None = None) -> None:
+                 tools: ToolHost | None = None, context: ProjectContextBroker | None = None,
+                 rules: ArchitectRulesLoader | None = None) -> None:
         self._sessions = session_factory
         self._policy = policy
         self._runtime = runtime
         self._tools = tools if tools is not None and context is not None else None
         self._context = context
+        self._rules = rules
+        # ROSC session id -> verified rules pinned at that session's activation.  In process memory ONLY: a restart
+        # drops it and delivery then fails closed (rules_snapshot_unavailable) until an explicit re-activation.
+        self._pinned_rules: dict[str, RulesSnapshot] = {}
         self._timeout = reply_timeout
         self._pool = ThreadPoolExecutor(max_workers=workers, thread_name_prefix="architect")
         self._project_locks: dict[tuple[int, str], threading.Lock] = {}
@@ -213,10 +220,20 @@ class ArchitectService:
             "can_activate": live is None and problem is None, "can_deactivate": live is not None,
             "agent": None if agent is None else {"agent_id": agent.agent_id, "display_name": agent.display_name,
                                                  "provider_id": agent.provider_id, "model_id": agent.model_id},
+            "rules": self._rules_view(live),
             "session": None if latest is None else {
                 "session_id": latest.session_id, "state": latest.state,
                 "verified_at": None if latest.verified_at is None else _utc_iso(latest.verified_at)},
         }
+
+    def _rules_view(self, live: ArchitectSession | None) -> dict:
+        """Truthful rules state of the live session: only a snapshot actually pinned in this process is reported."""
+        if self._rules is None:
+            return {"state": "not_configured"}
+        snap = self._pinned_rules.get(live.session_id) if live is not None else None
+        if snap is None:
+            return {"state": "not_pinned" if live is not None else "not_active"}
+        return {"state": "pinned", **snap.identity()}
 
     def _finish(self, session: Session, row: ArchitectSession, state: str, code: str | None) -> None:
         row.state, row.error_code, row.updated_at = state, code, _now()
@@ -225,6 +242,7 @@ class ArchitectService:
             self._drop_tools(row.session_id)  # a session that is not verified-ready keeps no tool credential
 
     def _drop_tools(self, session_id: str) -> None:
+        self._pinned_rules.pop(session_id, None)
         if self._tools is not None:
             self._tools.revoke(session_id)
         if self._context is not None:
@@ -284,6 +302,9 @@ class ArchitectService:
             code: str | None = None
             unresolved_without_handle = False
             try:
+                if self._rules is not None:
+                    # Verified BEFORE any process is spawned: an invalid ruleset can never start a runtime.
+                    self._pinned_rules[session_id] = self._rules.load()
                 if self._tools is not None and getattr(self._runtime, "supports_tools", False):
                     self._context.pin(session_id, pid)  # type: ignore[union-attr]
                     handle = self._runtime.start(session_id, provider_id, model_id, tools=self._tools.open(session_id))
@@ -291,6 +312,9 @@ class ArchitectService:
                     handle = self._runtime.start(session_id, provider_id, model_id)
             except RuntimeStartUnresolved as exc:
                 handle, code = exc.handle, exc.code
+            except RulesError as exc:
+                self._pinned_rules.pop(session_id, None)
+                code = exc.code
             except RuntimeProblem as exc:
                 code = exc.code
             except Exception:  # an adapter bug must still leave an honest, non-secret state
@@ -370,7 +394,7 @@ class ArchitectService:
             session.commit()
 
     def _build_context(self, session: Session, project: Project, message: ConversationMessage,
-                       tools_on: bool = False) -> tuple[str, str]:
+                       tools_on: bool = False, rules: RulesSnapshot | None = None) -> tuple[str, str]:
         senders = {p.participant_id: p.kind for p in session.scalars(select(ConversationParticipant).where(
             ConversationParticipant.conversation_id == message.conversation_id))}
         recent = list(reversed(session.scalars(select(ConversationMessage).where(
@@ -392,7 +416,7 @@ class ArchitectService:
             binding = project.current_binding
             route = f"Docs entrypoint in the bound checkout: {binding.docs_entrypoint}\n" if binding.docs_entrypoint else \
                 "No docs entrypoint is recorded for the bound checkout.\n"
-            rules = ("ROSC Tools (rosc_*) are your only way to look at or change anything; you have no shell, no direct "
+            tool_rules = ("ROSC Tools (rosc_*) are your only way to look at or change anything; you have no shell, no direct "
                      "file access and no web access. Start with rosc_briefing, then read progressively. "
                      "rosc_docs_* reads and writes this Project's ROSC-private documents and only reads other "
                      "registered Projects'. rosc_source_* reads this Project's bound source checkout and can never "
@@ -402,10 +426,15 @@ class ArchitectService:
                      "claim a change that a tool result did not confirm.\n" + route)
             categories = f"{CATEGORY_IDENTITY},{CATEGORY_TOOL_RULES},{CATEGORY_RECENT}:{len(lines)}"
         else:
-            rules = ("Reply in plain text only. You have no tools, no file access and no ability to change anything; "
+            tool_rules = ("Reply in plain text only. You have no tools, no file access and no ability to change anything; "
                      "do not claim to have done so.\n")
             categories = f"{CATEGORY_IDENTITY},{CATEGORY_RECENT}:{len(lines)}"
-        text = header + rules + "Answer the Owner's latest message.\n\nConversation:\n" + "\n".join(lines)
+        if rules is not None:
+            block = rules.prompt_block(tools_on)
+            categories = categories.replace(CATEGORY_IDENTITY, f"{CATEGORY_IDENTITY},{CATEGORY_RULES}@{rules.version}", 1)
+        else:
+            block = ""
+        text = header + block + tool_rules + "Answer the Owner's latest message.\n\nConversation:\n" + "\n".join(lines)
         return text, categories
 
     def _deliver(self, actor: ActorContext, project_id: int, message_id: str) -> None:
@@ -438,7 +467,13 @@ class ArchitectService:
             if handle is None or conversation.project_id != project.id or not self._probe_owned(live, handle):
                 self._set(message_id, DELIVERY_FAILED, "session_not_ready")
                 return
-            text, categories = self._build_context(session, project, message, self._tools_enabled_for(live.session_id))
+            pinned = self._pinned_rules.get(live.session_id)
+            if self._rules is not None and pinned is None:
+                # Restarted backend or lost snapshot: never silently adopt whatever is on disk now.
+                self._set(message_id, DELIVERY_FAILED, "rules_snapshot_unavailable")
+                return
+            text, categories = self._build_context(session, project, message, self._tools_enabled_for(live.session_id),
+                                                   pinned)
             delivery.attempts += 1
             delivery.context_categories = categories
             delivery.updated_at = _now()
