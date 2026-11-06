@@ -102,9 +102,17 @@ same filesystem as `NEW`'s parent.
 
 ## 4. Staged copy (🟡 new location only)
 
-1. `umask 077; mkdir -m 700 NEW.staging` beside `NEW` (same filesystem). Copy `OLD/rosc.db` via `sqlite3 .backup` (never
-   copy `-wal`/`-shm` raw), and `workspace/`, `architect-runtime/` (skeleton only if no live sessions), `backups/` (and `opencode-auth` only under branch A) with
-   `cp -a --no-preserve=ownership` / `rsync -a --checksum`, no `--delete`, no overwrite.
+1. `umask 077; mkdir -m 700 NEW.staging` beside `NEW` (same filesystem). Create `NEW.staging/rosc.db`
+   **only** with SQLite `.backup` from the verified, quiesced `OLD/rosc.db` (never copy a SQLite `.db`, `-wal` or `-shm`
+   raw). Copy only the verified **static** contents of `workspace/`, `backups/` and any safe `architect-runtime/`
+   skeleton (no live sessions) with `cp -a --no-preserve=ownership` or `rsync -a --checksum`, no `--delete`, no overwrite.
+   For `opencode-auth/`, follow the explicit Owner decision in §3.2:
+   - **A (move):** place the **verified SQLite online-backup snapshot**, not the live source DB files, in
+     `NEW.staging/opencode-auth/`. Copy ancillary non-SQLite files only if each is inventoried, static and confirmed not
+     concurrently written; otherwise BLOCKED until its owner is quiesced or an approved application-level export exists.
+     Never use `cp`/`rsync` on active SQLite `.db`, `-wal` or `-shm` files.
+   - **B (keep at OLD, default):** omit `opencode-auth/` from `NEW.staging` entirely; leave its owner and storage untouched.
+   Verify this choice immediately before staging; a stale online snapshot is not silently substituted for current data.
 2. Verify: file list + sha256 equal the preflight inventory for plain files (a `rosc.db` written through `.backup` is
    checked logically like `opencode-auth`: `integrity_check`, schema, row counts, not byte equality); modes 0700/0600; `integrity_check` = `ok`;
    `alembic_version` still `0007...`; Project/Task counts equal; the manifest inventory matches.
