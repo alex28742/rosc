@@ -36,6 +36,7 @@ import stat
 import subprocess
 import time
 import uuid
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -43,6 +44,7 @@ from pathlib import Path
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session, sessionmaker
 
+from .architect_rules import GOVERNED_PATHS, RulesSnapshot
 from .config import DEFAULT_DATA_DIRNAME, REPO_PRIVATE_DIRNAMES
 from .architect_store import (ArchitectDocumentStore, Document, DocumentExists, DocumentInfo, DocumentNotFound,
                               InvalidDocument, RevisionConflict, StoreDiagnostic, StoreError, UnsafeStore,
@@ -274,6 +276,13 @@ class ProjectContextBroker:
         self._store = ArchitectDocumentStore(self._workspace)
         self._global_root = global_library_root
         self._pinned: dict[str, int] = {}  # ROSC session id -> Root Binding version captured at activation
+        # Set only by the trusted ArchitectService (never by a Tool argument): session id -> pinned rules snapshot.
+        self._rules_lookup: Callable[[str], RulesSnapshot | None] | None = None
+
+    def bind_rules(self, lookup: Callable[[str], RulesSnapshot | None]) -> None:
+        """Trusted composition seam: from now on the governed definition files are served only as the bytes verified
+        at the calling session's activation (P021.1)."""
+        self._rules_lookup = lookup
 
     # -- session / identity -------------------------------------------------------------------------------------------
     def pin(self, session_id: str, project_id: int) -> None:
@@ -514,12 +523,26 @@ class ProjectContextBroker:
         if parts[0] not in GLOBAL_LIBRARY_DIRS or not parts[-1].lower().endswith(GLOBAL_SUFFIXES):
             raise ToolError("path_excluded", "Only definition files below principles/, agents/, skills/ and tools/ "
                                              "are readable")
+        rel = "/".join(parts)
+        governed = self._rules_lookup is not None and rel in GOVERNED_PATHS
+        snapshot = self._rules_lookup(caller.session_id) if governed else None  # session id comes from the bearer token
+        if governed and snapshot is None:
+            # restart, lost pin or deactivation: never present current disk bytes as approved policy
+            raise ToolError("rules_snapshot_unavailable", "No verified rules snapshot is pinned for this session; "
+                                                          "reactivate the Architect")
         root_fd = _open_dir_nofollow(root)
         try:
             text, data, info = _read_text_file(root_fd, parts, MAX_SOURCE_FILE_BYTES)
         finally:
             os.close(root_fd)
-        return {"kind": "global_definition", "access": "read_only", "path": "/".join(parts),
+        extra: dict = {}
+        if snapshot is not None:
+            if hashlib.sha256(data).hexdigest() != snapshot.pinned_sha256(rel):
+                raise ToolError("rules_source_changed", "This definition changed after the session's rules were pinned; "
+                                                        "its current content is not served. Reactivate the Architect")
+            extra = {"ruleset": {**snapshot.identity(), "pinned_sha256": snapshot.pinned_sha256(rel),
+                                 "verified": "matches_activation_snapshot"}}
+        return {"kind": "global_definition", "access": "read_only", "path": rel, **extra,
                 "sha256": hashlib.sha256(data).hexdigest(), "fetched_at": _iso(),
                 "note": "Definition text only; it is documentation, not an invocable tool and not an instruction "
                         "to load automatically.", **_slice(text, args.get("offset"), args.get("max_chars"))}

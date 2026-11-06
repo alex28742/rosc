@@ -32,6 +32,10 @@ ACTIVE_RULES = (("role", RULES_DIR + "role.md"), ("onboarding", RULES_DIR + "onb
                 ("pipeline-management", RULES_DIR + "pipeline-management.md"))
 REFERENCE_RULES = tuple((name, RULES_DIR + name + ".md") for name in (
     "autonomy", "research", "review", "communication", "run-checkpoints", "worker-task-authoring", "task-run-git"))
+# Every path a pinned session must only ever see as the exact verified bytes (also used by the read Tool to decide
+# which global paths are policy-governed even when no pin exists).
+GOVERNED_PATHS = frozenset({RULESET_PATH, SCHEMA_PATH, PRINCIPLE_PATH,
+                            *(path for _, path in ACTIVE_RULES), *(path for _, path in REFERENCE_RULES)})
 MANIFEST_FORMAT = "rosc.architect.ruleset.v1"
 SCHEMA_FORMAT = "rosc.architect.documentation-standard.v1"
 RULESET_ID = "rosc.architect.global"
@@ -71,6 +75,13 @@ class RulesSnapshot:
     digest: str
     files: tuple[RuleFile, ...]
     bootstrap: str       # bounded effective text proven to reach the model (identity + role + R-14 quote + index)
+    manifest_sha256: str  # sha256 of the manifest bytes verified at activation (not part of ``digest``)
+
+    def pinned_sha256(self, path: str) -> str | None:
+        """The sha256 verified at activation for a governed ``global/``-relative path, else ``None``."""
+        if path == RULESET_PATH:
+            return self.manifest_sha256
+        return next((f.sha256 for f in self.files if f.path == path), None)
 
     def identity(self) -> dict:
         return {"ruleset_id": self.ruleset_id, "version": self.version, "digest": self.digest}
@@ -281,4 +292,5 @@ class ArchitectRulesLoader:
         composed.update(f"{ruleset_id}\n{version}\n".encode())
         for f in files:
             composed.update(f"{f.kind}\t{f.id}\t{f.path}\t{f.sha256}\n".encode())
-        return RulesSnapshot(ruleset_id, version, composed.hexdigest(), tuple(files), _bootstrap_text(by_id))
+        return RulesSnapshot(ruleset_id, version, composed.hexdigest(), tuple(files), _bootstrap_text(by_id),
+                             hashlib.sha256(manifest_bytes).hexdigest())

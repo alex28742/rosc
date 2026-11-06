@@ -96,6 +96,9 @@ class ArchitectService:
         # ROSC session id -> verified rules pinned at that session's activation.  In process memory ONLY: a restart
         # drops it and delivery then fails closed (rules_snapshot_unavailable) until an explicit re-activation.
         self._pinned_rules: dict[str, RulesSnapshot] = {}
+        if rules is not None and context is not None:
+            # governed definition reads are served only against the calling session's pin (P021.1)
+            context.bind_rules(self._pinned_rules.get)
         self._timeout = reply_timeout
         self._pool = ThreadPoolExecutor(max_workers=workers, thread_name_prefix="architect")
         self._project_locks: dict[tuple[int, str], threading.Lock] = {}

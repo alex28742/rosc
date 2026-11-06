@@ -487,6 +487,145 @@ class ServiceRulesTests(p19.ContextCase):
         self.assertEqual(self.delivery()[0], "delivered")
 
 
+class PinnedGlobalReadTests(p19.ContextCase):
+    """P021.1: ``rosc_global_read`` of governed definitions is bound to the calling session's activation snapshot.
+
+    Variant B (fail closed): current bytes are served only when their full-file sha256 equals the one verified at
+    activation; otherwise a stable non-secret error and no content.  Reads go through the real Broker entry point
+    (``direct``) and, once, through the fake OpenCode MCP transport (``one``)."""
+
+    MARKER = "SYNTH-P0211-TAMPERED-POLICY-MARKER"
+    GOVERNED = ("agents/architect/rules/onboarding.md", "agents/architect/rules/task-run-git.md",
+                "agents/architect/documentation-standard.yaml", "principles/context-economy.md", MANIFEST)
+
+    def test_unchanged_governed_reads_return_pinned_bytes_identity_and_slices(self) -> None:
+        session_id = self.activate()
+        snap = ar.ArchitectRulesLoader(GLOBAL).load()
+        for path in (*self.GOVERNED, "agents/architect/rules/role.md"):
+            got = self.direct(session_id, "global_read", path=path)
+            self.assertTrue(got["ok"], (path, got))
+            result = got["result"]
+            self.assertEqual(result["ruleset"], {**snap.identity(), "pinned_sha256": snap.pinned_sha256(path),
+                                                 "verified": "matches_activation_snapshot"})
+            self.assertEqual(result["sha256"], snap.pinned_sha256(path))
+        first = self.direct(session_id, "global_read", path="agents/architect/rules/onboarding.md", max_chars=200)["result"]
+        self.assertEqual(len(first["content"]), 200)
+        self.assertIsNotNone(first["next_offset"])
+        more = self.direct(session_id, "global_read", path="agents/architect/rules/onboarding.md",
+                           offset=first["next_offset"], max_chars=200)["result"]
+        self.assertTrue(more["content"] and more["ruleset"]["digest"] == snap.digest)
+        # the same read through the real MCP transport (permission check + ToolHost + audit)
+        via_mcp = self.one("global_read", path="agents/architect/rules/onboarding.md")
+        self.assertTrue(via_mcp["ok"])
+        self.assertEqual(via_mcp["result"]["ruleset"]["digest"], snap.digest)
+        self.assertIn("ok", [r.outcome for r in self.audit() if r.tool == "global_read"])
+
+    def test_post_activation_edits_are_never_served_for_any_governed_file(self) -> None:
+        session_id = self.activate()
+        for index, path in enumerate(self.GOVERNED):
+            with self.subTest(path):
+                target = self.lib / path
+                original = target.read_bytes()
+                edits = [original + f"\n{self.MARKER}\n".encode()]
+                if path == MANIFEST:
+                    edits.append(original.replace(b"version: 0.4.0", b"version: 9.9.9", 1))
+                    edits.append(original.replace(INSTALLED["agents/architect/rules/role.md"][0].encode(), b"0" * 64, 1))
+                for changed in edits:
+                    self.assertNotEqual(changed, original)
+                    target.write_bytes(changed)
+                    for args in ({}, {"offset": 0, "max_chars": 50}, {"offset": 100, "max_chars": 10},
+                                 {"digest": "x", "session_id": "forged", "project": "P0002", "ruleset_id": "other"}):
+                        got = self.broker.call(session_id, "global_read", {"path": path, **args})
+                        self.assertFalse(got["ok"], (path, args))
+                        self.assertEqual(got["error"]["code"], "rules_source_changed")
+                        self.assertNotIn(self.MARKER, json.dumps(got))
+                        self.assertNotIn("9.9.9", json.dumps(got))
+                        self.assertNotIn("content", got.get("result", {}))
+                target.write_bytes(original)
+                # restoring the exact approved bytes makes the pinned session readable again (variant B)
+                self.assertTrue(self.direct(session_id, "global_read", path=path)["ok"])
+        outcomes = [r.outcome for r in self.audit() if r.tool == "global_read"]
+        self.assertIn("rules_source_changed", outcomes)
+
+    def test_drift_is_refused_through_the_mcp_transport_too(self) -> None:
+        self.activate()
+        path = "agents/architect/rules/onboarding.md"
+        original = (self.lib / path).read_bytes()
+        (self.lib / path).write_bytes(original + f"{self.MARKER}\n".encode())
+        entry = self.model_calls([{"tool": "global_read", "args": {"path": path}}])[0]
+        self.assertTrue(entry["allowed"])
+        self.assertFalse(entry["result"]["ok"])
+        self.assertEqual(entry["result"]["error"]["code"], "rules_source_changed")
+        self.assertNotIn(self.MARKER, json.dumps(entry))
+
+    def test_new_session_adopts_reapproved_bytes_old_session_cannot(self) -> None:
+        old = self.activate()
+        old_digest = self.client.get("/api/projects/P0001/architect").json()["rules"]["digest"]
+        role = self.lib / "agents/architect/rules/role.md"
+        role.write_text(role.read_text().replace("Architect is the assigned", f"{self.MARKER} is the assigned"))
+        self.assertEqual(self.direct(old, "global_read", path="agents/architect/rules/role.md")["error"]["code"],
+                         "rules_source_changed")
+        set_manifest_sha(self.lib, "role", sha(role), role.stat().st_size)  # approve it in the disposable manifest
+        self.assertEqual(self.direct(old, "global_read", path=MANIFEST)["error"]["code"], "rules_source_changed")
+        self.assertEqual(self.direct(old, "global_read", path="agents/architect/rules/role.md")["error"]["code"],
+                         "rules_source_changed")  # the old session stays bound to ITS snapshot
+        self.client.post("/api/projects/P0001/architect/deactivate")
+        self.assertFalse(self.direct(old, "global_read", path="principles/context-economy.md")["ok"])  # session_not_active
+        new = self.activate()
+        rules = self.client.get("/api/projects/P0001/architect").json()["rules"]
+        self.assertNotEqual(rules["digest"], old_digest)
+        got = self.direct(new, "global_read", path="agents/architect/rules/role.md")
+        self.assertTrue(got["ok"])
+        self.assertIn(self.MARKER, got["result"]["content"])  # approved in the test manifest, pinned by the NEW session
+        self.assertEqual(got["result"]["ruleset"]["digest"], rules["digest"])
+        self.assertTrue(self.direct(new, "global_read", path=MANIFEST)["ok"])
+
+    def test_lost_pin_and_backend_restart_fail_closed_for_governed_paths_only(self) -> None:
+        session_id = self.activate()
+        path = "agents/architect/rules/onboarding.md"
+        self.assertTrue(self.direct(session_id, "global_read", path=path)["ok"])
+        pins = dict(self.architect._pinned_rules)
+        self.architect._pinned_rules.clear()
+        for governed in self.GOVERNED:
+            got = self.direct(session_id, "global_read", path=governed)
+            self.assertEqual((got["ok"], got["error"]["code"]), (False, "rules_snapshot_unavailable"), governed)
+            self.assertNotIn("content", json.dumps(got))
+        # unlisted documentation stays readable, explicitly without any ruleset claim
+        plain = self.direct(session_id, "global_read", path="agents/architect/rules/architect.md")
+        self.assertTrue(plain["ok"])
+        self.assertNotIn("ruleset", plain["result"])
+        self.architect._pinned_rules.update(pins)
+        self.assertTrue(self.direct(session_id, "global_read", path=path)["ok"])
+        self.restart()  # new process state: the READY row survives, the in-memory pin does not
+        self.assertEqual(self.direct(session_id, "global_read", path=path).get("error", {}).get("code"),
+                         "rules_snapshot_unavailable")
+        self.assertNotIn("ruleset", self.direct(session_id, "global_read", path="skills/review.md").get("result", {}))
+
+    def test_unsafe_missing_and_foreign_governed_paths_never_produce_content(self) -> None:
+        session_id = self.activate()
+        target = self.lib / "agents/architect/rules/review.md"
+        keep = self.base / "review-copy.md"
+        shutil.copy(target, keep)
+        target.unlink()
+        self.assertEqual(self.direct(session_id, "global_read", path="agents/architect/rules/review.md")["error"]["code"],
+                         "not_found")
+        os.symlink(keep, target)  # byte-identical symlink target is still refused
+        got = self.direct(session_id, "global_read", path="agents/architect/rules/review.md")
+        self.assertEqual((got["ok"], got["error"]["code"]), (False, "unsafe_path"))
+        for bad in ("agents/architect/rules/../ruleset.yaml", "/agents/architect/ruleset.yaml\x00", "agents\\architect\\ruleset.yaml"):
+            self.assertFalse(self.direct(session_id, "global_read", path=bad)["ok"], bad)
+
+    def test_discovery_and_tool_surface_are_unchanged(self) -> None:
+        session_id = self.activate()
+        listed = self.direct(session_id, "global_list")["result"]
+        self.assertEqual([e["path"] for e in listed["entries"]], self.listed_definitions())
+        self.assertNotIn("pinned_sha256", json.dumps(listed))  # listing is discovery, never endorsement
+        self.assertEqual(TOOL_NAMES, PRE_P021_TOOLS)
+        from rosc.project_context import ProjectContextBroker
+        unbound = ProjectContextBroker(self.sessions, self.data / "workspace", self.lib)
+        self.assertIsNone(unbound._rules_lookup)  # an ArchitectService without a loader never claims approved rules
+
+
 class NoToolsPromptTests(unittest.TestCase):
     def test_a_non_tool_runtime_is_not_represented_as_having_tools(self) -> None:
         from rosc.architect_service import ArchitectService
