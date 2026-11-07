@@ -4,9 +4,12 @@ A measurement capability, never a behaviour change.  Disabled unless ``ROSC_ARCH
 ``yes``/``on``; disabled means zero output (no directory, no file, no thread) and every hook is an immediate return.
 
 Privacy by construction: a record can only carry the allowlisted fields below, and every value is re-validated against a
-closed vocabulary, a numeric range or a strict identifier pattern.  There is NO free-text field: message bodies, prompt
+finite vocabulary, a numeric range or a strict identifier pattern.  There is NO free-text field: message bodies, prompt
 text, Tool inputs/targets/results, paths, URLs, exception strings, tokens and credentials cannot be expressed, so they
-cannot leak even through a bug in a caller.  A value that fails validation is dropped, never rewritten.
+cannot leak even through a bug in a caller.  ``outcome`` is checked against the finite set ``OUTCOMES`` (every outcome
+code that ROSC's own emitters can produce); a string outside it is NEVER stored verbatim, even if it looks like a harmless
+snake_case word, but is projected to ``other_error``.  Other fields that fail validation are dropped, never rewritten.
+Only the telemetry projection is sanitised: the product's own error codes and responses are untouched.
 
 The sink is best effort: any failure (missing/unsafe directory, symlink, loose mode, full disk, size cap) is swallowed and
 the Architect delivery path is unaffected.  Writes are small synchronous appends at phase boundaries; nothing is buffered
@@ -55,7 +58,47 @@ PHASES = frozenset({"intake", "deliver", "reconcile", "tool"})
 DELIVERY_STATES = frozenset({"not_sent", "pending", "delivered", "failed", "unknown"})
 CORRELATIONS = frozenset({"verified", "unverified"})
 
-_CODE = re.compile(r"^[a-z0-9_]{1,48}$")
+# Finite, centrally controlled outcome categories.  Everything here is a constant that ROSC itself defines (event
+# results, RuntimeProblem codes, delivery error codes, Broker/Tool error codes); nothing is derived from message text,
+# provider output or Tool arguments.  Adding a new emitter code means adding it here on purpose.
+OUTCOME_OTHER = "other_error"
+OUTCOMES = frozenset({
+    # event results and states
+    "ok", "idle", "reply", "scheduled", "existing", "not_sent", "conflict", "ready", "committed", "not_committed",
+    "delivered", "failed", "unknown", "pending", "none", "interrupted", "no_state", "exception", "in_progress",
+    "absent", "uncertain", "error", OUTCOME_OTHER,
+    # runtime (RuntimeProblem) codes
+    "connection_failed", "connection_lost", "empty_reply", "endpoint_identity_mismatch", "lookup_failed",
+    "malformed_response", "model_unavailable", "no_reply", "process_exited", "process_identity_unproven",
+    "provider_error", "provider_key_invalid", "provider_key_unsafe", "redirect_refused", "reply_retrieval_resources",
+    "response_too_large", "restricted_mode_unconfirmed", "runtime_failure", "runtime_secret_missing",
+    "secret_provisioning_failed", "server_auth_failed", "spawn_failed", "start_cleanup_unconfirmed", "start_timeout",
+    "timeout", "tools_unavailable",
+    # delivery / service codes
+    "malformed_reply", "not_authorized", "not_received", "rules_snapshot_unavailable", "session_not_ready",
+    "assignment_changed", "internal_error", "persist_failed", "reply_storage_resources", "session_changed",
+    # Broker / Tool error codes
+    "capability_not_declared", "changed_during_read", "file_too_large", "invalid_argument", "invalid_path",
+    "library_absent", "library_unsafe", "not_accessible", "not_found", "not_regular_file", "not_text",
+    "path_excluded", "project_not_found", "project_unavailable", "root_binding_changed", "root_unavailable",
+    "rules_source_changed", "session_not_active", "source_other_project_denied", "unknown_tool", "unsafe_path",
+    "write_other_project_denied", "already_exists", "commit_uncertain", "revision_conflict", "invalid_document",
+    "store_unsafe"})
+_HTTP_STATUS = re.compile(r"^http_([1-5])[0-9]{2}$")  # the exact status is dynamic: only the class is kept
+
+
+def outcome_category(value: object) -> str | None:
+    """Project an emitter-supplied outcome onto the finite set.  ``None`` (drop) only for a non-string."""
+    if not isinstance(value, str):
+        return None
+    if value in OUTCOMES:
+        return value
+    match = _HTTP_STATUS.match(value)
+    if match:
+        return f"http_{match.group(1)}xx"
+    return OUTCOME_OTHER
+
+
 _TURN_ID = re.compile(r"^msg_rosc[0-9a-f]{32}$")
 _UUID = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$")
 _TOOL = re.compile(r"^[a-z_]{3,32}$")
@@ -66,7 +109,7 @@ FIELDS: dict[str, str] = {
     "fallbacks": "count", "bytes": "count", "chars": "count", "result_chars": "count",
     "identity_chars": "count", "rules_chars": "count", "tool_guidance_chars": "count", "recap_chars": "count",
     "recap_messages": "count", "framing_chars": "count", "total_chars": "count", "tools": "count",
-    "outcome": "code", "state": "state", "phase": "phase", "correlation": "correlation", "tool": "tool",
+    "outcome": "outcome", "state": "state", "phase": "phase", "correlation": "correlation", "tool": "tool",
     "turn_id": "turn_id", "rosc_session_id": "uuid",
 }
 _MAX_COUNT = 2 ** 53
@@ -81,10 +124,10 @@ def _clean(kind: str, value: object) -> object | None:
             return None
         number = float(value)
         return round(number, 3) if math.isfinite(number) and 0.0 <= number < 1e12 else None
+    if kind == "outcome":
+        return outcome_category(value)
     if not isinstance(value, str):
         return None
-    if kind == "code":
-        return value if _CODE.match(value) else None
     if kind == "state":
         return value if value in DELIVERY_STATES else None
     if kind == "phase":

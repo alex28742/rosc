@@ -176,7 +176,8 @@ class ArchitectRuntime(Protocol):
 
 
 def _outcome(exc: BaseException) -> str:
-    """Closed-vocabulary outcome for diagnostics: a ROSC error code, never an exception string."""
+    """Diagnostics outcome: a ROSC error code, never an exception string.  The latency sink additionally projects any
+    code outside its finite outcome set (and the dynamic HTTP status) onto a coarse category."""
     return exc.code if isinstance(exc, RuntimeProblem) else "exception"
 
 

@@ -22,7 +22,8 @@ from fastapi.testclient import TestClient
 import test_p022_architect_multistep_reply as p22
 import rosc.architect_runtime as runtime_module
 from rosc.app import create_app
-from rosc.architect_latency import (DISABLED, ENV_TRACE, FIELDS, LatencyTrace, TRACE_FILENAME)
+from rosc.architect_latency import (DISABLED, ENV_TRACE, FIELDS, LatencyTrace, OUTCOME_OTHER, OUTCOMES,
+                                    TRACE_FILENAME)
 from rosc.architect_runtime import OpenCodeRuntime
 from rosc.architect_service import runtime_message_id
 from rosc.architect_tools import ToolHost
@@ -77,10 +78,83 @@ class SinkTests(unittest.TestCase):
         for leaked in (SECRET_BODY, "passwd", "Bad Free", "NOTHEX", "not-a-uuid", "exploded", "elsewhere", "maybe"):
             self.assertNotIn(leaked, text)
         events = read_events(self.root / "d" / TRACE_FILENAME)
-        self.assertEqual(len(events), 3)  # trace_started, submit (all fields dropped), probe; unknown event ignored
-        self.assertEqual(set(events[1]) - HEAD_KEYS, set())
+        self.assertEqual(len(events), 3)  # trace_started, submit, probe; unknown event ignored
+        self.assertEqual(set(events[1]) - HEAD_KEYS, {"outcome"})  # every other field was dropped
+        self.assertEqual(events[1]["outcome"], "other_error")  # free text is projected, never stored
         self.assertEqual(set(events[2]) - HEAD_KEYS - set(FIELDS), set())
         self.assertEqual(events[2]["chars"], 7)
+
+    def test_lowercase_snake_case_secrets_are_not_stored_as_outcomes(self) -> None:
+        trace = LatencyTrace(self.root / "d")
+        for value in ("privateapikey", "secret_value_123", "token_like_value", "ok_but_secret", "http_999x", "HTTP_500",
+                      "http_200_secret", "", " ok", "ok\n", "a" * 49):
+            trace.emit("probe", outcome=value, duration_ms=1)
+        trace.emit("probe", outcome=b"ok", duration_ms=1)  # not a string: the field is dropped, never coerced
+        text = (self.root / "d" / TRACE_FILENAME).read_text()
+        for leaked in ("privateapikey", "secret_value", "token_like", "ok_but", "http_999", "HTTP_500", "http_200", "aaaa"):
+            self.assertNotIn(leaked, text)
+        probes = [e for e in read_events(self.root / "d" / TRACE_FILENAME) if e["event"] == "probe"]
+        self.assertEqual([e.get("outcome") for e in probes], ["other_error"] * 11 + [None])
+
+    def test_known_safe_outcomes_stay_distinguishable(self) -> None:
+        trace = LatencyTrace(self.root / "d")
+        known = ["ok", "idle", "reply", "scheduled", "delivered", "failed", "unknown", "timeout", "connection_lost",
+                 "lookup_failed", "provider_error", "not_received", "interrupted", "in_progress", "not_committed",
+                 "rules_snapshot_unavailable", "session_changed", "invalid_argument", "revision_conflict",
+                 "source_other_project_denied"]
+        for value in known:
+            trace.emit("probe", outcome=value)
+        trace.emit("probe", outcome="http_404")
+        trace.emit("probe", outcome="http_503")
+        got = [e["outcome"] for e in read_events(self.root / "d" / TRACE_FILENAME) if e["event"] == "probe"]
+        self.assertEqual(got, known + ["http_4xx", "http_5xx"])
+        self.assertNotIn(OUTCOME_OTHER, got)
+
+    def test_every_outcome_the_emitters_can_produce_is_in_the_finite_set(self) -> None:
+        """Static cross-check: each code literal ROSC raises/stores as an error code must be a member, so a legitimate
+        diagnostic is never silently reported as ``other_error``."""
+        import re
+        import rosc.architect_service as service_module
+        import rosc.project_context as context_module
+        sources = [Path(runtime_module.__file__).read_text(), Path(service_module.__file__).read_text(),
+                   Path(context_module.__file__).read_text()]
+        codes = set()
+        for text in sources:
+            codes |= set(re.findall(r"Runtime[A-Za-z]+\(\"([a-z0-9_]+)\"", text))
+            codes |= set(re.findall(r"ToolError\(\"([a-z0-9_]+)\"", text))
+            codes |= set(re.findall(r"_set\(message_id, DELIVERY_[A-Z]+, \"([a-z0-9_]+)\"", text))
+            codes |= set(re.findall(r"\"code\": \"([a-z0-9_]+)\"", text))
+        codes |= {"assignment_changed", "session_not_ready", "runtime_failure"}
+        self.assertGreater(len(codes), 40)
+        self.assertEqual(sorted(codes - OUTCOMES), [])
+
+    def test_the_tool_field_only_ever_carries_dispatch_allowlisted_names(self) -> None:
+        trace = LatencyTrace(self.root / "d")
+        calls = []
+        host = ToolHost(lambda session, tool, args: calls.append(tool) or {"ok": True}, trace)
+        session = "11111111-1111-1111-1111-111111111111"
+        for name in ("privateapikey", "../etc/passwd", "briefing_x", "BRIEFING", "", "secret_value_123"):
+            reply = host.handle(session, {"jsonrpc": "2.0", "id": 1, "method": "tools/call",
+                                          "params": {"name": name, "arguments": {}}})
+            self.assertEqual(reply["error"]["message"], "Unknown tool")  # rejected before dispatch and before tracing
+        self.assertEqual(calls, [])
+        host.handle(session, {"jsonrpc": "2.0", "id": 1, "method": "tools/call",
+                              "params": {"name": "briefing", "arguments": {}}})
+        tools = [e.get("tool") for e in read_events(self.root / "d" / TRACE_FILENAME) if e["event"] == "tool_call"]
+        self.assertEqual(tools, ["briefing"])
+
+    def test_tool_error_codes_and_unrecognised_codes_are_projected(self) -> None:
+        trace = LatencyTrace(self.root / "d")
+        outcomes = iter([{"ok": False, "error": {"code": "not_found"}},
+                         {"ok": False, "error": {"code": "secret_value_123"}},
+                         {"ok": False, "error": {"code": 5}}, {"ok": False}])
+        host = ToolHost(lambda session, tool, args: next(outcomes), trace)
+        for _ in range(4):
+            host.handle("11111111-1111-1111-1111-111111111111", {
+                "jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": {"name": "briefing", "arguments": {}}})
+        got = [e["outcome"] for e in read_events(self.root / "d" / TRACE_FILENAME) if e["event"] == "tool_call"]
+        self.assertEqual(got, ["not_found", "other_error", "error", "error"])
+        self.assertNotIn("secret_value", (self.root / "d" / TRACE_FILENAME).read_text())
 
     def test_unsafe_destinations_are_refused_without_raising(self) -> None:
         outside = self.root / "outside"
@@ -243,7 +317,7 @@ class RuntimeTraceTests(p22.AdapterCase):
             with self.assertRaises(ValueError):
                 self.runtime.ask(handle, "msg_rosc_r", "hi", 5)
         outcomes = [e["outcome"] for e in self.events("prompt_admitted")]
-        self.assertEqual(outcomes, ["http_500", "exception"])
+        self.assertEqual(outcomes, ["http_5xx", "exception"])  # a dynamic HTTP status is reduced to its class
         self.assertNotIn("SYNTH-RAW", (self.out / TRACE_FILENAME).read_text())
 
     def test_cancellation_never_emits_a_finished_lookup(self) -> None:
