@@ -18,9 +18,12 @@ import json
 import logging
 import secrets
 import threading
+import time
 from dataclasses import dataclass
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Callable
+
+from .architect_latency import DISABLED, LatencyTrace
 
 log = logging.getLogger(__name__)
 
@@ -98,8 +101,9 @@ class ToolEndpoint:
 class ToolHost:
     """Owns the loopback listener and the session-token table; dispatches to ``call(session_id, tool, args)``."""
 
-    def __init__(self, call: Callable[[str, str, dict], dict]) -> None:
+    def __init__(self, call: Callable[[str, str, dict], dict], trace: LatencyTrace = DISABLED) -> None:
         self._call = call
+        self._trace = trace  # P024: opt-in latency diagnostics; records durations/outcome codes only, never content
         self._tokens: dict[str, str] = {}
         self._lock = threading.Lock()
         self._server: ThreadingHTTPServer | None = None
@@ -179,10 +183,31 @@ class ToolHost:
             if not isinstance(arguments, dict) or set(arguments) - _DISPATCH_TOOL_ARGS[name]:
                 outcome = {"ok": False, "error": {"code": "invalid_argument", "message": "Unexpected or malformed arguments"}}
             else:
+                started = time.monotonic()
                 outcome = self._call(session_id, name, arguments)
+                self._record(session_id, name, outcome, started)
             return self._ok(ident, {"content": [{"type": "text", "text": json.dumps(outcome, ensure_ascii=False)}],
                                     "isError": not outcome.get("ok", False)})
         return {"jsonrpc": "2.0", "id": ident, "error": {"code": -32601, "message": "Method not found"}}
+
+    def _record(self, session_id: str, tool: str, outcome: dict, started: float) -> None:
+        """Duration of one dispatched call.  The turn link exists only while ROSC itself has a turn in flight for this
+        session (turns are serialized per Project); otherwise the call is marked ``unverified`` and carries no turn."""
+        trace = self._trace
+        if not trace.enabled:
+            return
+        try:
+            duration = trace.since(started)
+            error = outcome.get("error") if isinstance(outcome, dict) else None
+            code = error.get("code") if isinstance(error, dict) else None
+            result = "ok" if isinstance(outcome, dict) and outcome.get("ok") else (code if isinstance(code, str) else "error")
+            active = trace.active_turn(session_id)
+            trace.emit("tool_call", phase="tool", tool=tool, duration_ms=duration, outcome=result,
+                       rosc_session_id=session_id,
+                       correlation="verified" if active else "unverified",
+                       turn_id=active[0] if active else None, project_id=active[1] if active else None)
+        except Exception:  # diagnostics never affect a Tool call
+            pass
 
     @staticmethod
     def _ok(ident: object, result: dict) -> dict:

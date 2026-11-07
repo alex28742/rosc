@@ -8,5 +8,6 @@ Files under `docs/` hold stable, general repository-work rules for development a
 2. For prompt/report transport or telemetry, [`docs/agent_reporting.md`](agent_reporting.md).
 3. The relevant source, tests and migrations for the area being changed.
 4. Only when planning or performing a data-root move: [`docs/runbooks/data-root-cutover.md`](runbooks/data-root-cutover.md) (an unexecuted proposal, not an authorization).
+5. Only when measuring Architect latency: [`docs/runbooks/architect-latency-baseline.md`](runbooks/architect-latency-baseline.md) (opt-in diagnostics and an Owner-run baseline recipe; not an authorization to run anything).
 
 Read triggered dependencies only. Search is not a substitute for the routing document. Keep `contract`, `decision`, `proposal`, `implemented`, and `verified` distinct. If a managed prompt conflicts with local instructions or code, identify the conflict and ask for an Owner decision.

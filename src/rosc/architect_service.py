@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import logging
 import threading
+import time
 import uuid
 from concurrent.futures import Future, ThreadPoolExecutor
 from datetime import datetime, timezone
@@ -27,6 +28,7 @@ from sqlalchemy import func, select
 from sqlalchemy.exc import DataError, IntegrityError, OperationalError
 from sqlalchemy.orm import Session, sessionmaker
 
+from .architect_latency import DISABLED, LatencyTrace
 from .architect_rules import ArchitectRulesLoader, RulesError, RulesSnapshot
 from .architect_runtime import (ADAPTER_NAME, ArchitectRuntime, RuntimeAmbiguous, RuntimeHandle, RuntimeProblem,
                                 RuntimeStartUnresolved)
@@ -86,7 +88,7 @@ class ArchitectService:
     def __init__(self, session_factory: sessionmaker[Session], policy: AuthorizationPolicy,
                  runtime: ArchitectRuntime, *, reply_timeout: float = REPLY_TIMEOUT, workers: int = 2,
                  tools: ToolHost | None = None, context: ProjectContextBroker | None = None,
-                 rules: ArchitectRulesLoader | None = None) -> None:
+                 rules: ArchitectRulesLoader | None = None, trace: LatencyTrace | None = None) -> None:
         self._sessions = session_factory
         self._policy = policy
         self._runtime = runtime
@@ -104,6 +106,16 @@ class ArchitectService:
         self._project_locks: dict[tuple[int, str], threading.Lock] = {}
         self._guard = threading.Lock()
         self._futures: list[Future] = []
+        # P024: opt-in, content-free latency diagnostics.  Disabled (the default) means every hook below returns at once.
+        self._trace: LatencyTrace = trace if trace is not None else DISABLED
+        self._clocks: dict[str, dict] = {}  # Owner message id -> {"submitted": monotonic, "state": str|None} (enabled only)
+        attach = getattr(runtime, "attach_diagnostics", None)
+        if self._trace.enabled and callable(attach):
+            attach(self._trace)
+
+    @property
+    def trace(self) -> LatencyTrace:
+        return self._trace
 
     # -- helpers --------------------------------------------------------------------------------------------------
     def _authorize(self, actor: ActorContext, action: str, project_id: object) -> None:
@@ -364,11 +376,16 @@ class ArchitectService:
     def submit(self, actor: ActorContext, project_id: int, message_id: str) -> dict:
         """Called after a NEW Owner message was stored. Creates a pending delivery only for a live verified session;
         otherwise the message stays an Owner-only save (no delivery row). Never replays older messages."""
+        trace, started = self._trace, time.monotonic()
         with self._sessions() as session:
             if session.get(ConversationDelivery, message_id) is not None:
+                trace.emit("submit", turn_id=runtime_message_id(message_id), project_id=project_id,
+                           phase="intake", outcome="existing", duration_ms=trace.since(started))
                 return delivery_view(session.get(ConversationDelivery, message_id))
             live = self._live(session, project_id)
             if live is None or live.state != SESSION_READY:
+                trace.emit("submit", turn_id=runtime_message_id(message_id), project_id=project_id,
+                           phase="intake", outcome="not_sent", duration_ms=trace.since(started))
                 return delivery_view(None)
             session.add(ConversationDelivery(message_id=message_id, architect_session_id=live.session_id,
                                              state=DELIVERY_PENDING, attempts=0, runtime_message_id=runtime_message_id(
@@ -377,10 +394,22 @@ class ArchitectService:
                 session.commit()
             except IntegrityError:
                 session.rollback()
+                trace.emit("submit", turn_id=runtime_message_id(message_id), project_id=project_id,
+                           phase="intake", outcome="conflict", duration_ms=trace.since(started))
                 return delivery_view(session.get(ConversationDelivery, message_id))
             view = delivery_view(session.get(ConversationDelivery, message_id))
-        self._futures.append(self._pool.submit(self._deliver, actor, project_id, message_id))
+        self._enqueue(actor, project_id, message_id, started)
         return view
+
+    def _enqueue(self, actor: ActorContext, project_id: int, message_id: str, started: float | None = None) -> None:
+        trace = self._trace
+        if trace.enabled:
+            now = time.monotonic()
+            with self._guard:
+                self._clocks[message_id] = {"submitted": now, "state": None}
+            trace.emit("submit", turn_id=runtime_message_id(message_id), project_id=project_id, phase="intake",
+                       outcome="scheduled", duration_ms=trace.since(now if started is None else started))
+        self._futures.append(self._pool.submit(self._deliver, actor, project_id, message_id))
 
     def drain(self, timeout: float = 30.0) -> None:
         """Wait for in-flight deliveries (tests and orderly shutdown)."""
@@ -395,9 +424,21 @@ class ArchitectService:
             for key, value in fields.items():
                 setattr(row, key, value)
             session.commit()
+        self._note_state(message_id, state, code)
+
+    def _note_state(self, message_id: str, state: str, code: str | None) -> None:
+        if not self._trace.enabled:
+            return
+        with self._guard:
+            clock = self._clocks.get(message_id)
+            if clock is not None:
+                clock["state"] = state
+        self._trace.emit("delivery_state", state=state, outcome=code or "none",
+                         turn_id=runtime_message_id(message_id))
 
     def _build_context(self, session: Session, project: Project, message: ConversationMessage,
-                       tools_on: bool = False, rules: RulesSnapshot | None = None) -> tuple[str, str]:
+                       tools_on: bool = False, rules: RulesSnapshot | None = None,
+                       sizes: dict | None = None) -> tuple[str, str]:
         senders = {p.participant_id: p.kind for p in session.scalars(select(ConversationParticipant).where(
             ConversationParticipant.conversation_id == message.conversation_id))}
         recent = list(reversed(session.scalars(select(ConversationMessage).where(
@@ -438,11 +479,43 @@ class ArchitectService:
         else:
             block = ""
         text = header + block + tool_rules + "Answer the Owner's latest message.\n\nConversation:\n" + "\n".join(lines)
+        if sizes is not None:  # P024 diagnostics: lengths only, filled from the already-built sections
+            recap = "\n".join(lines)
+            sizes.update(identity_chars=len(header), rules_chars=len(block), tool_guidance_chars=len(tool_rules),
+                         recap_chars=len(recap), recap_messages=len(lines), total_chars=len(text),
+                         framing_chars=len(text) - len(header) - len(block) - len(tool_rules) - len(recap))
         return text, categories
 
     def _deliver(self, actor: ActorContext, project_id: int, message_id: str) -> None:
+        trace = self._trace
+        if not trace.enabled:
+            return self._deliver_traced(actor, project_id, message_id)
+        with trace.scope(turn_id=runtime_message_id(message_id), project_id=project_id, phase="deliver"):
+            worker_at = time.monotonic()
+            with self._guard:
+                clock = self._clocks.get(message_id)
+            if clock is not None:
+                trace.emit("worker_started", duration_ms=(worker_at - clock["submitted"]) * 1000.0)  # pool queue wait
+            interrupted = False
+            try:
+                self._deliver_traced(actor, project_id, message_id)
+            except BaseException:  # cancellation/shutdown: reported as interrupted, never as a finished turn
+                interrupted = True
+                raise
+            finally:
+                with self._guard:
+                    clock = self._clocks.pop(message_id, None)
+                if clock is not None:  # not reached if the process dies: that turn is reported as incomplete
+                    state = None if interrupted else clock["state"]
+                    trace.emit("turn_finished", duration_ms=trace.since(clock["submitted"]), state=state,
+                               outcome="interrupted" if interrupted else (state or "no_state"))
+
+    def _deliver_traced(self, actor: ActorContext, project_id: int, message_id: str) -> None:
+        trace = self._trace
         try:
+            waiting = time.monotonic()
             with self._lock(project_id, "turn"):
+                trace.emit("turn_lock_acquired", duration_ms=trace.since(waiting))
                 self._deliver_locked(actor, project_id, message_id)
         except Exception:  # never leave a delivery pending without a truthful outcome
             log.warning("Architect delivery failed unexpectedly")
@@ -452,6 +525,8 @@ class ArchitectService:
                 pass
 
     def _deliver_locked(self, actor: ActorContext, project_id: int, message_id: str) -> None:
+        trace = self._trace
+        prepared = time.monotonic()
         with self._sessions() as session:
             delivery = session.get(ConversationDelivery, message_id)
             if delivery is None or delivery.state != DELIVERY_PENDING:
@@ -467,7 +542,7 @@ class ArchitectService:
             message = session.get(ConversationMessage, message_id)
             conversation = session.get(Conversation, message.conversation_id)
             project = self._project(session, project_id)
-            if handle is None or conversation.project_id != project.id or not self._probe_owned(live, handle):
+            if handle is None or conversation.project_id != project.id or not self._timed_probe(live, handle):
                 self._set(message_id, DELIVERY_FAILED, "session_not_ready")
                 return
             pinned = self._pinned_rules.get(live.session_id)
@@ -475,26 +550,61 @@ class ArchitectService:
                 # Restarted backend or lost snapshot: never silently adopt whatever is on disk now.
                 self._set(message_id, DELIVERY_FAILED, "rules_snapshot_unavailable")
                 return
+            sizes: dict | None = {} if trace.enabled else None
+            built = time.monotonic()
             text, categories = self._build_context(session, project, message, self._tools_enabled_for(live.session_id),
-                                                   pinned)
+                                                   pinned, sizes)
+            trace.emit("context_built", duration_ms=trace.since(built), **(sizes or {}))
             delivery.attempts += 1
             delivery.context_categories = categories
             delivery.updated_at = _now()
             session.commit()
             runtime_id = delivery.runtime_message_id or runtime_message_id(message_id)
             live_session_id = live.session_id
+            attempts = delivery.attempts
+        trace.bind(rosc_session_id=live_session_id)
+        trace.emit("prepare", duration_ms=trace.since(prepared), attempts=attempts, outcome="ready")
+        asked = time.monotonic()
+        trace.begin_turn(live_session_id, runtime_id, project_id)
         try:
             reply = self._runtime.ask(handle, runtime_id, text, self._timeout)
         except RuntimeAmbiguous as exc:
+            trace.emit("ask_finished", duration_ms=trace.since(asked), outcome=exc.code)
             self._set(message_id, DELIVERY_UNKNOWN, exc.code)
             return
         except RuntimeProblem as exc:
+            trace.emit("ask_finished", duration_ms=trace.since(asked), outcome=exc.code)
             self._set(message_id, DELIVERY_FAILED, exc.code)
             return
+        finally:
+            trace.end_turn(live_session_id, runtime_id)
+        trace.emit("ask_finished", duration_ms=trace.since(asked), outcome="reply")
         self._commit_reply(actor, project_id, message_id, live_session_id, reply)
+
+    def _timed_probe(self, live: ArchitectSession, handle: RuntimeHandle) -> bool:
+        started = time.monotonic()
+        ok = self._probe_owned(live, handle)
+        self._trace.emit("probe", duration_ms=self._trace.since(started), outcome="ok" if ok else "failed")
+        return ok
 
     def _commit_reply(self, actor: ActorContext, project_id: int, message_id: str, live_session_id: str,
                       reply: str) -> bool:
+        trace = self._trace
+        if not trace.enabled:
+            return self._commit_reply_inner(actor, project_id, message_id, live_session_id, reply)
+        started = time.monotonic()
+        done = False
+        try:
+            done = self._commit_reply_inner(actor, project_id, message_id, live_session_id, reply)
+            return done
+        finally:
+            trace.emit("commit", duration_ms=trace.since(started), outcome="committed" if done else "not_committed",
+                       chars=len(reply) if isinstance(reply, str) else None)
+            if done:
+                self._note_state(message_id, DELIVERY_DELIVERED, None)
+
+    def _commit_reply_inner(self, actor: ActorContext, project_id: int, message_id: str, live_session_id: str,
+                            reply: str) -> bool:
         try:
             self._authorize(actor, ARCHITECT_REPLY_COMMIT, project_id)
             text = _architect_body(reply)
@@ -560,9 +670,24 @@ class ArchitectService:
     # -- reconciliation / retry --------------------------------------------------------------------------------------
     def reconcile(self, actor: ActorContext, project_id: object, message_id: str) -> dict:
         """Look an ambiguous attempt up again at the provider by its correlation id. Never re-sends."""
+        trace = self._trace
+        if not trace.enabled or not isinstance(project_id, int) or isinstance(project_id, bool):
+            return self._reconcile(actor, project_id, message_id)
+        started, outcome = time.monotonic(), "exception"
+        with trace.scope(turn_id=runtime_message_id(message_id), project_id=project_id, phase="reconcile"):
+            try:
+                view = self._reconcile(actor, project_id, message_id)
+                outcome = view.get("state") if isinstance(view, dict) else "unknown"
+                return view
+            finally:
+                trace.emit("reconcile_finished", duration_ms=trace.since(started), outcome=outcome)
+
+    def _reconcile(self, actor: ActorContext, project_id: object, message_id: str) -> dict:
         self._authorize(actor, CONVERSATION_DELIVERY_RECONCILE, project_id)
         pid: int = project_id  # type: ignore[assignment]
+        waiting = time.monotonic()
         with self._lock(pid, "turn"):
+            self._trace.emit("turn_lock_acquired", duration_ms=self._trace.since(waiting))
             with self._sessions() as session:
                 row = self._owned_delivery(session, pid, message_id)
                 legacy = recoverable_failure(row)
@@ -574,6 +699,7 @@ class ArchitectService:
                         or not self._probe_owned(live, handle)):
                     return delivery_view(row)  # cannot ask the provider: stays unknown (human recovery)
                 runtime_id, live_id = row.runtime_message_id, live.session_id
+            self._trace.bind(rosc_session_id=live_id)
             problem: str | None = None
             try:
                 found = self._runtime.lookup(handle, runtime_id)  # type: ignore[arg-type]
@@ -606,7 +732,7 @@ class ArchitectService:
                 row.updated_at = _now()
                 session.commit()
                 view = delivery_view(row)
-        self._futures.append(self._pool.submit(self._deliver, actor, pid, message_id))
+        self._enqueue(actor, pid, message_id)
         return view
 
     def _owned_delivery(self, session: Session, project_id: int, message_id: str) -> ConversationDelivery:

@@ -4,6 +4,7 @@ import ipaddress
 import logging
 import re
 import threading
+import time
 import uuid
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
@@ -21,9 +22,10 @@ from . import authorization as authz
 from .agent_registry import (AgentNotFound, AgentRegistryService, AssignmentNotFound, InvalidRegistryInput, ProjectNotFound,
                              RegistryConflict, RegistryDenied, RegistryError, RegistryStoreError, UnsafeProjectIdentity,
                              canonical_agent_id)
+from .architect_latency import LatencyTrace
 from .architect_runtime import ArchitectRuntime, OpenCodeRuntime
 from .architect_rules import ArchitectRulesLoader
-from .architect_service import ArchitectService
+from .architect_service import ArchitectService, runtime_message_id
 from .architect_tools import ToolHost
 from .project_context import ProjectContextBroker
 from .config import data_dir, global_library_dir, repo_private_paths
@@ -338,7 +340,8 @@ def create_app(db_path: Path | None = None, workspace_root: Path | None = None, 
                extra_allowed_hosts: frozenset[str] = frozenset(),
                extra_allowed_origins: frozenset[str] = frozenset(),
                architect_runtime: ArchitectRuntime | None = None,
-               global_library_root: Path | None = None) -> FastAPI:
+               global_library_root: Path | None = None,
+               latency_trace: LatencyTrace | None = None) -> FastAPI:
     """``auth_provider``/``authorization_policy`` and the ``extra_allowed_*`` sets are Python-level composition and
     test seams only. Nothing in a request (body, query, header, cookie) can select an actor, a role or these values,
     and there is deliberately no environment knob."""
@@ -356,9 +359,13 @@ def create_app(db_path: Path | None = None, workspace_root: Path | None = None, 
     library_root = global_library_root or DEFAULT_GLOBAL_LIBRARY
     context_broker = ProjectContextBroker(sessions, workspace_root, library_root,
                                         private_roots=(db_path.parent, db_path, *repo_private_paths()))
-    tool_host = ToolHost(context_broker.call)  # loopback listener starts lazily, only at an Owner activation
+    # P024: opt-in latency diagnostics (ROSC_ARCHITECT_LATENCY_TRACE); unset means DISABLED and zero output.  ``latency_trace``
+    # is a Python-level test seam like the runtime; no request can enable or configure it.
+    trace = latency_trace if latency_trace is not None else LatencyTrace.from_environment(db_path.parent)
+    tool_host = ToolHost(context_broker.call, trace)  # loopback listener starts lazily, only at an Owner activation
     architect = ArchitectService(sessions, policy, architect_runtime or OpenCodeRuntime(db_path.parent),
-                                 tools=tool_host, context=context_broker, rules=ArchitectRulesLoader(library_root))
+                                 tools=tool_host, context=context_broker, rules=ArchitectRulesLoader(library_root),
+                                 trace=trace)
 
     @asynccontextmanager
     async def lifespan(_app: FastAPI):
@@ -646,8 +653,12 @@ def create_app(db_path: Path | None = None, workspace_root: Path | None = None, 
                                             response: Response) -> dict:
         pid = numeric_id(project_id, "P")
         # The sender is the trusted local Owner context, never a request-supplied id, role or session.
+        committing = time.monotonic()
         result = conversation_call(conversation.create_message, current_actor(), pid,
                                    client_key=data.client_key, body=data.body)
+        if not result["replayed"] and trace.enabled:
+            trace.emit("owner_commit", turn_id=runtime_message_id(result["message"]["message_id"]), project_id=pid,
+                       phase="intake", duration_ms=trace.since(committing))
         if result["replayed"]:
             response.status_code = 200
             return result

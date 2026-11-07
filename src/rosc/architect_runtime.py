@@ -57,6 +57,7 @@ import signal
 import socket
 import stat
 import subprocess
+import threading
 import time
 import urllib.error
 import urllib.parse
@@ -65,6 +66,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Mapping, Protocol
 
+from .architect_latency import DISABLED, LatencyTrace
 from .architect_tools import PERMISSION_PATTERN, SERVER_NAME, TOOL_NAMES, ToolEndpoint
 
 ENV_PASSWORD = "OPENCODE_PASSWORD"
@@ -173,6 +175,11 @@ class ArchitectRuntime(Protocol):
     def stop(self, session_id: str, handle: RuntimeHandle) -> bool: ...
 
 
+def _outcome(exc: BaseException) -> str:
+    """Closed-vocabulary outcome for diagnostics: a ROSC error code, never an exception string."""
+    return exc.code if isinstance(exc, RuntimeProblem) else "exception"
+
+
 # -- process identity (Linux /proc) -----------------------------------------------------------------------------
 def process_ticks(pid: int) -> int | None:
     """Start time (clock ticks since boot) of ``pid`` or None. Field 22 of /proc/<pid>/stat."""
@@ -223,6 +230,11 @@ class OpenCodeRuntime:
         self._environ = environ if environ is not None else os.environ
         self._children: dict[str, subprocess.Popen] = {}
         self._passwords: dict[str, str] = {}
+        self._diag: LatencyTrace = DISABLED  # P024: opt-in, content-free latency diagnostics (off by default)
+        self._tl = threading.local()  # per-thread byte counter, only touched while diagnostics are enabled
+
+    def attach_diagnostics(self, trace: LatencyTrace) -> None:
+        self._diag = trace
 
     # -- configuration ----------------------------------------------------------------------------------------
     def _binary(self) -> str | None:
@@ -423,6 +435,8 @@ class OpenCodeRuntime:
             raise RuntimeUnavailable("connection_failed") from None
         except OSError:
             raise RuntimeAmbiguous("connection_lost") from None
+        if self._diag.enabled:
+            self._tl.bytes = getattr(self._tl, "bytes", 0) + len(raw)
         if max_bytes is not None and len(raw) > max_bytes:
             raise RuntimeRefused("response_too_large")
         if not raw:
@@ -621,12 +635,27 @@ class OpenCodeRuntime:
 
     def ask(self, handle: RuntimeHandle, runtime_message_id: str, text: str, timeout: float) -> str:
         sid = handle.runtime_session_id
-        self._call(handle.rosc_session_id, handle.port, "POST", f"/api/session/{sid}/prompt",
-                   {"id": runtime_message_id, "text": text}, timeout=min(timeout, 30.0))
+        diag = self._diag
+        started = diag.now()
+        try:
+            self._call(handle.rosc_session_id, handle.port, "POST", f"/api/session/{sid}/prompt",
+                       {"id": runtime_message_id, "text": text}, timeout=min(timeout, 30.0))
+        except Exception as exc:
+            diag.emit("prompt_admitted", duration_ms=diag.since(started), outcome=_outcome(exc))
+            raise
+        diag.emit("prompt_admitted", duration_ms=diag.since(started), outcome="ok")
+        started = diag.now()
         try:
             self._call(handle.rosc_session_id, handle.port, "POST", f"/api/experimental/session/{sid}/wait", timeout=timeout)
         except RuntimeUnavailable:
+            diag.emit("wait_returned", duration_ms=diag.since(started), timeout_ms=timeout * 1000.0,
+                      outcome="connection_lost")
             raise RuntimeAmbiguous("connection_lost") from None
+        except Exception as exc:
+            diag.emit("wait_returned", duration_ms=diag.since(started), timeout_ms=timeout * 1000.0,
+                      outcome=_outcome(exc))
+            raise
+        diag.emit("wait_returned", duration_ms=diag.since(started), timeout_ms=timeout * 1000.0, outcome="idle")
         result = self.lookup(handle, runtime_message_id)
         if result.status == "reply" and result.text:
             return result.text
@@ -636,6 +665,25 @@ class OpenCodeRuntime:
 
     def lookup(self, handle: RuntimeHandle, runtime_message_id: str) -> ReplyLookup:
         """Traverse the verified OpenCode cursor API.  ``absent`` requires the terminal page."""
+        diag = self._diag
+        if not diag.enabled:
+            return self._lookup(handle, runtime_message_id, None)
+        stats = {"requests": 0, "messages": 0, "fallbacks": 0}
+        self._tl.bytes = 0
+        started = diag.now()
+        outcome = "interrupted"  # a BaseException (cancellation) is reported as such, never as a finished lookup
+        try:
+            result = self._lookup(handle, runtime_message_id, stats)
+            outcome = result.status
+            return result
+        except Exception as exc:
+            outcome = _outcome(exc)
+            raise
+        finally:
+            diag.emit("lookup", duration_ms=diag.since(started), requests=stats["requests"], messages=stats["messages"],
+                      fallbacks=stats["fallbacks"], bytes=getattr(self._tl, "bytes", 0), outcome=outcome)
+
+    def _lookup(self, handle: RuntimeHandle, runtime_message_id: str, stats: dict | None) -> ReplyLookup:
         cursor: str | None = None
         cursors: set[str] = set()
         seen = False
@@ -647,10 +695,15 @@ class OpenCodeRuntime:
                 query = urllib.parse.urlencode({"order": "asc", "limit": LOOKUP_PAGE_SIZE})
             else:
                 query = urllib.parse.urlencode({"cursor": cursor, "limit": LOOKUP_PAGE_SIZE})
+            if stats is not None:
+                stats["requests"] += 1
             try:
                 payload = self._page(handle, query)
             except RuntimeRefused as exc:
                 if exc.code == "response_too_large":
+                    if stats is not None:
+                        stats["requests"] += 1
+                        stats["fallbacks"] += 1
                     # A page of 200 messages exceeded the control-call cap.  That is a transport property, not a
                     # verdict on any reply: fetch this same cursor again one message at a time, each read in full.
                     payload = self._single_message_page(handle, cursor)
@@ -667,6 +720,8 @@ class OpenCodeRuntime:
                 raise RuntimeRefused("malformed_response")
             for item in payload["data"]:
                 count += 1
+                if stats is not None:
+                    stats["messages"] = count
                 if count > MAX_LOOKUP_MESSAGES:
                     return ReplyLookup("uncertain")
                 if not isinstance(item, dict) or not isinstance(item.get("id"), str):
