@@ -683,7 +683,14 @@ class OpenCodeRuntime:
                     completed = (item.get("time") or {}).get("completed") if isinstance(item.get("time"), dict) else None
                     if completed is None and not item.get("error"):
                         return ReplyLookup("in_progress")
-                    if item.get("error") or item.get("finish") != "stop":
+                    if item.get("error"):
+                        raise RuntimeRefused("provider_error")  # also after earlier successful tool steps
+                    if item.get("finish") == "tool-calls":
+                        # A completed intermediate step: the model asked for tools and the run continues with a
+                        # later assistant step.  Its text is never the answer.  If the stream ends here, the final
+                        # step is simply not produced yet (reported below as in_progress, never as a reply).
+                        continue
+                    if item.get("finish") != "stop":
                         raise RuntimeRefused("provider_error")
                     content = item.get("content")
                     if not isinstance(content, list):

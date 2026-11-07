@@ -155,6 +155,8 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/api/session/ses_fake":
             return self._send({"data": STATE["session"]})
         if path == "/api/session/ses_fake/message":
+            if STATE.get("pending_final") and os.path.exists(beside("release")):
+                STATE["messages"].append(STATE.pop("pending_final"))
             query = parse_qs(parsed.query)
             cursor = query.get("cursor", [None])[0]
             offset = int(cursor.removeprefix("cursor-")) if cursor else 0
@@ -213,16 +215,47 @@ class Handler(BaseHTTPRequestHandler):
                     handle.write(body["text"])
             except OSError:
                 pass
+            try:
+                with open(beside("prompts.log"), "a", encoding="utf-8") as handle:
+                    handle.write(body["id"] + "\n")
+            except OSError:
+                pass
             run_scripted_tool_calls()
             if mode() in ("ok", "long_match"):
                 STATE["messages"].append({"id": "msg_a1", "type": "assistant", "finish": "stop",
                                           "time": {"completed": 1},
                                           "content": [{"type": "text", "text": "Fake architect reply"}]})
             elif mode() == "file_reply":
-                STATE["messages"].append({"id": "msg_a1", "type": "assistant", "finish": "stop",
-                                          "time": {"completed": 1},
-                                          "content": [{"type": "text", "text": part}
-                                                      for part in synthetic_reply().get("parts", [])]})
+                reply = synthetic_reply()
+                # Opt-in multi-step trace: ``intermediate`` completed ``finish=tool-calls`` steps (each with its own
+                # distinct text that must never surface), then a ``terminal`` step: "stop" (default), "none",
+                # "incomplete", "error" (finish=error + error object), "stop_error" (finish=stop + error object),
+                # or any other string used verbatim as ``finish``.  ``then_user`` appends a later user message.
+                for index in range(int(reply.get("intermediate", 0))):
+                    STATE["messages"].append({
+                        "id": f"msg_step_{index}", "type": "assistant", "finish": "tool-calls",
+                        "time": {"completed": 1}, "content": [{"type": "text", "text": f"INTERMEDIATE {index}"}]})
+                terminal = reply.get("terminal", "stop")
+                final = {"id": "msg_a1", "type": "assistant", "finish": "stop", "time": {"completed": 1},
+                         "content": [{"type": "text", "text": part} for part in reply.get("parts", [])]}
+                if terminal == "incomplete":
+                    final.update(finish=None, time={})
+                elif terminal == "error":
+                    final.update(finish="error", error={"name": "x"})
+                elif terminal == "stop_error":
+                    final.update(error={"name": "x"})
+                elif terminal != "stop":
+                    final.update(finish=terminal)
+                if reply.get("late_final"):
+                    # Surfaces on a later message read, only once a test creates the ``release`` file beside the
+                    # launcher: the model finishing after ROSC stopped waiting.
+                    STATE["pending_final"] = final
+                elif terminal != "none":
+                    STATE["messages"].append(final)
+                if reply.get("then_user"):
+                    STATE["messages"].append({"id": "msg_user_later", "type": "user", "text": "later"})
+                    STATE["messages"].append({**final, "id": "msg_a_later", "content": [
+                        {"type": "text", "text": "LATER TURN ANSWER"}], "finish": "stop", "time": {"completed": 1}})
             elif mode() == "refuse":
                 STATE["messages"].append({"id": "msg_a1", "type": "assistant", "finish": "error",
                                           "error": {"name": "x"}, "time": {"completed": 1}, "content": []})
