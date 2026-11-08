@@ -388,7 +388,7 @@ class TracedEndToEnd(p22.EndToEndMultiStepTests):
         ctx = next(e for e in events if e["event"] == "context_built")
         self.assertEqual(ctx["total_chars"], ctx["identity_chars"] + ctx["rules_chars"] + ctx["tool_guidance_chars"]
                          + ctx["recap_chars"] + ctx["framing_chars"])
-        self.assertGreater(ctx["rules_chars"], 0)
+        self.assertEqual(ctx["rules_chars"], 0)  # P027: default composition has no RulesSnapshot block
         self.assertEqual(ctx["recap_messages"], 1)
         for e in events:
             for key in ("duration_ms", "t_ms"):

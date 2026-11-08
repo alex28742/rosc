@@ -307,7 +307,11 @@ class LoaderTests(unittest.TestCase):
 
 
 class ServiceRulesTests(p19.ContextCase):
-    """Explicit activation pins the verified ruleset; delivery carries it; failures stay closed and truthful."""
+    """Explicit activation pins the verified ruleset; delivery carries it; failures stay closed and truthful.
+
+    P027: LEGACY opt-in. The product composition no longer pins; these tests compose the loader explicitly."""
+
+    legacy_rules = True
 
     def post(self, key: str, body: str = "Hello") -> None:
         sent = self.client.post("/api/projects/P0001/conversation/messages", json={"client_key": key, "body": body})
@@ -492,7 +496,11 @@ class PinnedGlobalReadTests(p19.ContextCase):
 
     Variant B (fail closed): current bytes are served only when their full-file sha256 equals the one verified at
     activation; otherwise a stable non-secret error and no content.  Reads go through the real Broker entry point
-    (``direct``) and, once, through the fake OpenCode MCP transport (``one``)."""
+    (``direct``) and, once, through the fake OpenCode MCP transport (``one``).
+
+    P027: LEGACY opt-in composition (``legacy_rules``); the default app does not pin."""
+
+    legacy_rules = True
 
     MARKER = "SYNTH-P0211-TAMPERED-POLICY-MARKER"
     GOVERNED = ("agents/architect/rules/onboarding.md", "agents/architect/rules/task-run-git.md",

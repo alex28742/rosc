@@ -341,10 +341,15 @@ def create_app(db_path: Path | None = None, workspace_root: Path | None = None, 
                extra_allowed_origins: frozenset[str] = frozenset(),
                architect_runtime: ArchitectRuntime | None = None,
                global_library_root: Path | None = None,
-               latency_trace: LatencyTrace | None = None) -> FastAPI:
+               latency_trace: LatencyTrace | None = None,
+               architect_rules: ArchitectRulesLoader | None = None) -> FastAPI:
     """``auth_provider``/``authorization_policy`` and the ``extra_allowed_*`` sets are Python-level composition and
     test seams only. Nothing in a request (body, query, header, cookie) can select an actor, a role or these values,
-    and there is deliberately no environment knob."""
+    and there is deliberately no environment knob.
+
+    P027: ``architect_rules`` is a Python-level opt-in seam for the legacy RulesSnapshot pin (tests only).  The product
+    composition leaves it ``None``: Architect activation, delivery and ``rosc_global_read`` do not depend on a pinned
+    snapshot."""
     provider = auth_provider or authz.LocalOwnerProvider()
     policy = authorization_policy or authz.LocalOwnerPolicy()
     allowed_hosts = checked_hosts(extra_allowed_hosts)
@@ -364,8 +369,7 @@ def create_app(db_path: Path | None = None, workspace_root: Path | None = None, 
     trace = latency_trace if latency_trace is not None else LatencyTrace.from_environment(db_path.parent)
     tool_host = ToolHost(context_broker.call, trace)  # loopback listener starts lazily, only at an Owner activation
     architect = ArchitectService(sessions, policy, architect_runtime or OpenCodeRuntime(db_path.parent),
-                                 tools=tool_host, context=context_broker, rules=ArchitectRulesLoader(library_root),
-                                 trace=trace)
+                                 tools=tool_host, context=context_broker, rules=architect_rules, trace=trace)
 
     @asynccontextmanager
     async def lifespan(_app: FastAPI):

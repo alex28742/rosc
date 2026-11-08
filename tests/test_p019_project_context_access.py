@@ -30,6 +30,7 @@ import rosc.config as pc_config
 import rosc.project_context as pc
 from rosc.agent_registry import AgentRegistryService
 from rosc.app import create_app
+from rosc.architect_rules import ArchitectRulesLoader
 from rosc.architect_runtime import ENV_APPROVED_MODEL, ENV_BINARY, OpenCodeRuntime
 from rosc.architect_store import (ArchitectDocumentStore, DocumentExists, DocumentNotFound, InvalidDocument,
                                   RevisionConflict)
@@ -52,7 +53,11 @@ def digest(path: Path) -> str:
 
 
 class ContextCase(base.StageCase):
-    """Three registered Projects; P0001 has an active, activated Architect on the real adapter + fake server."""
+    """Three registered Projects; P0001 has an active, activated Architect on the real adapter + fake server.
+
+    P027: the default composition has no RulesSnapshot pin; legacy P021 tests opt in with ``legacy_rules = True``."""
+
+    legacy_rules = False
 
     def setUp(self) -> None:
         super().setUp()
@@ -117,7 +122,8 @@ class ContextCase(base.StageCase):
             self.client.close()
         self.runtime = OpenCodeRuntime(self.data, self.env_map)
         self.client = TestClient(create_app(self.data / "rosc.db", self.data / "workspace",
-                                            architect_runtime=self.runtime, global_library_root=self.lib),
+                                            architect_runtime=self.runtime, global_library_root=self.lib,
+                                            architect_rules=ArchitectRulesLoader(self.lib) if self.legacy_rules else None),
                                  base_url="http://localhost")
         self.architect = self.client.app.state.architect
         self.broker = self.architect._context
@@ -859,13 +865,13 @@ class BriefingAndContextTests(ContextCase):
         self.assertNotIn("no tools", prompt)
         for private in (MARK_A, MARK_SRC, "adr-1"):
             self.assertNotIn(private, prompt)
-        block = re.search(r"=== ROSC GLOBAL ARCHITECT RULES .*?=== END ROSC GLOBAL ARCHITECT RULES ===\n", prompt, re.S)
-        self.assertIsNotNone(block)  # P021: the verified, bounded global rules reach every turn
-        self.assertLess(len(prompt.replace(block.group(0), "")), 3500)  # the P019 prompt itself stays concise
+        # P027: the default composition carries no RulesSnapshot block (legacy pin is opt-in, see test_p021).
+        self.assertNotIn("ROSC GLOBAL ARCHITECT RULES", prompt)
+        self.assertLess(len(prompt), 3500)  # the P019 prompt itself stays concise
         with self.sessions() as session:
             categories = session.connection().exec_driver_sql(
                 "SELECT context_categories FROM conversation_deliveries").fetchone()[0]
-        self.assertEqual(categories, "project_identity,global_rules@0.4.0,tool_rules,recent_messages:1")
+        self.assertEqual(categories, "project_identity,tool_rules,recent_messages:1")
 
     def test_runtime_without_tools_keeps_the_legacy_no_tools_prompt(self) -> None:
         runtime = p15.FakeRuntime()
