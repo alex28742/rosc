@@ -141,3 +141,42 @@ describe('presentation styling', () => {
     }
   });
 });
+
+describe('Engine notice reference parity (P030)', () => {
+  const find = (selector: string, rules: Rule[] = sheets.flatMap(sheet => sheet.rules)): Rule | undefined => {
+    for (const rule of rules) {
+      if (rule.header === selector) return rule;
+      const nested = find(selector, rule.rules);
+      if (nested) return nested;
+    }
+    return undefined;
+  };
+  const has = (rule: Rule | undefined, declaration: string) => rule?.declarations.includes(declaration) ?? false;
+
+  it('pins the approved v0.7 stack geometry and its narrow-screen variant', () => {
+    const stack = find('.rosc-engine-notice-stack');
+    expect(has(stack, 'position: fixed')).toBe(true);
+    expect(has(stack, 'top: 87px')).toBe(true);
+    expect(has(stack, 'right: 22px')).toBe(true);
+    expect(has(stack, 'width: min(365px, calc(100vw - 24px))')).toBe(true);
+    expect(has(stack, 'gap: 10px')).toBe(true);
+    expect(has(stack, 'z-index: var(--rosc-layer-notice)')).toBe(true);
+
+    const narrow = find('@media (max-width: 700px)', sheets.find(sheet => sheet.name === 'shell.css')!.rules);
+    expect(narrow).toBeTruthy();
+    const narrowStack = find('.rosc-engine-notice-stack', narrow!.rules);
+    expect(has(narrowStack, 'top: 77px')).toBe(true);
+    expect(has(narrowStack, 'right: 12px')).toBe(true);
+    expect(has(narrowStack, 'width: min(355px, calc(100vw - 24px))')).toBe(true);
+  });
+
+  it('keeps the four approved variants, the close control and reduced-motion handling', () => {
+    for (const kind of ['progress', 'success', 'warning', 'error']) expect(find(`.rosc-engine-notice--${kind}`)).toBeTruthy();
+    expect(find('.rosc-engine-notice__dismiss')).toBeTruthy();
+    expect(find('.rosc-engine-notice__spin')).toBeTruthy();
+    const reduced = find('@media (prefers-reduced-motion: reduce)', sheets.find(sheet => sheet.name === 'shell.css')!.rules);
+    expect(reduced).toBeTruthy();
+    expect(reduced!.rules.some(rule =>
+      rule.header === '.rosc-engine-notice, .rosc-engine-notice__spin' && rule.declarations.includes('animation: none'))).toBe(true);
+  });
+});

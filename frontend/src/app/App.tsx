@@ -31,7 +31,8 @@ export function App({ api = coreApi }: { api?: CoreApi }) {
     onRepair: (c: { readonly confirmed: true }) => void (kind === 'project' ? actions.repairProject(c) : actions.repairTask(c)),
   });
 
-  return <Shell onOpenSettings={actions.openSettings} settingsOpen={route.kind === 'settings'}>
+  return <Shell onOpenSettings={actions.openSettings} settingsOpen={route.kind === 'settings'}
+    engineNotices={core.engineNotices} onDismissEngineNotice={core.dismissEngineNotice}>
     <Dashboard
       projects={core.projects}
       projectsStatus={core.projectsStatus}

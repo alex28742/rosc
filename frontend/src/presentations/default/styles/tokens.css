@@ -40,6 +40,26 @@
   --rosc-red: #ad454f;
   --rosc-red-line: #f0dadd;
 
+  /* Engine system notices (P030, approved v0.7 notification UX) */
+  --rosc-notice-accent: #3b789b;
+  --rosc-notice-progress: #377da7;
+  --rosc-notice-success: #348359;
+  --rosc-notice-warning: #b17f35;
+  --rosc-notice-error: #b44d53;
+  --rosc-notice-line: #dce4e9;
+  --rosc-notice-icon-bg: #edf4f9;
+  --rosc-notice-icon-success-bg: #edf7ef;
+  --rosc-notice-icon-warning-bg: #fff5e7;
+  --rosc-notice-icon-error-bg: #fff0f1;
+  --rosc-notice-kicker: #84939e;
+  --rosc-notice-title: #273645;
+  --rosc-notice-desc: #5b6b77;
+  --rosc-notice-dismiss: #85949f;
+  --rosc-notice-dismiss-hover-bg: #f0f3f5;
+  --rosc-notice-dismiss-hover: #455767;
+  --rosc-notice-spinner-track: #a7c9db;
+  --rosc-notice-shadow: 0 13px 42px rgba(22, 41, 61, 0.15), 0 2px 8px rgba(22, 41, 61, 0.05);
+
   /* Focus */
   --rosc-focus: #a6cae2;
 
@@ -69,13 +89,14 @@
   --rosc-shadow-drawer: -8px 0 25px rgba(25, 36, 48, 0.15);
   --rosc-shadow-dialog: 0 22px 72px rgba(21, 32, 44, 0.25);
 
-  /* Layer stack: overlay < drawer < nested drawer < dialog */
+  /* Layer stack: overlay < drawer < nested drawer < dialog < Engine notice */
   --rosc-layer-page: 0;
   --rosc-layer-backdrop: 30;
   --rosc-layer-drawer: 31;
   --rosc-layer-backdrop-nested: 33;
   --rosc-layer-drawer-nested: 34;
   --rosc-layer-dialog: 45;
+  --rosc-layer-notice: 150;
 
   /* Geometry */
   --rosc-topbar-height: 66px;

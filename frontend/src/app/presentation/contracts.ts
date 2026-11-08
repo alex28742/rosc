@@ -131,11 +131,30 @@ export type WorkspaceControls = {
   onRepair: (confirmation: RepairConfirmation) => void;
 };
 
+/** Engine system notices are application/technical state only; Task/workflow notifications stay in their own UI. */
+export type EngineNoticeKind = 'progress' | 'success' | 'warning' | 'error';
+
+/**
+ * One compact Engine popup card. `key` is the identity of its source, so a later state of the same source
+ * replaces the existing card instead of stacking a duplicate.
+ */
+export type EngineNotice = {
+  key: string;
+  kind: EngineNoticeKind;
+  /** Small uppercase source label, e.g. `ROSC · СИСТЕМА`. */
+  kicker: string;
+  title: string;
+  description: string;
+};
+
 export type ShellProps = {
   children: ReactNode;
   /** Opens the approved global Settings / Agent Registry surface. */
   onOpenSettings: () => void;
   settingsOpen: boolean;
+  /** Engine system popups (top-right); the controller owns their state and lifecycle. */
+  engineNotices: readonly EngineNotice[];
+  onDismissEngineNotice: (key: string) => void;
 };
 
 export type DashboardViewProps = {

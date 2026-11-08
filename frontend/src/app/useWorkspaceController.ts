@@ -2,7 +2,7 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import { ApiError, coreApi, describeError, type CoreApi } from '../core/api';
 import { toAgentInput, toAgentUpdateInput, toProjectInput, toTaskInput, type AgentDefinition, type AgentFormValues, type ArchitectStatus, type ContextAccess, type ConversationMessage, type Project, type ProjectFormValues, type RepairConfirmation, type RepairResult, type RoleAssignment, type Task, type TaskFormValues } from '../core/models';
 import type { Navigation } from './navigation';
-import type { AgentRegistryState, AssignmentIntent, Feedback, LoadStatus, ProjectAssignmentsState, ProjectTab } from './presentation/contracts';
+import type { AgentRegistryState, AssignmentIntent, EngineNotice, Feedback, LoadStatus, ProjectAssignmentsState, ProjectTab } from './presentation/contracts';
 import { assignmentBaseline, ROLE_REQUIRED_CAPABILITIES } from './presentation/contracts';
 import { projectIdOf } from './route';
 
@@ -11,6 +11,21 @@ export type Layer = 'dashboard' | 'project' | 'task' | 'modal' | 'settings';
 type TaskCache = { projectId: string | null; items: Task[]; status: LoadStatus };
 const NO_TASKS: TaskCache = { projectId: null, items: [], status: 'loading' };
 const NO_FEEDBACK: Feedback = { error: '', notice: '' };
+
+/** Approved v0.7 Engine popup copy. `progress` and onboarding stay UI-only until P029 supplies their signals. */
+const ENGINE_KICKER = 'ROSC · СИСТЕМА';
+const ENGINE_SUCCESS_DISMISS_MS = 6500;
+const MAX_ENGINE_NOTICES = 3;
+
+const engineNotice = (key: string, kind: EngineNotice['kind'], title: string, description: string): EngineNotice =>
+  ({ key, kind, kicker: ENGINE_KICKER, title, description });
+
+const sameEngineNotice = (a: EngineNotice, b: EngineNotice) =>
+  a.kind === b.kind && a.kicker === b.kicker && a.title === b.title && a.description === b.description;
+
+/** Only a real transport failure or a Core 5xx is an Engine outage; an ordinary 4xx business error is not. */
+const isConnectionFailure = (error: unknown) =>
+  error instanceof ApiError && (error.kind === 'network' || error.kind === 'server');
 
 type ChatCache = {
   projectId: string | null;
@@ -123,11 +138,86 @@ export function useWorkspaceController({ route, routeKey, go }: Navigation, api:
   const assignmentsRef = useRef(assignments);
   assignmentsRef.current = assignments;
 
+  // Engine popups: one keyed card per source, at most three, newest last (the stack renders newest first).
+  const [engineNotices, setEngineNotices] = useState<EngineNotice[]>([]);
+  const engineNoticesRef = useRef<EngineNotice[]>([]);
+  const engineNoticeTimers = useRef(new Map<string, ReturnType<typeof setTimeout>>());
+
+  const commitEngineNotices = useCallback((next: EngineNotice[]) => {
+    engineNoticesRef.current = next;
+    setEngineNotices(next);
+  }, []);
+
+  const dismissEngineNotice = useCallback((key: string) => {
+    const timer = engineNoticeTimers.current.get(key);
+    if (timer !== undefined) clearTimeout(timer);
+    engineNoticeTimers.current.delete(key);
+    if (!engineNoticesRef.current.some(item => item.key === key)) return;
+    commitEngineNotices(engineNoticesRef.current.filter(item => item.key !== key));
+  }, [commitEngineNotices]);
+
+  /** Inserts or replaces the card for `notice.key`; an unchanged card is a no-op, so polling cannot duplicate it. */
+  const pushEngineNotice = useCallback((notice: EngineNotice, autoDismissMs = 0) => {
+    const existing = engineNoticesRef.current.find(item => item.key === notice.key);
+    if (existing && sameEngineNotice(existing, notice)) return;
+    const timer = engineNoticeTimers.current.get(notice.key);
+    if (timer !== undefined) clearTimeout(timer);
+    engineNoticeTimers.current.delete(notice.key);
+    commitEngineNotices([...engineNoticesRef.current.filter(item => item.key !== notice.key), notice].slice(-MAX_ENGINE_NOTICES));
+    if (autoDismissMs > 0) {
+      engineNoticeTimers.current.set(notice.key, setTimeout(() => {
+        engineNoticeTimers.current.delete(notice.key);
+        if (!engineNoticesRef.current.some(item => item.key === notice.key)) return;
+        commitEngineNotices(engineNoticesRef.current.filter(item => item.key !== notice.key));
+      }, autoDismissMs));
+    }
+  }, [commitEngineNotices]);
+
+  useEffect(() => () => {
+    for (const timer of engineNoticeTimers.current.values()) clearTimeout(timer);
+    engineNoticeTimers.current.clear();
+  }, []);
+
+  /**
+   * Core connectivity is global. The latest observed read outcome decides it, so a successful request after an
+   * outage yields exactly one short recovery card; an unchanged state never re-notifies.
+   */
+  const connectionRef = useRef<'unknown' | 'ok' | 'failed'>('unknown');
+  const observeConnection = useCallback((ok: boolean) => {
+    const previous = connectionRef.current;
+    if (ok) {
+      if (previous === 'failed') {
+        connectionRef.current = 'ok';
+        pushEngineNotice(engineNotice('core', 'success', 'Связь с ROSC Core восстановлена',
+          'Ядро снова отвечает на запросы. Продолжайте работу.'), ENGINE_SUCCESS_DISMISS_MS);
+      } else if (previous === 'unknown') {
+        connectionRef.current = 'ok';
+      }
+      return;
+    }
+    if (previous === 'failed') return;
+    connectionRef.current = 'failed';
+    pushEngineNotice(engineNotice('core', 'error', 'Нет связи с ROSC Core',
+      'Ядро не отвечает на запросы. Проверьте, что backend запущен, и повторите.'));
+  }, [pushEngineNotice]);
+
+  /** Wraps an existing read/status request; `current` keeps a stale cross-Project result from notifying. */
+  const trackRead = useCallback(async <T>(run: () => Promise<T>, current: () => boolean = () => true): Promise<T> => {
+    try {
+      const result = await run();
+      if (current()) observeConnection(true);
+      return result;
+    } catch (error) {
+      if (current() && isConnectionFailure(error)) observeConnection(false);
+      throw error;
+    }
+  }, [observeConnection]);
+
   /** The list failure is owned by the Project list itself (not by whichever layer is visible) and stays until a load succeeds. */
   const loadProjects = useCallback(async () => {
     const seq = ++projectsSeq.current;
     try {
-      const list = await api.listProjects();
+      const list = await trackRead(() => api.listProjects(), () => seq === projectsSeq.current);
       if (seq !== projectsSeq.current) return;
       setProjects(list);
       setProjectsStatus('ready');
@@ -137,21 +227,21 @@ export function useWorkspaceController({ route, routeKey, go }: Navigation, api:
       setProjectsStatus('failed');
       setProjectsError(describeError(e));
     }
-  }, [api]);
+  }, [api, trackRead]);
 
   /** Registry read path. Core is the only source; nothing here implies a runtime check. */
   const loadAgents = useCallback(async () => {
     const seq = ++registrySeq.current;
     setRegistry(prev => ({ ...prev, status: 'loading', error: '' }));
     try {
-      const agents = await api.listAgents();
+      const agents = await trackRead(() => api.listAgents(), () => seq === registrySeq.current);
       if (seq !== registrySeq.current) return;
       setRegistry({ status: 'ready', agents, error: '', notice: '', busy: false });
     } catch (e) {
       if (seq !== registrySeq.current) return;
       setRegistry(prev => ({ ...prev, status: 'failed', error: describeError(e) }));
     }
-  }, [api]);
+  }, [api, trackRead]);
 
   /** One version-guarded Agent mutation at a time; a failure never produces a success notice. */
   const saveAgent = useCallback(async (agentId: string | null, values: AgentFormValues): Promise<string | null> => {
@@ -196,14 +286,14 @@ export function useWorkspaceController({ route, routeKey, go }: Navigation, api:
     const started = epoch.current;
     const current = () => seq === tasksSeq.current && projectIdOf(routeRef.current) === projectId;
     try {
-      const items = await api.listTasks(projectId);
+      const items = await trackRead(() => api.listTasks(projectId), current);
       if (current()) setTasks({ projectId, items, status: 'ready' });
     } catch (e) {
       if (!current()) return;
       setTasks(prev => ({ projectId, items: prev.projectId === projectId ? prev.items : [], status: 'failed' }));
       if (!quiet && epoch.current === started) setError(describeError(e));
     }
-  }, [api]);
+  }, [api, trackRead]);
 
   const projectId = projectIdOf(route);
 
@@ -215,7 +305,8 @@ export function useWorkspaceController({ route, routeKey, go }: Navigation, api:
   const loadConversation = useCallback(async (id: string) => {
     const seq = ++chatSeq.current;
     try {
-      const page = await api.getConversation(id);
+      const page = await trackRead(() => api.getConversation(id),
+        () => seq === chatSeq.current && projectIdOf(routeRef.current) === id);
       if (seq !== chatSeq.current || projectIdOf(routeRef.current) !== id) return;
       // Merge, never replace: a message confirmed by Core while this GET was in flight must not disappear.
       setChat(prev => {
@@ -232,7 +323,7 @@ export function useWorkspaceController({ route, routeKey, go }: Navigation, api:
       if (seq !== chatSeq.current || projectIdOf(routeRef.current) !== id) return;
       patchChat(id, { status: 'failed', error: describeError(e) });
     }
-  }, [api, patchChat]);
+  }, [api, patchChat, trackRead]);
 
   const reloadConversation = useCallback(() => {
     const id = projectIdOf(routeRef.current);
@@ -249,7 +340,7 @@ export function useWorkspaceController({ route, routeKey, go }: Navigation, api:
     const cursor = current.nextBefore;
     patchChat(id, { olderLoading: true });
     try {
-      const page = await api.getConversation(id, cursor);
+      const page = await trackRead(() => api.getConversation(id, cursor), () => projectIdOf(routeRef.current) === id);
       // Only the Project check matters: merging by id is safe against any reload or send that overlapped.
       setChat(prev => {
         if (prev.projectId !== id) return prev;
@@ -260,7 +351,7 @@ export function useWorkspaceController({ route, routeKey, go }: Navigation, api:
     } catch (e) {
       patchChat(id, { olderLoading: false, error: describeError(e) });
     }
-  }, [api, patchChat]);
+  }, [api, patchChat, trackRead]);
 
   const [architect, setArchitect] = useState<ArchitectCache>(NO_ARCHITECT);
   const architectSeq = useRef(0);
@@ -275,12 +366,13 @@ export function useWorkspaceController({ route, routeKey, go }: Navigation, api:
   const loadAccess = useCallback(async (id: string) => {
     const seq = ++accessSeq.current;
     try {
-      const info = await api.getContextAccess(id);
+      const info = await trackRead(() => api.getContextAccess(id),
+        () => seq === accessSeq.current && projectIdOf(routeRef.current) === id);
       if (seq === accessSeq.current) patchAccess(id, { status: 'ready', info, error: '' });
     } catch (e) {
       if (seq === accessSeq.current) patchAccess(id, { status: 'failed', error: describeError(e) });
     }
-  }, [api, patchAccess]);
+  }, [api, patchAccess, trackRead]);
 
   const patchArchitect = useCallback((id: string, patch: Partial<ArchitectCache>) => {
     setArchitect(prev => (prev.projectId === id ? { ...prev, ...patch } : prev));
@@ -290,13 +382,14 @@ export function useWorkspaceController({ route, routeKey, go }: Navigation, api:
   const loadArchitect = useCallback(async (id: string) => {
     const seq = ++architectSeq.current;
     try {
-      const info = await api.getArchitect(id);
+      const info = await trackRead(() => api.getArchitect(id),
+        () => seq === architectSeq.current && projectIdOf(routeRef.current) === id);
       if (seq === architectSeq.current) patchArchitect(id, { status: 'ready', info, error: '' });
       void loadAccess(id);
     } catch (e) {
       if (seq === architectSeq.current) patchArchitect(id, { status: 'failed', error: describeError(e) });
     }
-  }, [api, patchArchitect, loadAccess]);
+  }, [api, patchArchitect, loadAccess, trackRead]);
 
   const changeArchitect = useCallback(async (action: 'activate' | 'deactivate'): Promise<string | null> => {
     const id = projectIdOf(routeRef.current);
@@ -324,18 +417,20 @@ export function useWorkspaceController({ route, routeKey, go }: Navigation, api:
   /** Read-only Architect probe: gates an administrative change, never starts or stops a session. */
   const loadArchitectProbe = useCallback(async (id: string, seq: number) => {
     try {
-      const info = await api.getArchitect(id);
+      const info = await trackRead(() => api.getArchitect(id),
+        () => seq === assignmentsSeq.current && projectIdOf(routeRef.current) === id);
       if (seq === assignmentsSeq.current) patchAssignments(id, { architect: info, architectKnown: true });
     } catch {
       if (seq === assignmentsSeq.current) patchAssignments(id, { architect: null, architectKnown: false });
     }
-  }, [api, patchAssignments]);
+  }, [api, patchAssignments, trackRead]);
 
   const loadAssignments = useCallback(async (id: string) => {
     const seq = ++assignmentsSeq.current;
     patchAssignments(id, { status: 'loading', error: '', notice: '' });
     try {
-      const [agents, list] = await Promise.all([api.listAgents(), api.listAssignments(id)]);
+      const [agents, list] = await trackRead(() => Promise.all([api.listAgents(), api.listAssignments(id)]),
+        () => seq === assignmentsSeq.current);
       if (seq !== assignmentsSeq.current) return;
       patchAssignments(id, { status: 'ready', agents, assignments: list, error: '' });
     } catch (e) {
@@ -343,7 +438,7 @@ export function useWorkspaceController({ route, routeKey, go }: Navigation, api:
       patchAssignments(id, { status: 'failed', error: describeError(e) });
     }
     void loadArchitectProbe(id, seq);
-  }, [api, loadArchitectProbe, patchAssignments]);
+  }, [api, loadArchitectProbe, patchAssignments, trackRead]);
 
   /**
    * Applies a minimal assignment delta against fresh Core records, one mutation at a time. The prototype's
@@ -555,6 +650,73 @@ export function useWorkspaceController({ route, routeKey, go }: Navigation, api:
     return () => clearInterval(timer);
   }, [projectId, awaitingReply, loadConversation]);
 
+  /** Whether the current Project's Tools notice is on screen; kept across a close/reopen of the same Project. */
+  const toolsTrackRef = useRef<{ projectId: string; warned: boolean } | null>(null);
+
+  // Project-scoped Engine cards never follow the Owner into another Project. The tracking itself survives a
+  // close/reopen of the same Project, so a real recovery observed there can still replace the warning.
+  useEffect(() => {
+    dismissEngineNotice('mcp');
+    dismissEngineNotice('native-session');
+  }, [projectId, dismissEngineNotice]);
+
+  /**
+   * P030 Tools signal: a confirmed live native session (`session.state === 'ready'`) with a transport that is
+   * not `active` is a real Tools outage. Only a change to `active` after that warning was reported produces the
+   * one-time recovery card. No reconnect progress is simulated: Core does not expose an in-flight reconnect.
+   */
+  useEffect(() => {
+    if (!projectId) return;
+    if (access.projectId !== projectId || access.status !== 'ready' || !access.info) return;
+    if (architect.projectId !== projectId || architect.status !== 'ready' || !architect.info) return;
+    const track = toolsTrackRef.current?.projectId === projectId
+      ? toolsTrackRef.current
+      : { projectId, warned: false };
+    toolsTrackRef.current = track;
+    if (architect.info.session?.state !== 'ready') {
+      // No confirmed native session: unavailable Tools are expected, not an outage to report.
+      track.warned = false;
+      return;
+    }
+    const transport = access.info.tools.transport;
+    // `not_available` means the runtime does not support Tools at all: that is not a temporary MCP outage.
+    if (transport === 'not_available') {
+      if (track.warned) {
+        track.warned = false;
+        dismissEngineNotice('mcp');
+      }
+      return;
+    }
+    if (transport !== 'active') {
+      if (track.warned) return;
+      track.warned = true;
+      pushEngineNotice(engineNotice('mcp', 'warning', 'Инструменты временно недоступны',
+        'Architect на связи. Операции с документами могут быть недоступны до восстановления MCP.'));
+      return;
+    }
+    if (!track.warned) return;
+    track.warned = false;
+    pushEngineNotice(engineNotice('mcp', 'success', 'Инструменты снова доступны',
+      'Подключение MCP восстановлено. Сессия Architect не перезапускалась.'), ENGINE_SUCCESS_DISMISS_MS);
+  }, [projectId, access, architect, pushEngineNotice, dismissEngineNotice]);
+
+  /**
+   * P030 native-session signal: only a Core-confirmed Architect error that is not the P028 `tools_unavailable`
+   * report. Missing Tools alone must never be presented as a broken conversation.
+   */
+  useEffect(() => {
+    if (!projectId || architect.projectId !== projectId || architect.status !== 'ready' || !architect.info) return;
+    const info = architect.info;
+    const failed = info.state === 'error' && info.detail !== 'tools_unavailable'
+      && info.session !== null && info.session.state === 'error';
+    if (failed) {
+      pushEngineNotice(engineNotice('native-session', 'error', 'Сессия Architect не отвечает',
+        'Сообщения сохраняются в ROSC. Решение о перезапуске сессии принимает Owner.'));
+      return;
+    }
+    dismissEngineNotice('native-session');
+  }, [projectId, architect, pushEngineNotice, dismissEngineNotice]);
+
   const project = projects.find(p => p.id === projectId) ?? null;
   const taskList = tasks.projectId === projectId && projectId ? tasks : NO_TASKS;
   const task = route.kind === 'task' ? taskList.items.find(t => t.id === route.taskId) ?? null : null;
@@ -709,6 +871,7 @@ export function useWorkspaceController({ route, routeKey, go }: Navigation, api:
   return {
     layer, projects, projectsStatus, project, tasks: taskList.items, tasksStatus: taskList.status, task, busy, registrationOpen,
     feedbackFor, conversation, registry: registryState, projectTab,
+    engineNotices, dismissEngineNotice,
     registryControls: {
       state: registryState,
       onRetry: () => void loadAgents(),

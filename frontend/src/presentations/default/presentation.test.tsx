@@ -287,16 +287,27 @@ describe('Project assignment presentation', () => {
 
 describe('Shell', () => {
   it('states the Engine slice truthfully and renders the view as its only content', () => {
-    render(<Shell onOpenSettings={vi.fn()} settingsOpen={false}><main data-testid="view" /></Shell>);
+    render(<Shell onOpenSettings={vi.fn()} settingsOpen={false} engineNotices={[]} onDismissEngineNotice={vi.fn()}><main data-testid="view" /></Shell>);
     expect(screen.getByText(/Engine Slice 01 · агенты не запущены/)).toBeTruthy();
     expect(screen.getByTestId('view')).toBeTruthy();
   });
 
   it('offers the Settings entry without claiming a connected agent', () => {
     const onOpenSettings = vi.fn();
-    render(<Shell onOpenSettings={onOpenSettings} settingsOpen={false}><main /></Shell>);
+    render(<Shell onOpenSettings={onOpenSettings} settingsOpen={false} engineNotices={[]} onDismissEngineNotice={vi.fn()}><main /></Shell>);
     fireEvent.click(screen.getByRole('button', { name: 'Настройки' }));
     expect(onOpenSettings).toHaveBeenCalledTimes(1);
     expect(screen.queryByText(/Подключен/)).toBeNull();
+  });
+
+  it('renders Engine system notices above the views and reports their dismiss key', () => {
+    const onDismissEngineNotice = vi.fn();
+    render(<Shell onOpenSettings={vi.fn()} settingsOpen={false} onDismissEngineNotice={onDismissEngineNotice}
+      engineNotices={[{ key: 'core', kind: 'error', kicker: 'ROSC · СИСТЕМА', title: 'Нет связи с ROSC Core', description: 'Ядро не отвечает.' }]}>
+      <main data-testid="view" />
+    </Shell>);
+    expect(screen.getByText('Нет связи с ROSC Core')).toBeTruthy();
+    fireEvent.click(screen.getByLabelText('Закрыть уведомление'));
+    expect(onDismissEngineNotice).toHaveBeenCalledWith('core');
   });
 });

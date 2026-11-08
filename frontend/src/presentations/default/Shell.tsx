@@ -1,7 +1,8 @@
 import type { ShellProps } from '../../app/presentation/contracts';
+import { EngineNoticeStack } from './ui/EngineNoticeStack';
 
-/** Application frame: brand, the approved Settings entry and the truthful Engine state chip. */
-export function Shell({ children, onOpenSettings, settingsOpen }: ShellProps) {
+/** Application frame: brand, the approved Settings entry, the truthful Engine state chip and Engine popups. */
+export function Shell({ children, onOpenSettings, settingsOpen, engineNotices, onDismissEngineNotice }: ShellProps) {
   return <div className="rosc-app">
     <header className="rosc-topbar">
       <div className="rosc-brand">
@@ -15,6 +16,7 @@ export function Shell({ children, onOpenSettings, settingsOpen }: ShellProps) {
           aria-current={settingsOpen ? 'page' : undefined}>Настройки</button>
       </div>
     </header>
+    <EngineNoticeStack notices={engineNotices} onDismiss={onDismissEngineNotice} />
     {children}
   </div>;
 }
