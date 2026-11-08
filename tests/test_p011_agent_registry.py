@@ -609,7 +609,7 @@ class MigrationTests(RegistryCase):
 
     def test_single_head_and_fresh_schema(self) -> None:
         from alembic.script import ScriptDirectory
-        self.assertEqual(ScriptDirectory.from_config(self.alembic).get_heads(), ["0008_project_context_access"])
+        self.assertEqual(ScriptDirectory.from_config(self.alembic).get_heads(), ["0009_architect_onboarding_state"])
         self.assertTrue({"agent_definitions", "agent_capabilities", "role_assignments", "assignment_capabilities"}
                         <= self.table_names())
 

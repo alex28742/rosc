@@ -94,7 +94,12 @@ export type ArchitectStatus = {
   can_deactivate: boolean;
   agent: { agent_id: string; display_name: string; provider_id: string; model_id: string } | null;
   session: { session_id: string; state: string; verified_at: string | null } | null;
+  /** P029: ROSC Tools are reported separately; a live session stays `ready` whether or not they are connected. */
+  tools: { state: 'active' | 'inactive' | 'not_running' | 'not_available'; detail: string | null };
+  /** P029: one-time model onboarding of a NEW native session. `legacy_unverified` = created before P029. */
+  onboarding: { state: OnboardingState | null; detail: string | null };
 };
+export type OnboardingState = 'legacy_unverified' | 'initializing' | 'ready' | 'blocked' | 'unknown';
 
 /** Effective Architect access to context (P019). The matrix is Core's statement of what the ROSC Tools allow. */
 export type ContextAccess = {

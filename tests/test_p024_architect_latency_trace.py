@@ -387,9 +387,9 @@ class TracedEndToEnd(p22.EndToEndMultiStepTests):
         self.assertEqual((tool["tool"], tool["outcome"], tool["correlation"]), ("briefing", "ok", "verified"))
         ctx = next(e for e in events if e["event"] == "context_built")
         self.assertEqual(ctx["total_chars"], ctx["identity_chars"] + ctx["rules_chars"] + ctx["tool_guidance_chars"]
-                         + ctx["recap_chars"] + ctx["framing_chars"])
+                         + ctx["recap_chars"] + ctx["framing_chars"] + ctx["owner_chars"])
         self.assertEqual(ctx["rules_chars"], 0)  # P027: default composition has no RulesSnapshot block
-        self.assertEqual(ctx["recap_messages"], 1)
+        self.assertEqual((ctx["recap_messages"], ctx["recap_chars"], ctx["owner_chars"]), (0, 0, ctx["total_chars"]))
         for e in events:
             for key in ("duration_ms", "t_ms"):
                 if key in e:
@@ -454,7 +454,7 @@ class TracedEndToEnd(p22.EndToEndMultiStepTests):
         self.assertIn("lookup", [e["event"] for e in recon])
         self.assertIn("commit", [e["event"] for e in recon])
         self.assertEqual(len(self.events("tool_call")), tools_before)  # reconcile executed no Tool
-        self.assertEqual(len([e for e in self.events("prompt_admitted")]), 1)  # and issued no second prompt
+        self.assertEqual(len([e for e in self.events("prompt_admitted") if e.get("turn_id") == turn]), 1)  # no second prompt for this turn
         self.assertEqual(self.prompts(), 1)
 
     def test_p024_no_private_content_reaches_the_trace(self) -> None:

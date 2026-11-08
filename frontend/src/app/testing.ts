@@ -36,7 +36,7 @@ export const conversationPage = (over: Partial<ConversationPage> = {}): Conversa
 export const architectStatus = (over: Partial<ArchitectStatus> = {}): ArchitectStatus => ({
   project_id: 'P0001', state: 'stopped', detail: null, can_activate: true, can_deactivate: false,
   agent: { agent_id: 'agent-1', display_name: 'Architect One', provider_id: 'prov', model_id: 'model-a' },
-  session: null, ...over,
+  session: null, tools: { state: 'not_running', detail: null }, onboarding: { state: null, detail: null }, ...over,
 });
 
 export const contextAccess = (over: Partial<ContextAccess> = {}): ContextAccess => ({

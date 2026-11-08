@@ -12,10 +12,11 @@ type TaskCache = { projectId: string | null; items: Task[]; status: LoadStatus }
 const NO_TASKS: TaskCache = { projectId: null, items: [], status: 'loading' };
 const NO_FEEDBACK: Feedback = { error: '', notice: '' };
 
-/** Approved v0.7 Engine popup copy. `progress` and onboarding stay UI-only until P029 supplies their signals. */
+/** Approved v0.7 Engine popup copy. `progress` is shown only while Core reports a real `onboarding: initializing`. */
 const ENGINE_KICKER = 'ROSC · СИСТЕМА';
 const ENGINE_SUCCESS_DISMISS_MS = 6500;
 const MAX_ENGINE_NOTICES = 3;
+const ONBOARDING_POLL_MS = 3000;
 
 const engineNotice = (key: string, kind: EngineNotice['kind'], title: string, description: string): EngineNotice =>
   ({ key, kind, kicker: ENGINE_KICKER, title, description });
@@ -651,13 +652,24 @@ export function useWorkspaceController({ route, routeKey, go }: Navigation, api:
   }, [projectId, awaitingReply, loadConversation]);
 
   /** Whether the current Project's Tools notice is on screen; kept across a close/reopen of the same Project. */
-  const toolsTrackRef = useRef<{ projectId: string; warned: boolean } | null>(null);
+  const toolsTrackRef = useRef<{ projectId: string; warned: boolean; dismissed: boolean } | null>(null);
+  /** The last onboarding outcome the Owner closed by hand (so it is not shown again for the same outcome). */
+  const onboardingTrackRef = useRef<{ projectId: string; sawInitializing: boolean; dismissed: string | null } | null>(null);
+  const onDismissEngineNotice = useCallback((key: string) => {
+    if (key === 'mcp' && toolsTrackRef.current) toolsTrackRef.current.dismissed = true;
+    if (key === 'onboarding' && onboardingTrackRef.current) {
+      const info = architectRef.current.info?.onboarding;
+      onboardingTrackRef.current.dismissed = info ? `${info.state}:${info.detail}` : null;
+    }
+    dismissEngineNotice(key);
+  }, [dismissEngineNotice]);
 
   // Project-scoped Engine cards never follow the Owner into another Project. The tracking itself survives a
   // close/reopen of the same Project, so a real recovery observed there can still replace the warning.
   useEffect(() => {
     dismissEngineNotice('mcp');
     dismissEngineNotice('native-session');
+    dismissEngineNotice('onboarding');
   }, [projectId, dismissEngineNotice]);
 
   /**
@@ -671,11 +683,12 @@ export function useWorkspaceController({ route, routeKey, go }: Navigation, api:
     if (architect.projectId !== projectId || architect.status !== 'ready' || !architect.info) return;
     const track = toolsTrackRef.current?.projectId === projectId
       ? toolsTrackRef.current
-      : { projectId, warned: false };
+      : { projectId, warned: false, dismissed: false };
     toolsTrackRef.current = track;
     if (architect.info.session?.state !== 'ready') {
       // No confirmed native session: unavailable Tools are expected, not an outage to report.
       track.warned = false;
+      track.dismissed = false;
       return;
     }
     const transport = access.info.tools.transport;
@@ -683,32 +696,37 @@ export function useWorkspaceController({ route, routeKey, go }: Navigation, api:
     if (transport === 'not_available') {
       if (track.warned) {
         track.warned = false;
+        track.dismissed = false;
         dismissEngineNotice('mcp');
       }
       return;
     }
     if (transport !== 'active') {
-      if (track.warned) return;
+      if (track.warned) {
+        // Leaving the Project removed the card but the outage continues: show it again unless the Owner closed it.
+        if (track.dismissed || engineNoticesRef.current.some(item => item.key === 'mcp')) return;
+      }
       track.warned = true;
+      track.dismissed = false;
       pushEngineNotice(engineNotice('mcp', 'warning', 'Инструменты временно недоступны',
         'Architect на связи. Операции с документами могут быть недоступны до восстановления MCP.'));
       return;
     }
     if (!track.warned) return;
     track.warned = false;
+    track.dismissed = false;
     pushEngineNotice(engineNotice('mcp', 'success', 'Инструменты снова доступны',
       'Подключение MCP восстановлено. Сессия Architect не перезапускалась.'), ENGINE_SUCCESS_DISMISS_MS);
   }, [projectId, access, architect, pushEngineNotice, dismissEngineNotice]);
 
   /**
-   * P030 native-session signal: only a Core-confirmed Architect error that is not the P028 `tools_unavailable`
-   * report. Missing Tools alone must never be presented as a broken conversation.
+   * P030 native-session signal: only a Core-confirmed Architect session error. Core reports missing Tools
+   * separately (`tools`), so they can never be presented as a broken conversation.
    */
   useEffect(() => {
     if (!projectId || architect.projectId !== projectId || architect.status !== 'ready' || !architect.info) return;
     const info = architect.info;
-    const failed = info.state === 'error' && info.detail !== 'tools_unavailable'
-      && info.session !== null && info.session.state === 'error';
+    const failed = info.state === 'error' && info.session !== null && info.session.state === 'error';
     if (failed) {
       pushEngineNotice(engineNotice('native-session', 'error', 'Сессия Architect не отвечает',
         'Сообщения сохраняются в ROSC. Решение о перезапуске сессии принимает Owner.'));
@@ -716,6 +734,51 @@ export function useWorkspaceController({ route, routeKey, go }: Navigation, api:
     }
     dismissEngineNotice('native-session');
   }, [projectId, architect, pushEngineNotice, dismissEngineNotice]);
+
+  /**
+   * P029 onboarding signal. Only what Core reports: `initializing` is a real progress card, `ready` is announced only
+   * after this view actually watched it initialize (opening an already onboarded Project shows nothing), and
+   * `blocked`/`unknown` are never presented as success. `legacy_unverified` and missing state show nothing.
+   */
+  useEffect(() => {
+    if (!projectId || architect.projectId !== projectId || architect.status !== 'ready' || !architect.info) return;
+    const track = onboardingTrackRef.current?.projectId === projectId
+      ? onboardingTrackRef.current
+      : { projectId, sawInitializing: false, dismissed: null };
+    onboardingTrackRef.current = track;
+    const { state, detail } = architect.info.onboarding;
+    if (state === 'initializing') {
+      track.sawInitializing = true;
+      if (track.dismissed === `initializing:${detail}`) return; // closed by hand: do not bring it back on every poll
+      pushEngineNotice(engineNotice('onboarding', 'progress', 'Architect знакомится с проектом',
+        'Выполняется первое знакомство через ROSC Tools. Это происходит один раз при активации новой сессии.'));
+      return;
+    }
+    if (state === 'ready') {
+      if (track.sawInitializing) {
+        track.sawInitializing = false;
+        pushEngineNotice(engineNotice('onboarding', 'success', 'Architect готов к работе',
+          'Знакомство с проектом завершено: роль и документы прочитаны.'), ENGINE_SUCCESS_DISMISS_MS);
+      } else dismissEngineNotice('onboarding');
+      return;
+    }
+    track.sawInitializing = false;
+    if ((state === 'blocked' || state === 'unknown') && track.dismissed !== `${state}:${detail}`) {
+      pushEngineNotice(engineNotice('onboarding', state === 'blocked' ? 'error' : 'warning',
+        state === 'blocked' ? 'Знакомство Architect не подтверждено' : 'Итог знакомства Architect неизвестен',
+        'Беседа с Architect доступна. Сообщения сохраняются в ROSC; решение о повторной активации принимает Owner.'));
+      return;
+    }
+    dismissEngineNotice('onboarding');
+  }, [projectId, architect, pushEngineNotice, dismissEngineNotice]);
+
+  // While Core reports a running onboarding, re-read the Architect status (read-only, starts nothing).
+  const onboardingRunning = architect.projectId === projectId && architect.info?.onboarding?.state === 'initializing';
+  useEffect(() => {
+    if (!projectId || !onboardingRunning) return;
+    const timer = setInterval(() => { void loadArchitect(projectId); }, ONBOARDING_POLL_MS);
+    return () => clearInterval(timer);
+  }, [projectId, onboardingRunning, loadArchitect]);
 
   const project = projects.find(p => p.id === projectId) ?? null;
   const taskList = tasks.projectId === projectId && projectId ? tasks : NO_TASKS;
@@ -871,7 +934,7 @@ export function useWorkspaceController({ route, routeKey, go }: Navigation, api:
   return {
     layer, projects, projectsStatus, project, tasks: taskList.items, tasksStatus: taskList.status, task, busy, registrationOpen,
     feedbackFor, conversation, registry: registryState, projectTab,
-    engineNotices, dismissEngineNotice,
+    engineNotices, dismissEngineNotice: onDismissEngineNotice,
     registryControls: {
       state: registryState,
       onRetry: () => void loadAgents(),

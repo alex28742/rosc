@@ -345,23 +345,15 @@ class ServiceRulesTests(p19.ContextCase):
         self.assertEqual(rules, {"state": "pinned", **expected.identity()})
         self.assertEqual(rules["version"], "0.4.0")
 
-    def test_the_model_input_carries_verifiable_rules_identity_and_bounded_text(self) -> None:
+    def test_the_model_input_is_only_the_owner_message_and_status_keeps_the_rules_identity(self) -> None:
         self.activate()
         self.post("rules-0001-aa")
-        prompt, expected = self.prompt(), self.real_snapshot()
-        self.assertIn(f"=== ROSC GLOBAL ARCHITECT RULES ruleset=rosc.architect.global version=0.4.0 digest={expected.digest} ===",
-                      prompt)
-        self.assertIn(expected.bootstrap, prompt)  # role + R-14 statement, byte-for-byte from the pinned snapshot
-        self.assertIn("Never assert that Blueprint rules are active unless", prompt)
-        for name in ("onboarding", "context-maintenance", "pipeline-management"):
-            self.assertIn(f"agents/architect/rules/{name}.md (sha256 ", prompt)  # indexed ...
-        self.assertNotIn("Project Onboarding Protocol", prompt)  # ... not pasted
-        for name in REFERENCE:
-            self.assertNotIn(f"rules/{name}.md", prompt)
-        self.assertNotIn("Handoff checkpoint", prompt)
+        # P029: warm turns carry no rules block; the pinned identity stays verifiable through the status API
+        self.assertEqual(self.prompt(), "Hello")
         state, _error, categories = self.delivery()
-        self.assertEqual((state, categories), ("delivered", "project_identity,global_rules@0.4.0,tool_rules,recent_messages:1"))
-        self.assertIn("rosc_briefing", prompt)  # the P019 route/tool guidance is intact
+        self.assertEqual((state, categories), ("delivered", "owner_message"))
+        rules = self.client.get("/api/projects/P0001/architect").json()["rules"]
+        self.assertEqual(rules, {"state": "pinned", **self.real_snapshot().identity()})
 
     def test_a_synthetic_architect_can_read_an_active_and_a_reference_rule_on_demand(self) -> None:
         session_id = self.activate()
@@ -380,8 +372,8 @@ class ServiceRulesTests(p19.ContextCase):
         original = role.read_text()
         role.write_text(original.replace("Architect is the assigned Project's", "SYNTH-NEW-ROLE-TEXT is the assigned Project's"))
         self.post("rules-0002-aa")
-        self.assertIn(first.digest, self.prompt())
-        self.assertNotIn("SYNTH-NEW-ROLE-TEXT", self.prompt())
+        self.assertEqual(self.prompt(), "Hello")
+        self.assertEqual(self.client.get("/api/projects/P0001/architect").json()["rules"]["digest"], first.digest)
         # a reactivation does not adopt unapproved bytes: the manifest digest no longer matches
         self.client.post("/api/projects/P0001/architect/deactivate")
         refused = self.client.post("/api/projects/P0001/architect/activate").json()
@@ -394,13 +386,11 @@ class ServiceRulesTests(p19.ContextCase):
         self.assertEqual(rules["state"], "pinned")
         self.assertNotEqual(rules["digest"], first.digest)
         self.post("rules-0003-aa")
-        self.assertIn("SYNTH-NEW-ROLE-TEXT", self.prompt())
-        self.assertIn(rules["digest"], self.prompt())
+        self.assertEqual(self.prompt(), "Hello")
 
-    def test_backend_restart_drops_the_pin_and_delivery_fails_closed(self) -> None:
+    def test_backend_restart_drops_the_pin_but_delivery_does_not_depend_on_it(self) -> None:
         self.activate()
         self.post("rules-0004-aa")
-        before = self.prompt()
         (self.bin / "last_prompt.txt").unlink()
         self.restart()
         rules = self.client.get("/api/projects/P0001/architect").json()["rules"]
@@ -409,19 +399,17 @@ class ServiceRulesTests(p19.ContextCase):
         sent = self.client.post("/api/projects/P0001/conversation/messages", json={"client_key": "rules-0005-aa", "body": "again"})
         self.assertEqual(sent.status_code, 201)
         self.architect.drain()
-        state, error, _categories = self.delivery()
-        if state != "not_sent":
-            self.assertEqual((state, error in ("rules_snapshot_unavailable", "session_not_ready")), ("failed", True))
-        self.assertFalse((self.bin / "last_prompt.txt").exists(), "nothing may reach the model without a pinned ruleset")
-        self.assertTrue(before)
+        self.assertEqual(self.delivery()[:2], ("delivered", None))  # P029: no pinned-rules gate on message delivery
+        self.assertEqual(self.prompt(), "again")
 
-    def test_lost_snapshot_in_a_running_service_never_falls_back(self) -> None:
-        self.activate()
+    def test_lost_snapshot_in_a_running_service_only_closes_governed_reads(self) -> None:
+        session_id = self.activate()
         self.architect._pinned_rules.clear()  # e.g. any loss of the in-memory pin
         self.post("rules-0006-aa")
-        self.assertEqual(self.delivery()[:2], ("failed", "rules_snapshot_unavailable"))
-        self.assertFalse((self.bin / "last_prompt.txt").exists())
+        self.assertEqual(self.delivery()[:2], ("delivered", None))
         self.assertEqual(self.client.get("/api/projects/P0001/architect").json()["rules"]["state"], "not_pinned")
+        refused = self.direct(session_id, "global_read", path="agents/architect/rules/role.md")
+        self.assertEqual(refused["error"]["code"], "rules_snapshot_unavailable")  # governed definitions stay fail-closed
 
     def test_invalid_ruleset_refuses_activation_without_spawning_a_runtime(self) -> None:
         for label, break_it in (("missing", lambda: (self.lib / MANIFEST).unlink()),
@@ -641,7 +629,7 @@ class NoToolsPromptTests(unittest.TestCase):
         block = snap.prompt_block(False)
         self.assertNotIn("rosc_", block)
         self.assertIn(snap.digest, block)
-        self.assertTrue(hasattr(ArchitectService, "_build_context"))
+        self.assertFalse(hasattr(ArchitectService, "_build_context"))  # P029: warm turns carry no context block
 
 
 if __name__ == "__main__":

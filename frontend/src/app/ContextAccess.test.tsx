@@ -34,7 +34,7 @@ describe('Architect context access summary (P019)', () => {
     const api = stubApi({ listProjects: vi.fn(async () => [P1]),
       getContextAccess: vi.fn(async () => contextAccess({ tools: { transport: 'inactive', names: [] } })) });
     render(<App api={api} />);
-    expect(await screen.findByText(/активируйте Architect заново/)).toBeTruthy();
+    expect(await screen.findByText(/восстанавливает подключение в той же сессии/)).toBeTruthy();
     cleanup();
     const failing = stubApi({ listProjects: vi.fn(async () => [P1]), getContextAccess: vi.fn(async () => { throw new Error('boom'); }) });
     render(<App api={failing} />);

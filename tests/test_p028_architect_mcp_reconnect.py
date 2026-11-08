@@ -148,7 +148,9 @@ class FailedReconnectTests(ReconnectCase):
         self.architect.recover()
         self.assert_safe_refusal(sid, before, "tools_unavailable")
         shown = self.status()
-        self.assertEqual((shown["state"], shown["detail"]), ("error", "tools_unavailable"))
+        # P029: the live session stays ready; the Tools outage is reported separately
+        self.assertEqual((shown["state"], shown["detail"]), ("ready", None))
+        self.assertEqual(shown["tools"], {"state": "inactive", "detail": "tools_unavailable"})
         self.assertEqual(self.identity()[0][1], "ready")  # the persisted session is untouched
         self.assertEqual(counts["reconnect"], 1)  # the status poll inside the cooldown does not retry
         self.status()
@@ -156,7 +158,7 @@ class FailedReconnectTests(ReconnectCase):
         # the failure was transient: a later poll (after the cooldown) restores the tools of the same session
         (self.bin / "mode").write_text("ok")
         self.architect._tools_retry.clear()
-        self.assertEqual(self.status()["state"], "ready")
+        self.assertEqual(self.status()["tools"], {"state": "active", "detail": None})
         self.assertTrue(self.host.active(sid))
         self.assertEqual(counts["reconnect"], 2)
         self.assertEqual(self.identity()[0][3:], before[0][3:])
@@ -209,7 +211,7 @@ class FailedReconnectTests(ReconnectCase):
         self.architect.recover()  # must not raise
         self.assertFalse(self.host.active(sid))
         self.assertEqual(self.tokens(), {})
-        self.assertEqual(self.status()["detail"], "tools_unavailable")
+        self.assertEqual(self.status()["tools"]["detail"], "tools_unavailable")
 
 
 if __name__ == "__main__":

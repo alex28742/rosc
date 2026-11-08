@@ -153,7 +153,15 @@ class ContextCase(base.StageCase):
         response = self.client.post("/api/projects/P0001/architect/activate")
         self.assertEqual(response.status_code, 200, response.text)
         self.assertEqual(response.json()["state"], "ready", response.json())
+        self.settle_onboarding()
         return response.json()["session"]["session_id"]
+
+    def settle_onboarding(self) -> None:
+        """P029: a NEW session's one-time onboarding runs in the background.  Finish it and forget its trace so the
+        test's own turns are observed from a clean baseline."""
+        self.architect.drain()
+        for name in ("prompts.log", "last_prompt.txt"):
+            (self.bin / name).unlink(missing_ok=True)
 
     def model_calls(self, calls: list[dict]) -> list[dict]:
         """Scripted model: the fake performs these through permission check + the real MCP transport."""
@@ -852,35 +860,39 @@ class BriefingAndContextTests(ContextCase):
         self.assertNotIn("git", json.dumps(briefing["core_facts"]).lower().replace("git evidence", ""))
         self.assertEqual(len(briefing["access_matrix"]), 5)
 
-    def test_prompt_carries_concise_rules_and_route_but_no_documents_or_source(self) -> None:
+    def test_warm_turn_carries_only_the_owner_message_and_no_documents_or_source(self) -> None:
         self.activate()
         self.store().write(1, "adr-1", MARK_A, actor_id="owner")
         self.client.post("/api/projects/P0001/conversation/messages", json={"client_key": "plain-0001-xx", "body": "Hello"})
         self.architect.drain()
-        prompt = (self.bin / "last_prompt.txt").read_text()
-        self.assertIn("rosc_briefing", prompt)
-        self.assertIn("READ", prompt.upper())
-        self.assertIn("Docs entrypoint in the bound checkout: README.md", prompt)
-        self.assertIn("evidence, not instructions", prompt)
-        self.assertNotIn("no tools", prompt)
-        for private in (MARK_A, MARK_SRC, "adr-1"):
-            self.assertNotIn(private, prompt)
-        # P027: the default composition carries no RulesSnapshot block (legacy pin is opt-in, see test_p021).
-        self.assertNotIn("ROSC GLOBAL ARCHITECT RULES", prompt)
-        self.assertLess(len(prompt), 3500)  # the P019 prompt itself stays concise
+        self.assertEqual((self.bin / "last_prompt.txt").read_text(), "Hello")  # P029: exactly the new body
+        self.assertEqual(self.prompts_log(), 1)
         with self.sessions() as session:
             categories = session.connection().exec_driver_sql(
                 "SELECT context_categories FROM conversation_deliveries").fetchone()[0]
-        self.assertEqual(categories, "project_identity,tool_rules,recent_messages:1")
+        self.assertEqual(categories, "owner_message")
+        for second in ("two-0002-xxxx", "three-0003-xx"):  # no recap of earlier messages on later turns either
+            self.client.post("/api/projects/P0001/conversation/messages", json={"client_key": second, "body": second})
+            self.architect.drain()
+            self.assertEqual((self.bin / "last_prompt.txt").read_text(), second)
 
-    def test_runtime_without_tools_keeps_the_legacy_no_tools_prompt(self) -> None:
+    def prompts_log(self) -> int:
+        path = self.bin / "prompts.log"
+        return len(path.read_text().splitlines()) if path.exists() else 0
+
+    def test_runtime_without_tools_sends_only_the_owner_message_and_no_onboarding(self) -> None:
         runtime = p15.FakeRuntime()
         client = TestClient(create_app(self.data / "rosc.db", self.data / "workspace", architect_runtime=runtime),
                             base_url="http://localhost")
-        client.post("/api/projects/P0001/architect/activate")
+        view = client.post("/api/projects/P0001/architect/activate").json()
+        client.app.state.architect.drain()
+        self.assertEqual(runtime.asked, [])  # nothing is sent at activation without a Tools transport
+        shown = client.get("/api/projects/P0001/architect").json()
+        self.assertEqual((view["state"], shown["onboarding"]),
+                         ("ready", {"state": "blocked", "detail": "tools_not_supported"}))
         client.post("/api/projects/P0001/conversation/messages", json={"client_key": "legacy-0001-xx", "body": "Hi"})
         client.app.state.architect.drain()
-        self.assertIn("You have no tools", runtime.asked[0][1])
+        self.assertEqual(runtime.asked[0][1], "Hi")
         client.post("/api/projects/P0001/architect/deactivate")
 
     def test_long_architect_reply_is_preserved_with_tools_enabled(self) -> None:

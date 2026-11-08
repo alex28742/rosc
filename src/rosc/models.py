@@ -518,6 +518,8 @@ class ConversationMessage(Base):
 # immutable message rows.
 SESSION_STARTING = "starting"
 SESSION_READY = "ready"
+ONBOARDING_LEGACY, ONBOARDING_INITIALIZING, ONBOARDING_READY = "legacy_unverified", "initializing", "ready"
+ONBOARDING_BLOCKED, ONBOARDING_UNKNOWN = "blocked", "unknown"
 SESSION_ERROR = "error"
 SESSION_STOPPED = "stopped"
 DELIVERY_NOT_SENT = "not_sent"
@@ -555,6 +557,12 @@ class ArchitectSession(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
     verified_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    # P029: honest state of the one-time model onboarding of a NEW native session.  ``legacy_unverified`` is every
+    # session that existed before P029 (and is never onboarded afterwards); the other values are
+    # initializing | ready | blocked | unknown.  Not a liveness or Tools signal.
+    onboarding_state: Mapped[str] = mapped_column(String(20), default="legacy_unverified",
+                                                  server_default="legacy_unverified")
+    onboarding_detail: Mapped[str | None] = mapped_column(String(48), nullable=True)
 
 
 class ConversationDelivery(Base):

@@ -3,7 +3,7 @@ import type { ConversationControls } from '../../../app/presentation/contracts';
 const MODE_LABEL = { read_only: 'только чтение', read_write: 'чтение и запись', denied: 'запрещено' } as const;
 const TRANSPORT_LABEL = {
   active: 'ROSC Tools подключены к активному Architect',
-  inactive: 'ROSC Tools не подключены к этой сессии (например, после перезапуска ROSC) — активируйте Architect заново',
+  inactive: 'ROSC Tools сейчас не подключены к этой сессии (например, после перезапуска ROSC). Беседа с Architect продолжается; ROSC восстанавливает подключение в той же сессии, без её перезапуска',
   not_running: 'ROSC Tools подключатся при явной активации Architect',
   not_available: 'Runtime не поддерживает ROSC Tools',
 } as const;
@@ -32,7 +32,8 @@ export function ContextAccessSummary({ contextAccess }: Props) {
     <p className="rosc-conversation__hint">
       {model ? `Провайдер/модель: ${model}. ` : 'Architect не назначен. '}
       Во время активной беседы результаты разрешённых Tools (фрагменты документов и исходников) могут отправляться
-      выбранному вами провайдеру/модели. При открытии проекта и при активации ничего не отправляется.</p>
+      выбранному вами провайдеру/модели. При открытии проекта и при перезапуске ROSC ничего не отправляется. Явная активация
+      НОВОЙ сессии Architect один раз отправляет модели короткую инструкцию знакомства с проектом.</p>
     <p className="rosc-conversation__hint">Приватные документы не публикуются и не синхронизируются автоматически; Architect не выполняет
       Git-операции и не меняет исходники — это делают Worker.</p>
     {error && <p className="rosc-conversation__error" role="alert">{error}</p>}

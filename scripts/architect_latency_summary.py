@@ -66,7 +66,7 @@ def turns(events: list[dict]) -> dict[str, dict]:
         ctx = pick("context_built")
         if ctx:
             for k in ("total_chars", "identity_chars", "rules_chars", "tool_guidance_chars", "recap_chars",
-                      "recap_messages", "framing_chars"):
+                      "recap_messages", "framing_chars", "owner_chars"):
                 if k in ctx:
                     row[k] = ctx[k]
         lk = pick("lookup")

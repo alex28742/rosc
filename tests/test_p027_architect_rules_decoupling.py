@@ -54,7 +54,7 @@ class DefaultCompositionTests(p19.ContextCase):
         self.assertNotIn("global_rules", categories)
         prompt = (self.bin / "last_prompt.txt").read_text()
         self.assertNotIn("ROSC GLOBAL ARCHITECT RULES", prompt)
-        self.assertIn("rosc_briefing", prompt)  # the rest of the context is unchanged
+        self.assertEqual(prompt, "Hello")  # P029: the turn is exactly the Owner message
         self.restart()
         sent = self.client.post("/api/projects/P0001/conversation/messages",
                                 json={"client_key": "p027-0002-aa", "body": "after restart"})

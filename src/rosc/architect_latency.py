@@ -108,7 +108,7 @@ FIELDS: dict[str, str] = {
     "project_id": "count", "attempts": "count", "messages": "count", "pages": "count", "requests": "count",
     "fallbacks": "count", "bytes": "count", "chars": "count", "result_chars": "count",
     "identity_chars": "count", "rules_chars": "count", "tool_guidance_chars": "count", "recap_chars": "count",
-    "recap_messages": "count", "framing_chars": "count", "total_chars": "count", "tools": "count",
+    "recap_messages": "count", "framing_chars": "count", "owner_chars": "count", "total_chars": "count", "tools": "count",
     "outcome": "outcome", "state": "state", "phase": "phase", "correlation": "correlation", "tool": "tool",
     "turn_id": "turn_id", "rosc_session_id": "uuid",
 }

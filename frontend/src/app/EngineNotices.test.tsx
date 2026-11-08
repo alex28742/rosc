@@ -100,12 +100,13 @@ describe('Engine popups: Architect tools and session', () => {
     expect(api.sendConversationMessage).not.toHaveBeenCalled();
   });
 
-  it('reports the P028 tools_unavailable state as a Tools warning, never as a broken native session', async () => {
+  it('reports inactive Tools of a live ready session as a Tools warning, never as a broken native session', async () => {
     const api = stubApi({
       listProjects: vi.fn(async () => [P1]),
       getArchitect: vi.fn(async () => architectStatus({
-        state: 'error', detail: 'tools_unavailable', can_activate: false, can_deactivate: true,
+        state: 'ready', can_activate: false, can_deactivate: true,
         session: { session_id: 'session-1', state: 'ready', verified_at: null },
+        tools: { state: 'inactive', detail: 'tools_unavailable' },
       })),
       getContextAccess: vi.fn(async () => contextAccess({ tools: { transport: 'inactive', names: [] } })),
     });
@@ -156,5 +157,98 @@ describe('Engine popups: Architect tools and session', () => {
 
     await screen.findByLabelText('Project Work Area');
     expect(container.querySelector('.rosc-engine-notice-stack')).toBeNull();
+  });
+});
+
+describe('Engine popups: Tools warning survives leaving and reopening the Project', () => {
+  const outage = () => stubApi({
+    listProjects: vi.fn(async () => [P1]),
+    listTasks: vi.fn(async () => []),
+    getArchitect: vi.fn(async () => readyArchitect),
+    getContextAccess: vi.fn(async () => contextAccess({ tools: { transport: 'inactive', names: ['rosc_briefing'] } })),
+  });
+
+  it('shows the still-current warning again after Project -> Dashboard -> Project', async () => {
+    at('/projects/P0001');
+    render(<App api={outage()} />);
+    expect(await screen.findByText('Инструменты временно недоступны')).toBeTruthy();
+
+    fireEvent.click(screen.getByLabelText('Закрыть проект'));
+    await waitFor(() => expect(screen.queryByText('Инструменты временно недоступны')).toBeNull());
+    fireEvent.click(await screen.findByText('Project P0001'));
+
+    expect(await screen.findByText('Инструменты временно недоступны')).toBeTruthy();
+    expect(screen.getAllByText('Инструменты временно недоступны')).toHaveLength(1);
+    expect(screen.queryByText('Инструменты снова доступны')).toBeNull();
+  });
+
+  it('does not bring back a warning the Owner closed by hand during the same outage', async () => {
+    at('/projects/P0001');
+    render(<App api={outage()} />);
+    expect(await screen.findByText('Инструменты временно недоступны')).toBeTruthy();
+    fireEvent.click(screen.getByLabelText('Закрыть уведомление'));
+
+    fireEvent.click(screen.getByLabelText('Закрыть проект'));
+    fireEvent.click(await screen.findByText('Project P0001'));
+    await screen.findByLabelText('Project Work Area');
+    expect(screen.queryByText('Инструменты временно недоступны')).toBeNull();
+  });
+});
+
+describe('Engine popups: Architect onboarding (P029)', () => {
+  const onboarded = (state: 'initializing' | 'ready' | 'blocked' | 'unknown' | 'legacy_unverified', detail: string | null = null) =>
+    architectStatus({
+      state: 'ready', can_activate: false, can_deactivate: true,
+      session: { session_id: 'session-1', state: 'ready', verified_at: '2026-11-08T10:00:00Z' },
+      tools: { state: 'active', detail: null }, onboarding: { state, detail },
+    });
+  const apiFor = (getArchitect: () => Promise<ReturnType<typeof onboarded>>) => stubApi({
+    listProjects: vi.fn(async () => [P1]),
+    listTasks: vi.fn(async () => []),
+    getArchitect: vi.fn(getArchitect),
+    getContextAccess: vi.fn(async () => contextAccess({ tools: { transport: 'active', names: ['rosc_briefing'] } })),
+  });
+
+  it('shows real progress, then one readiness card only after the onboarding was observed', async () => {
+    vi.useFakeTimers();
+    let state: 'initializing' | 'ready' = 'initializing';
+    at('/projects/P0001');
+    render(<App api={apiFor(async () => onboarded(state))} />);
+    await act(async () => { await vi.advanceTimersByTimeAsync(0); });
+    const card = screen.getByText('Architect знакомится с проектом').closest('.rosc-engine-notice');
+    expect(card?.classList.contains('rosc-engine-notice--progress')).toBe(true);
+
+    state = 'ready';
+    await act(async () => { await vi.advanceTimersByTimeAsync(3100); });
+    expect(screen.queryByText('Architect знакомится с проектом')).toBeNull();
+    expect(screen.getAllByText('Architect готов к работе')).toHaveLength(1);
+    await act(async () => { await vi.advanceTimersByTimeAsync(6600); });
+    expect(screen.queryByText('Architect готов к работе')).toBeNull();
+  });
+
+  it('does not announce readiness (or anything) when an onboarded or legacy Project is merely opened', async () => {
+    for (const state of ['ready', 'legacy_unverified'] as const) {
+      at('/projects/P0001');
+      const { container, unmount } = render(<App api={apiFor(async () => onboarded(state))} />);
+      await screen.findByLabelText('Project Work Area');
+      expect(container.querySelector('.rosc-engine-notice-stack')).toBeNull();
+      unmount();
+    }
+  });
+
+  it('reports blocked and unknown outcomes honestly, never as readiness, and respects manual dismiss', async () => {
+    at('/projects/P0001');
+    render(<App api={apiFor(async () => onboarded('blocked', 'evidence_missing'))} />);
+    const card = (await screen.findByText('Знакомство Architect не подтверждено')).closest('.rosc-engine-notice');
+    expect(card?.getAttribute('role')).toBe('alert');
+    expect(screen.queryByText('Architect готов к работе')).toBeNull();
+    fireEvent.click(screen.getByLabelText('Закрыть уведомление'));
+    expect(screen.queryByText('Знакомство Architect не подтверждено')).toBeNull();
+
+    cleanup();
+    at('/projects/P0001');
+    render(<App api={apiFor(async () => onboarded('unknown', 'interrupted'))} />);
+    expect(await screen.findByText('Итог знакомства Architect неизвестен')).toBeTruthy();
+    expect(screen.queryByText('Architect готов к работе')).toBeNull();
   });
 });
