@@ -49,6 +49,7 @@ log = logging.getLogger(__name__)
 
 STATE_NOT_CONFIGURED = "not_configured"
 REPLY_TIMEOUT = 120.0
+TOOLS_RETRY_SECONDS = 30.0  # P028: minimum spacing of status-driven tool reconnect attempts after a failure
 CONTEXT_MESSAGES = 10
 CONTEXT_MESSAGE_CHARS = 1500
 CONTEXT_TOTAL_CHARS = 10000
@@ -109,6 +110,9 @@ class ArchitectService:
         # P024: opt-in, content-free latency diagnostics.  Disabled (the default) means every hook below returns at once.
         self._trace: LatencyTrace = trace if trace is not None else DISABLED
         self._clocks: dict[str, dict] = {}  # Owner message id -> {"submitted": monotonic, "state": str|None} (enabled only)
+        # P028: last tool-reconnect failure code / earliest next status-driven retry per ROSC session (memory only).
+        self._tools_problem: dict[str, str] = {}
+        self._tools_retry: dict[str, float] = {}
         attach = getattr(runtime, "attach_diagnostics", None)
         if self._trace.enabled and callable(attach):
             attach(self._trace)
@@ -213,6 +217,7 @@ class ArchitectService:
                     else:
                         live.verified_at = _now()
                         session.commit()
+                        self._restore_tools(live, project.id)
             return self._view(session, project.id)
 
     def _view(self, session: Session, project_id: int) -> dict:
@@ -229,6 +234,11 @@ class ArchitectService:
             state, detail = STATE_NOT_CONFIGURED, problem
         else:
             state, detail = SESSION_STOPPED, latest.error_code if latest is not None else None
+        if (live is not None and live.state == SESSION_READY and self._tools_expected()
+                and not self._tools.active(live.session_id)):  # type: ignore[union-attr]
+            # P028: a verified process whose Tools are not connected is not an honestly ready Architect.  The row,
+            # process and native session are untouched; only the report differs until the tools are restored.
+            state, detail = SESSION_ERROR, self._tools_problem.get(live.session_id, "tools_unavailable")
         agent = pair[1] if pair is not None else None
         return {
             "project_id": f"P{project_id:04d}", "state": state, "detail": detail,
@@ -266,6 +276,45 @@ class ArchitectService:
     def _tools_enabled_for(self, session_id: str) -> bool:
         return self._tools is not None and bool(getattr(self._runtime, "supports_tools", False)) \
             and self._tools.active(session_id)
+
+    def _tools_expected(self) -> bool:
+        return (self._tools is not None and self._context is not None
+                and bool(getattr(self._runtime, "supports_tools", False)))
+
+    def _restore_tools(self, live: ArchitectSession, project_id: int, *, force: bool = False) -> None:
+        """P028: reconnect the ROSC Tools of an already persisted, ready session after a ROSC restart.
+
+        Same process, same native session: only a fresh ToolHost credential is issued and registered in the verified
+        child.  Nothing is started, stopped, prompted or re-sent, and the persisted row is never changed here.  On any
+        failure the fresh credential is revoked again and the session keeps its identity for a later attempt (a status
+        poll retries after a short cooldown).  Callers hold the Project's lifecycle lock."""
+        session_id = live.session_id
+        reconnect = getattr(self._runtime, "reconnect_tools", None)
+        if (not self._tools_expected() or not callable(reconnect) or live.state != SESSION_READY
+                or self._tools.active(session_id)):  # type: ignore[union-attr]
+            return
+        if not force and time.monotonic() < self._tools_retry.get(session_id, 0.0):
+            return
+        handle = self._handle(live)
+        if handle is None or not self._probe_owned(live, handle):
+            return  # identity unproven: no credential is issued; the status path reports it as it always did
+        code: str | None = None
+        try:
+            self._context.pin(session_id, project_id)  # type: ignore[union-attr]
+            reconnect(session_id, handle, self._tools.open(session_id))  # type: ignore[union-attr]
+        except RuntimeProblem as exc:
+            code = exc.code
+        except Exception:
+            log.warning("Architect tool reconnect failed unexpectedly")
+            code = "tools_unavailable"
+        if code is None:
+            self._tools_problem.pop(session_id, None)
+            self._tools_retry.pop(session_id, None)
+            return
+        self._tools.revoke(session_id)  # type: ignore[union-attr]
+        self._context.unpin(session_id)  # type: ignore[union-attr]
+        self._tools_problem[session_id] = code
+        self._tools_retry[session_id] = time.monotonic() + TOOLS_RETRY_SECONDS
 
     def _stop_owned(self, row: ArchitectSession, handle: RuntimeHandle | None) -> bool:
         if handle is None:
@@ -781,10 +830,14 @@ class ArchitectService:
 
     # -- restart recovery -------------------------------------------------------------------------------------------
     def recover(self) -> None:
-        """Database-only repair at startup.  Nothing is re-sent, started or signalled here.
+        """Repair at startup.  No message is re-sent and no runtime is started or signalled here.
 
         A prior ``starting`` row stays in the unique live slot: a crash may have happened after spawn but before the
         handle was committed, so absence of identity is not proof that no process exists.
+
+        P028: for every persisted ``ready`` session whose original process and native session are still verified, the
+        ROSC Tools are re-registered in that same process (see ``_restore_tools``).  A failure leaves the session as it
+        is and never blocks startup.
         """
         with self._sessions() as session:
             for row in session.scalars(select(ConversationDelivery).where(
@@ -793,3 +846,18 @@ class ArchitectService:
             for row in session.scalars(select(ArchitectSession).where(ArchitectSession.state == SESSION_STARTING)):
                 row.error_code, row.updated_at = row.error_code or "interrupted", _now()
             session.commit()
+            ready = list(session.scalars(select(ArchitectSession.project_id).where(
+                ArchitectSession.state == SESSION_READY)))
+        if not self._tools_expected():
+            return
+        for project_id in ready:
+            try:
+                with self._lock(project_id):
+                    with self._sessions() as session:
+                        live = self._live(session, project_id)
+                        pair = self._assignment(session, project_id)
+                        if (live is not None and live.state == SESSION_READY and pair is not None
+                                and pair[0].assignment_id == live.assignment_id):
+                            self._restore_tools(live, project_id, force=True)
+            except Exception:
+                log.warning("Architect tool reconnect skipped for a project")

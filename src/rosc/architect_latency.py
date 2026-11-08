@@ -72,8 +72,8 @@ OUTCOMES = frozenset({
     "malformed_response", "model_unavailable", "no_reply", "process_exited", "process_identity_unproven",
     "provider_error", "provider_key_invalid", "provider_key_unsafe", "redirect_refused", "reply_retrieval_resources",
     "response_too_large", "restricted_mode_unconfirmed", "runtime_failure", "runtime_secret_missing",
-    "secret_provisioning_failed", "server_auth_failed", "spawn_failed", "start_cleanup_unconfirmed", "start_timeout",
-    "timeout", "tools_unavailable",
+    "runtime_status_unknown", "secret_provisioning_failed", "server_auth_failed", "spawn_failed",
+    "start_cleanup_unconfirmed", "start_timeout", "timeout", "tools_unavailable",
     # delivery / service codes
     "malformed_reply", "not_authorized", "not_received", "rules_snapshot_unavailable", "session_not_ready",
     "assignment_changed", "internal_error", "persist_failed", "reply_storage_resources", "session_changed",

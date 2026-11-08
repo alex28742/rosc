@@ -374,7 +374,7 @@ def create_app(db_path: Path | None = None, workspace_root: Path | None = None, 
     @asynccontextmanager
     async def lifespan(_app: FastAPI):
         try:
-            architect.recover()  # database-only: pending work of a dead process becomes unknown, nothing is re-sent
+            architect.recover()  # pending work of a dead process becomes unknown (nothing re-sent); P028: Tools of a verified live session reconnect
         except OperationalError:
             log.warning("Architect recovery skipped: database is not migrated")
         yield

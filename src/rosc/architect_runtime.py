@@ -575,6 +575,16 @@ class OpenCodeRuntime:
             time.sleep(0.25)
         raise RuntimeUnavailable("tools_unavailable")
 
+    def reconnect_tools(self, session_id: str, handle: RuntimeHandle, endpoint: ToolEndpoint) -> None:
+        """P028: re-register the ROSC tool server in an ALREADY RUNNING, ownership-verified child (e.g. after a ROSC
+        restart dropped the in-memory ToolHost credential).  Never starts, stops or prompts anything and never creates
+        a native session: the same process and the same native session must still answer afterwards."""
+        if not self.probe(session_id, handle):
+            raise RuntimeUnavailable("runtime_status_unknown")  # nothing, not even the bearer, is sent unless owned
+        self._register_tools(session_id, handle.port, endpoint)
+        if not self.probe(session_id, handle):
+            raise RuntimeUnavailable("runtime_status_unknown")
+
     def _create_session(self, session_id: str, port: int, provider_id: str, model_id: str, workdir: Path,
                         with_tools: bool = False) -> str:
         wanted = TOOLS_PERMISSIONS if with_tools else DENY_ALL
