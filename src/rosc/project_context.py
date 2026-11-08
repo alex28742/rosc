@@ -554,12 +554,25 @@ class ProjectContextBroker:
                 "sha256": info.sha256, "size": info.size, "media_type": info.media_type,
                 "updated_at": info.updated_at}
 
+    def _own_docs_target(self, caller: Caller, value: object) -> int:
+        """ROSC 1.0: private documents are readable for the caller's own Project only.
+
+        Decided from the argument alone, before any Project lookup or DocumentStore access, so a refusal neither reads
+        nor confirms the existence of another Project.  Nothing is normalised toward the caller's id: a malformed value
+        stays ``invalid_argument``; any other Project id (and the former ``"all"`` fan-out) is refused."""
+        if value == "all":
+            raise ToolError("cross_project_not_approved", "ROSC-private documents of other Projects are not readable")
+        target = self._target(caller, value)
+        if target != caller.project_id:
+            raise ToolError("cross_project_not_approved", "ROSC-private documents of other Projects are not readable")
+        return target
+
     def _docs_scope(self, session: Session, caller: Caller, args: dict) -> tuple[int, str]:
-        """Resolve the target Project; routine local reads need no per-target approval."""
+        """Resolve the target Project (always the caller's own)."""
         self._require(caller, CAP_DOC_READ)
-        target = self._target(caller, args.get("project"))
+        target = self._own_docs_target(caller, args.get("project"))
         self._project(session, target)
-        return target, "own" if target == caller.project_id else "other_project_read_only"
+        return target, "own"
 
     def tool_docs_list(self, session: Session, caller: Caller, args: dict) -> dict:
         target, scope = self._docs_scope(session, caller, args)
@@ -597,25 +610,14 @@ class ProjectContextBroker:
         if not isinstance(query, str) or not 2 <= len(query) <= 200:
             raise ToolError("invalid_argument", "query must be 2..200 characters")
         needle = query.lower()
-        scope_arg = args.get("project")
-        if scope_arg == "all":
-            targets = [pid for (pid,) in session.execute(select(Project.id).order_by(Project.id))]
-        else:
-            targets = [self._target(caller, scope_arg)]
+        targets = [self._own_docs_target(caller, args.get("project"))]
         matches: list[dict] = []
         skipped: list[dict] = []
         scanned = 0
         deadline = time.monotonic() + MAX_SEARCH_SECONDS
         complete = True
         for target in targets:
-            own = target == caller.project_id
-            try:
-                self._project(session, target)
-            except ToolError as exc:
-                if scope_arg == "all":
-                    skipped.append({"project_id": project_label(target), "reason": exc.code})
-                    continue
-                raise
+            self._project(session, target)
             for info in [i for i in self._store.list(target) if isinstance(i, DocumentInfo)]:
                 if scanned >= MAX_DOC_SCAN or time.monotonic() > deadline or len(matches) >= MAX_SEARCH_RESULTS:
                     complete = False
@@ -632,7 +634,7 @@ class ProjectContextBroker:
                 if at >= 0:
                     snippet = text[max(0, at - 80):at + len(query) + 80]
                 if snippet is not None:
-                    matches.append({"project_id": project_label(target), "scope": "own" if own else "other_project_read_only",
+                    matches.append({"project_id": project_label(target), "scope": "own",
                                     "doc_id": info.doc_id, "logical_path": info.logical_path, "revision": info.revision,
                                     "sha256": info.sha256, "snippet": snippet})
         return {"kind": "architect_document_search", "query": query, "matches": matches,
@@ -643,7 +645,7 @@ class ProjectContextBroker:
         self._require(caller, CAP_DOC_WRITE)
         if args.get("project") not in (None, "", project_label(caller.project_id)):
             raise ToolError("write_other_project_denied",
-                            "Documents of other Projects are read-only for this Architect")
+                            "Documents of other Projects are not accessible to this Architect")
 
     def _fresh_own(self, session: Session, caller: Caller) -> None:
         self._project(session, caller.project_id)
@@ -973,7 +975,8 @@ ACCESS_MATRIX = [
     {"resource": "global definitions (principles, agents, skills, tools)", "operations": "list, read", "mode": "read_only"},
     {"resource": "this Project's ROSC-private documents", "operations": "list, search, read, create, update, delete (recoverable)",
      "mode": "read_write"},
-    {"resource": "other registered Projects' ROSC-private documents", "operations": "list, search, read", "mode": "read_only"},
+    {"resource": "other Projects' ROSC-private documents", "operations": "none (cross-Project reading needs an explicit Owner permission, not yet defined)",
+     "mode": "denied"},
     {"resource": "this Project's bound source checkout", "operations": "list, search, read, git head/status/log",
      "mode": "read_only"},
     {"resource": "other Projects' source, secrets, host directories, shell, publishing", "operations": "none", "mode": "denied"},

@@ -371,8 +371,8 @@ class NoConsentGateTests(ContextCase):
         own = self.direct(session_id, "docs_read", doc_id="seed")
         other = self.direct(session_id, "docs_read", doc_id="seed", project="P0002")
         self.assertIn(MARK_A, own["result"]["content"])
-        self.assertIn(MARK_B, other["result"]["content"])
-        self.assertEqual(other["result"]["scope"], "other_project_read_only")
+        self.assertEqual(other["error"]["code"], "cross_project_not_approved")
+        self.assertNotIn(MARK_B, json.dumps(other))
         self.assertIn(MARK_SRC, self.direct(session_id, "source_read", path="README.md")["result"]["content"])
         self.assertTrue(self.direct(session_id, "docs_search", query="SYNTH")["result"]["matches"])
         briefing = self.direct(session_id, "briefing")["result"]
@@ -405,7 +405,7 @@ class NoConsentGateTests(ContextCase):
         self.assertIn("Owner-selected provider/model", view["provider"]["note"])
         self.assertEqual(view["source"], {"bound": True, "binding_version": 1, "docs_entrypoint": "README.md",
                                           "access": "read_only"})
-        self.assertEqual([m["mode"] for m in view["matrix"]], ["read_only", "read_write", "read_only", "read_only", "denied"])
+        self.assertEqual([m["mode"] for m in view["matrix"]], ["read_only", "read_write", "denied", "read_only", "denied"])
         self.assertFalse(view["publication"]["automatic_sync"])
 
     def test_agents_have_no_authority_over_the_summary(self) -> None:
@@ -422,34 +422,91 @@ class NoConsentGateTests(ContextCase):
 
 
 class OtherProjectDocumentTests(ContextCase):
-    def test_other_project_documents_are_readable_without_per_document_approval_and_never_writable(self) -> None:
+    """ROSC 1.0: an Architect reads ROSC-private documents of its own Project only."""
+
+    def read_spy(self):
+        """Record every DocumentStore read/list/search target, so a refusal is shown to precede any store access."""
+        touched: list[tuple[str, int]] = []
+        for name in ("list", "read", "list_trash"):
+            original = getattr(ArchitectDocumentStore, name)
+
+            def spy(store, project_id, *a, _n=name, _o=original, **k):
+                touched.append((_n, project_id))
+                return _o(store, project_id, *a, **k)
+            patcher = patch.object(ArchitectDocumentStore, name, spy)
+            patcher.start()
+            self.addCleanup(patcher.stop)
+        return touched
+
+    def test_own_project_documents_work_with_absent_or_explicit_own_project(self) -> None:
+        self.activate()
+        self.store().write(1, "alpha", MARK_A, actor_id="owner", logical_path="notes/alpha")
+        for extra in ({}, {"project": "P0001"}, {"project": ""}, {"project": 1}):
+            listed = self.one("docs_list", **extra)["result"]
+            self.assertEqual((listed["project_id"], listed["scope"], listed["total"]), ("P0001", "own", 1), extra)
+            read = self.one("docs_read", doc_id="alpha", **extra)["result"]
+            self.assertIn(MARK_A, read["content"])
+            self.assertEqual((read["project_id"], read["scope"]), ("P0001", "own"))
+            found = self.one("docs_search", query=MARK_A[:20].lower(), **extra)["result"]
+            self.assertEqual([(m["project_id"], m["scope"]) for m in found["matches"]], [("P0001", "own")])
+        paged = self.one("docs_list", limit=1, offset=0)["result"]
+        self.assertEqual((len(paged["documents"]), paged["next_offset"]), (1, None))
+
+    def test_other_project_documents_are_refused_before_any_store_access(self) -> None:
         self.activate()
         self.store().write(2, "beta-notes", MARK_B, actor_id="owner", logical_path="notes/beta")
-        listed = self.one("docs_list", project="P0002")["result"]
-        self.assertEqual((listed["project_id"], listed["scope"]), ("P0002", "other_project_read_only"))
-        self.assertEqual([d["doc_id"] for d in listed["documents"]], ["beta-notes"])
-        read = self.one("docs_read", doc_id="beta-notes", project="P0002")["result"]
-        self.assertIn(MARK_B, read["content"])
-        self.assertEqual((read["project_id"], read["scope"]), ("P0002", "other_project_read_only"))
-        self.assertEqual(len(read["sha256"]), 64)
-        everywhere = self.one("docs_search", query=MARK_B[:20].lower(), project="all")["result"]
-        self.assertEqual([(m["project_id"], m["scope"]) for m in everywhere["matches"]],
-                         [("P0002", "other_project_read_only")])
+        touched = self.read_spy()
+        cases = (("docs_list", {"project": "P0002"}), ("docs_read", {"doc_id": "beta-notes", "project": "P0002"}),
+                 ("docs_search", {"query": MARK_B[:20].lower(), "project": "P0002"}),
+                 ("docs_search", {"query": MARK_B[:20].lower(), "project": "all"}),
+                 ("docs_list", {"project": "all"}), ("docs_read", {"doc_id": "beta-notes", "project": "all"}),
+                 ("docs_list", {"project": 2}), ("docs_list", {"project": "P0099"}))
+        for tool, args in cases:
+            outcome = self.one(tool, **args)
+            self.assertEqual(outcome["error"]["code"], "cross_project_not_approved", (tool, args))
+            self.assertNotIn(MARK_B, json.dumps(outcome), (tool, args))
+        self.assertEqual(touched, [], "a refused call must not touch any DocumentStore")
+
+    def test_malformed_project_arguments_are_invalid_and_never_normalised_to_the_own_project(self) -> None:
+        session_id = self.activate()
+        self.store().write(2, "beta-notes", MARK_B, actor_id="owner")
+        touched = self.read_spy()
+        for bad in ("2", "../P0002", "P0002/../P0001", "p0002", "p0001", " P0001", "P0001 ", " P0002 ", "P0002\n",
+                    "P00010000000", "P0001/../P0002", True, False, 1.0, ["P0001"], ["P0002"], {"id": "P0001"}):
+            for tool, extra in (("docs_list", {}), ("docs_read", {"doc_id": "beta-notes"}), ("docs_search", {"query": "synthetic"})):
+                outcome = self.direct(session_id, tool, project=bad, **extra)
+                self.assertFalse(outcome["ok"], (tool, bad))
+                self.assertIn(outcome["error"]["code"], ("invalid_argument", "cross_project_not_approved"), (tool, bad))
+                self.assertNotIn(MARK_B, json.dumps(outcome))
+        self.assertEqual(self.direct(session_id, "docs_list", project=" P0001")["error"]["code"], "invalid_argument")
+        self.assertEqual(self.direct(session_id, "docs_list", project=["P0001"])["error"]["code"], "invalid_argument")
+        self.assertEqual(self.direct(session_id, "docs_list", project=True)["error"]["code"], "invalid_argument")
+        self.assertEqual(touched, [])
+
+    def test_other_project_documents_are_never_writable_and_unchanged(self) -> None:
+        self.activate()
+        self.store().write(2, "beta-notes", MARK_B, actor_id="owner", logical_path="notes/beta")
         before = digest(self.data / "workspace/projects/P0002/architect/documents/beta-notes/document.json")
         for tool, extra in (("docs_create", {"content": "x"}), ("docs_update", {"content": "x", "expected_revision": 1}),
-                            ("docs_delete", {"expected_revision": 1})):
-            denied = self.one(tool, doc_id="beta-notes", project="P0002", **extra)
+                            ("docs_delete", {"expected_revision": 1}), ("docs_restore", {"trash_id": "x"})):
+            args = {"doc_id": "beta-notes", **extra} if tool != "docs_restore" else dict(extra)
+            denied = self.one(tool, project="P0002", **args)
             self.assertEqual(denied["error"]["code"], "write_other_project_denied", tool)
         self.assertEqual(before, digest(self.data / "workspace/projects/P0002/architect/documents/beta-notes/document.json"))
         self.assertEqual(self.store().list_trash(2), [])
         self.assertEqual(self.store().read(2, "beta-notes").info.revision, 1)
         self.assertEqual(self.store().list(1), [])  # nothing was created in the caller's own Project either
 
-    def test_unknown_project_and_malformed_references_are_refused(self) -> None:
-        session_id = self.activate()
-        self.assertEqual(self.direct(session_id, "docs_list", project="P0099")["error"]["code"], "project_not_found")
-        for bad in ("2", "../P0002", "P0002/../P0001", "all", True, "p0002 "):
-            self.assertFalse(self.direct(session_id, "docs_list", project=bad)["ok"], bad)
+    def test_tool_descriptions_and_matrix_no_longer_promise_cross_project_reads(self) -> None:
+        docs = {t["name"]: t for t in TOOLS if t["name"].startswith("docs_")}
+        for name in ("docs_list", "docs_search", "docs_read"):
+            text = json.dumps(docs[name]).lower()
+            self.assertNotIn("'all'", text, name)
+            self.assertNotIn("read-only)", text, name)
+            self.assertIn("current project", text, name)
+        other = [m for m in pc.ACCESS_MATRIX if m["resource"].startswith("other Projects' ROSC-private")]
+        self.assertEqual([m["mode"] for m in other], ["denied"])
+        self.assertFalse([m for m in pc.ACCESS_MATRIX if "other registered" in m["resource"]])
 
     def test_other_project_source_checkout_is_inaccessible(self) -> None:
         session_id = self.activate()
@@ -682,9 +739,11 @@ class PrivateDataRootTests(ContextCase):
         self.assertEqual([m["path"] for m in hit["matches"]], ["data/records.md"])
         self.assertIn(MARK_SRC, self.call("source_read", path="README.md")["result"]["content"])
 
-    def test_cross_project_rosc_documents_remain_readable(self) -> None:
+    def test_cross_project_rosc_documents_are_refused(self) -> None:
         self.store().write(2, "seed", MARK_B, actor_id="x")
-        self.assertIn(MARK_B, self.call("docs_read", doc_id="seed", project="P0002")["result"]["content"])
+        outcome = self.call("docs_read", doc_id="seed", project="P0002")
+        self.assertEqual(outcome["error"]["code"], "cross_project_not_approved")
+        self.assertNotIn(MARK_B, json.dumps(outcome))
 
     def test_a_checkout_that_is_the_private_root_itself_is_refused(self) -> None:
         whole = pc.ProjectContextBroker(self.sessions, self.data / "workspace", self.lib,

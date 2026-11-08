@@ -32,7 +32,7 @@ PERMISSION_PATTERN = f"{SERVER_NAME}_*"  # OpenCode names MCP tools <server>_<to
 MAX_BODY = 1_000_000
 SUPPORTED_PROTOCOLS = ("2025-11-25", "2025-06-18", "2025-03-26", "2024-11-05")
 
-_PROJECT = {"type": "string", "description": "Project id such as P0002. Omit for the current Project."}
+_PROJECT = {"type": "string", "description": "Only the current Project's id is accepted. Omit for the current Project."}
 _PAGING = {"offset": {"type": "integer", "minimum": 0}, "max_chars": {"type": "integer", "minimum": 1}}
 
 
@@ -50,14 +50,13 @@ TOOLS: list[dict] = [
                              "limit": {"type": "integer", "minimum": 1}})},
     {"name": "global_read", "description": "Read one global definition file (read-only documentation).",
      "inputSchema": _schema({"path": {"type": "string"}, **_PAGING}, ["path"])},
-    {"name": "docs_list", "description": "List ROSC-private documents of the current Project (read/write) or of another "
-     "registered Project (read-only).", "inputSchema": _schema({
+    {"name": "docs_list", "description": "List ROSC-private documents of the current Project. Other Projects' "
+     "documents are not readable.", "inputSchema": _schema({
          "project": _PROJECT, "offset": {"type": "integer", "minimum": 0}, "limit": {"type": "integer", "minimum": 1},
          "include_trash": {"type": "boolean"}})},
-    {"name": "docs_search", "description": "Search ROSC-private documents; project may be 'all' for every registered "
-     "Project.", "inputSchema": _schema({"query": {"type": "string"}, "project": {
-         "type": "string", "description": "Project id, or 'all'."}}, ["query"])},
-    {"name": "docs_read", "description": "Read a ROSC-private document (current or other registered Project). Returns "
+    {"name": "docs_search", "description": "Search ROSC-private documents of the current Project only.",
+     "inputSchema": _schema({"query": {"type": "string"}, "project": _PROJECT}, ["query"])},
+    {"name": "docs_read", "description": "Read a ROSC-private document of the current Project. Returns "
      "next_offset when more remains.", "inputSchema": _schema({
          "doc_id": {"type": "string"}, "project": _PROJECT, "revision": {"type": "integer", "minimum": 1}, **_PAGING},
          ["doc_id"])},

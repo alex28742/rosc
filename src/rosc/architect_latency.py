@@ -82,7 +82,7 @@ OUTCOMES = frozenset({
     "library_absent", "library_unsafe", "not_accessible", "not_found", "not_regular_file", "not_text",
     "path_excluded", "project_not_found", "project_unavailable", "root_binding_changed", "root_unavailable",
     "rules_source_changed", "session_not_active", "source_other_project_denied", "unknown_tool", "unsafe_path",
-    "write_other_project_denied", "already_exists", "commit_uncertain", "revision_conflict", "invalid_document",
+    "write_other_project_denied", "cross_project_not_approved", "already_exists", "commit_uncertain", "revision_conflict", "invalid_document",
     "store_unsafe"})
 _HTTP_STATUS = re.compile(r"^http_([1-5])[0-9]{2}$")  # the exact status is dynamic: only the class is kept
 
