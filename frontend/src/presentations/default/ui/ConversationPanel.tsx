@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState, type FormEvent, type ReactNode } from 'react';
 import type { ConversationControls } from '../../../app/presentation/contracts';
-import type { ArchitectStatus, ConversationMessage } from '../../../core/models';
-import { ContextAccessSummary } from './ContextAccessSummary';
+import type { ConversationMessage } from '../../../core/models';
+import { architectReason, describeArchitect } from './architectView';
 
 type Props = {
   projectId: string;
@@ -51,52 +51,7 @@ function renderBody(body: string, matches: Match[], currentId: string | null): R
   return nodes;
 }
 
-/** Human wording for a non-secret Core reason code; unknown codes are shown as-is rather than guessed at. */
-const REASONS: Record<string, string> = {
-  no_active_architect_assignment: 'Для проекта не назначен активный Architect.',
-  unsupported_runtime_adapter: 'Назначенный агент использует не поддерживаемый runtime.',
-  runtime_binary_missing: 'Исполняемый файл OpenCode не найден.',
-  runtime_credential_missing: 'Локальный пароль OpenCode недоступен; ROSC создаёт его при активации.',
-  secret_provisioning_failed: 'ROSC не смог создать локальный пароль runtime — процесс не запускался.',
-  runtime_secret_missing: 'Локальный пароль запущенного runtime не найден; повторный запуск заблокирован до остановки.',
-  server_auth_failed: 'Локальный runtime отклонил пароль ROSC; запрос к модели не отправлялся.',
-  model_not_approved: 'Модель агента не утверждена Owner для передачи данных.',
-  provider_key_not_configured: 'Ключ провайдера OpenCode Go не подключён (ROSC_OPENCODE_PROVIDER_KEY_FILE).',
-  provider_key_missing: 'Файл ключа провайдера OpenCode Go не найден.',
-  provider_key_unsafe: 'Файл ключа провайдера небезопасен (права, владелец, ссылка или каталог) — не использован.',
-  provider_key_invalid: 'Файл ключа провайдера пуст или имеет неверный формат.',
-  runtime_not_alive: 'Runtime перестал отвечать.',
-  restricted_mode_unconfirmed: 'Ограниченный режим runtime не подтверждён — запрос к модели не отправлялся.',
-  model_unavailable: 'Модель недоступна в runtime.',
-  start_timeout: 'Runtime не запустился вовремя.',
-  interrupted: 'Запуск был прерван перезапуском ROSC.',
-  assignment_changed: 'Назначение Architect изменилось.',
-  process_not_owned: 'Процесс не принадлежит ROSC и не был остановлен.',
-  runtime_status_unknown: 'Runtime не отвечает; возможно живой процесс сохранён для безопасного разрешения.',
-  runtime_identity_missing: 'Недостаточно данных, чтобы безопасно остановить runtime.',
-  stop_unconfirmed: 'Остановка runtime не подтверждена; повторный запуск заблокирован.',
-  reply_too_large: 'Ответ был создан, но старая версия ROSC отказалась его сохранить из-за длины. Его можно восстановить без нового запроса к модели, пока сессия Architect активна.',
-  reply_retrieval_resources: 'Ответ создан, но сейчас не хватает ресурсов, чтобы получить его целиком. Повторный запрос к модели не выполнялся — проверьте результат позже.',
-  reply_storage_resources: 'Ответ создан, но сейчас не хватает ресурсов, чтобы сохранить его целиком. Повторный запрос к модели не выполнялся — проверьте результат позже.',
-  start_cleanup_unconfirmed: 'Запуск не завершён, а остановка процесса не подтверждена.',
-};
-const reason = (code: string | null) => (code ? REASONS[code] ?? `Код: ${code}` : '');
-
-type ArchitectView = { label: string; live: boolean; hint: string };
-
-/** Never shows anything as active unless Core reported a freshly verified `ready` session. */
-function describeArchitect(info: ArchitectStatus | null, loaded: boolean, busy: boolean): ArchitectView {
-  if (busy) return { label: 'Architect: запускается…', live: false, hint: 'Идёт активация и проверка runtime.' };
-  if (!loaded || info === null) return { label: 'Architect: проверка…', live: false, hint: '' };
-  switch (info.state) {
-    case 'ready': return { label: 'Architect: активен (проверен)', live: true, hint: '' };
-    case 'starting': return { label: 'Architect: запускается…', live: false, hint: '' };
-    case 'error': return { label: 'Architect: ошибка', live: false, hint: reason(info.detail) };
-    case 'not_configured': return { label: 'Architect: не настроен', live: false, hint: reason(info.detail) };
-    default: return { label: 'Architect: не активирован', live: false, hint: reason(info.detail) };
-  }
-}
-
+/** Delivery wording is about the stored Owner message, never proof that the Architect answered. */
 const DELIVERY_TEXT: Record<string, string> = {
   pending: 'Передано Architect, ожидается ответ…',
   delivered: 'Architect ответил',
@@ -128,7 +83,6 @@ export function ConversationPanel({ projectId, conversation, collapsed, onCollap
   const view = describeArchitect(architect.info, architect.status === 'ready', architect.busy);
   const live = view.live && architect.info?.state === 'ready';
   const unresolved = architect.info?.state === 'error' && architect.info.can_deactivate;
-  const [architectFailure, setArchitectFailure] = useState('');
   const [deliveryFailure, setDeliveryFailure] = useState('');
   const [draft, setDraft] = useState('');
   const [failure, setFailure] = useState('');
@@ -232,20 +186,6 @@ export function ConversationPanel({ projectId, conversation, collapsed, onCollap
         <span className={live ? 'rosc-chip rosc-chip--live' : 'rosc-chip'} aria-live="polite">{view.label}</span>
       </div>
     </header>
-    <div className="rosc-conversation__architect">
-      {architect.info?.can_activate && !architect.busy && <button type="button" className="rosc-btn rosc-btn--small"
-        onClick={async () => setArchitectFailure(await conversation.onActivate() ?? '')}>
-        {architect.info.state === 'error' ? 'Повторить активацию Architect' : 'Активировать Architect'}
-      </button>}
-      {architect.info?.can_deactivate && !architect.busy && <button type="button" className="rosc-btn rosc-btn--small"
-        onClick={async () => setArchitectFailure(await conversation.onDeactivate() ?? '')}>Остановить Architect</button>}
-      {architect.status === 'failed' && <button type="button" className="rosc-btn rosc-btn--small"
-        onClick={conversation.onReload}>Проверить статус</button>}
-      {(view.hint || architect.error || architectFailure) && <p className="rosc-conversation__hint" role="alert">
-        {[view.hint, architect.error, architectFailure].filter(Boolean).join(' ')}
-      </p>}
-    </div>
-    <ContextAccessSummary contextAccess={conversation.contextAccess} />
     {searchOpen && <div className="rosc-conversation__search">
       <input type="search" aria-label="Поиск по сообщениям" placeholder="Найти в переписке…"
         value={searchTerm} autoFocus
@@ -297,7 +237,7 @@ export function ConversationPanel({ projectId, conversation, collapsed, onCollap
               matches.filter(match => match.messageId === message.message_id), currentId)}</p>
             {delivery && delivery.state !== 'not_sent' && <p className={`rosc-chat-delivery rosc-chat-delivery--${delivery.state}`}
               aria-live="polite">
-              {DELIVERY_TEXT[delivery.state]}{delivery.error_code ? ` (${reason(delivery.error_code) || delivery.error_code})` : ''}
+              {DELIVERY_TEXT[delivery.state]}{delivery.error_code ? ` (${architectReason(delivery.error_code) || delivery.error_code})` : ''}
               {delivery.can_retry && <button type="button" className="rosc-btn rosc-btn--small"
                 onClick={async () => setDeliveryFailure(await conversation.onRetryDelivery(message.message_id) ?? '')}>
                 Повторить отправку</button>}

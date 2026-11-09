@@ -215,6 +215,118 @@
   color: #3c4b58;
 }
 
+/* P033 Project overview "Агенты проекта" card (approved Project layout v0.6 card). */
+.rosc-agents-card {
+  display: flex;
+  flex-direction: column;
+}
+
+.rosc-agent-stat {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin: 8px 0;
+  font-size: 12px;
+}
+
+.rosc-agent-stat > span {
+  color: #7e8c9b;
+}
+
+.rosc-agent-state {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 3px 7px;
+  border: 1px solid transparent;
+  border-radius: 5px;
+  font-size: 10px;
+  font-weight: 750;
+  text-align: right;
+}
+
+.rosc-agent-state::before {
+  content: "";
+  width: 6px;
+  height: 6px;
+  flex: none;
+  border-radius: 50%;
+  background: currentColor;
+}
+
+.rosc-agent-state--on {
+  border-color: #cde8d5;
+  background: #eaf7ee;
+  color: #1c7848;
+}
+
+.rosc-agent-state--off {
+  border-color: #e3e8eb;
+  background: #f1f3f5;
+  color: #70808c;
+}
+
+.rosc-agent-state--error {
+  border-color: #f3ced2;
+  background: #fff0f1;
+  color: #b3424c;
+}
+
+.rosc-agent-state--neutral {
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: #3c4b58;
+  font-size: 11px;
+}
+
+.rosc-agent-state--neutral::before {
+  display: none;
+}
+
+.rosc-agents-card__actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin: 10px 0 0;
+}
+
+.rosc-agents-card__hint {
+  margin: 8px 0 0;
+  color: #a1392f;
+  font-size: 11px;
+  font-weight: 600;
+}
+
+.rosc-agents-card__workspace {
+  margin: 12px 0 0;
+  padding-top: 10px;
+  border-top: 1px solid var(--rosc-line);
+}
+
+.rosc-agents-card__label {
+  display: block;
+  margin-bottom: 4px;
+  color: #80909c;
+  font-size: 11px;
+  font-weight: 750;
+}
+
+.rosc-agents-card__link {
+  align-self: flex-start;
+  margin: 10px 0 0;
+  padding: 0;
+  border: 0;
+  background: none;
+  color: #2074a6;
+  font: inherit;
+  font-size: 11px;
+  text-align: left;
+  text-decoration: underline;
+  cursor: pointer;
+}
+
 .rosc-spec {
   margin: 0;
 }
@@ -686,11 +798,8 @@
   writing-mode: vertical-rl;
 }
 
-.rosc-conversation--collapsed .rosc-conversation__head,
-.rosc-conversation--collapsed .rosc-conversation__search,
-.rosc-conversation--collapsed .rosc-conversation__feed,
-.rosc-conversation--collapsed .rosc-conversation__compose,
-.rosc-conversation--collapsed .rosc-conversation__collapse {
+/* Collapsed: the standard rail is the only visible element; no inner card, bar or feed may protrude. */
+.rosc-conversation--collapsed > :not(.rosc-conversation__rail) {
   display: none;
 }
 
@@ -958,22 +1067,9 @@
   }
 }
 
-/* P015 / M3-B: explicit Architect activation row and per-message delivery status. Composition is unchanged. */
-.rosc-conversation__architect {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: 6px 8px;
-  margin: 0 0 8px;
-}
-
-.rosc-conversation__architect .rosc-conversation__hint {
-  flex: 1 0 100%;
-  margin: 0;
-}
-
+/* P019: read-only Architect context access summary, shown in the Project "Агенты проекта" card. */
 .rosc-access {
-  margin: 0 0 8px;
+  margin: 12px 0 0;
   font-size: 12px;
 }
 

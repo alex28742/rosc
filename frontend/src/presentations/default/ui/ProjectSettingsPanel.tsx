@@ -14,7 +14,7 @@ function architectGate(state: ProjectAssignmentsState): string | null {
   }
   const info = state.architect;
   if (!(info.state === 'not_configured' || info.state === 'stopped') || info.can_deactivate) {
-    return 'Architect не подтверждённо остановлен. Сначала явно деактивируйте его в Project Conversation и дождитесь остановки.';
+    return 'Architect не подтверждённо остановлен. Сначала явно деактивируйте его в карточке «Агенты проекта» и дождитесь остановки.';
   }
   return null;
 }

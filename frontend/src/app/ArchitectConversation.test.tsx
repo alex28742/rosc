@@ -106,6 +106,54 @@ describe('Architect activation control', () => {
   });
 });
 
+describe('Project "Агенты проекта" card', () => {
+  const card = () => screen.getByLabelText('Агенты проекта') as HTMLElement;
+
+  it('keeps Architect lifecycle controls in the card, not in the conversation panel', async () => {
+    const api = open();
+    render(<App api={api} />);
+    await screen.findByText('Architect: не активирован');
+    const view = card();
+    expect(within(view).getByText('Активировать Architect')).toBeTruthy();
+    expect(within(panel()).queryByText('Активировать Architect')).toBeNull();
+    expect(within(panel()).queryByText('Остановить Architect')).toBeNull();
+    expect(within(view).getByText('Workers в работе')).toBeTruthy();
+    expect(within(view).getByText('0')).toBeTruthy();
+    expect(within(view).getByText('существующий проект')).toBeTruthy();
+    expect(within(view).queryByRole('button', { name: /Запустить|Run/ })).toBeNull();
+    expect(screen.getByText('Worker: не активен')).toBeTruthy();
+  });
+
+  it('re-probes only the Architect status after a failed load and never touches history or runtime', async () => {
+    const getArchitect = vi.fn()
+      .mockRejectedValueOnce(new ApiError('Ядро недоступно.', 'network', null))
+      .mockResolvedValue(architectStatus());
+    const getConversation = vi.fn(async () => conversationPage());
+    const api = open({ getArchitect, getConversation });
+    render(<App api={api} />);
+    await waitFor(() => expect(within(card()).getByText('статус не проверен')).toBeTruthy());
+    expect(within(card()).queryByText('Активировать Architect')).toBeNull();
+    fireEvent.click(within(card()).getByText('Проверить статус'));
+    await waitFor(() => expect(getArchitect).toHaveBeenCalledTimes(2));
+    expect(await within(card()).findByText('не активирован')).toBeTruthy();
+    expect(getConversation).toHaveBeenCalledTimes(1);
+    expect(api.sendConversationMessage).not.toHaveBeenCalled();
+    expect(api.activateArchitect).not.toHaveBeenCalled();
+    expect(api.deactivateArchitect).not.toHaveBeenCalled();
+  });
+
+  it('links to the existing Project Settings tab without activating or saving', async () => {
+    const api = open();
+    render(<App api={api} />);
+    await screen.findByText('Сообщений пока нет.');
+    fireEvent.click(within(card()).getByText('Подробнее о назначениях — в настройках проекта'));
+    expect(await screen.findByText('Агенты проекта · назначения')).toBeTruthy();
+    expect(api.activateArchitect).not.toHaveBeenCalled();
+    expect(api.createAssignment).not.toHaveBeenCalled();
+    expect(api.revokeAssignment).not.toHaveBeenCalled();
+  });
+});
+
 describe('Architect reply and delivery status', () => {
   const ready = architectStatus({ state: 'ready', can_activate: false, can_deactivate: true });
 

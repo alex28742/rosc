@@ -212,6 +212,10 @@ describe('Project Conversation search and collapse', () => {
     fireEvent.click(screen.getByLabelText('Свернуть Project Conversation'));
     expect(panel().className).toContain('rosc-conversation--collapsed');
     expect(screen.getByLabelText('Развернуть Project Conversation')).toBeTruthy();
+    // Only the rail remains a direct child besides the hidden controls; the former inner bar and access summary are gone.
+    expect(panel().querySelector('.rosc-conversation__architect')).toBeNull();
+    expect(panel().querySelector('.rosc-access')).toBeNull();
+    expect(panel().querySelector('.rosc-conversation__rail')).toBeTruthy();
     expect((within(panel()).getByLabelText('Сообщение в Project Conversation') as HTMLTextAreaElement).value).toBe('черновик Owner');
 
     fireEvent.click(screen.getByLabelText('Развернуть Project Conversation'));

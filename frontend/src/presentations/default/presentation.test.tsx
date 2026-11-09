@@ -21,6 +21,7 @@ const conversation = () => ({
   architect: { status: 'ready' as const, info: architectStatus(), busy: false, error: '' },
   contextAccess: { status: 'ready' as const, info: contextAccess(), busy: false, error: '' },
   onActivate: vi.fn(async () => null), onDeactivate: vi.fn(async () => null),
+  onRefreshArchitect: vi.fn(),
   onReconcile: vi.fn(async () => null), onRetryDelivery: vi.fn(async () => null),
   onReload: vi.fn(), onLoadOlder: vi.fn(), onSend: vi.fn(async () => null),
 });
@@ -90,6 +91,18 @@ describe('Work area presentation', () => {
     expect(screen.getByText('Ядро платформы')).toBeTruthy();
     expect(screen.getByText('/tmp/rosc')).toBeTruthy();
     expect(screen.getByText('README.md')).toBeTruthy();
+  });
+
+  it('renders the approved "Агенты проекта" overview card without duplicating its facts in the first card', () => {
+    render(<ProjectView {...projectProps} />);
+    expect(screen.getByText('Агенты проекта', { selector: 'h3' })).toBeTruthy();
+    expect(screen.queryByText('Состояние Workspace')).toBeNull();
+    expect(screen.queryByText('Architect', { selector: 'dt' })).toBeNull();
+    expect(screen.queryByText('Workers', { selector: 'dt' })).toBeNull();
+    expect(screen.getByText('Workers в работе')).toBeTruthy();
+    expect(screen.getByText('Режим')).toBeTruthy();
+    expect(screen.getByText('Подробнее о назначениях — в настройках проекта')).toBeTruthy();
+    expect(screen.getByText('Документация', { selector: 'dt' })).toBeTruthy();
   });
 
   it('renders a nested Task layer that reads the Task without offering a Run', () => {

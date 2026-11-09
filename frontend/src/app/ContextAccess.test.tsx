@@ -5,7 +5,7 @@ import { contextAccess, project, stubApi } from './testing';
 
 const at = (path: string) => history.replaceState(null, '', path);
 const P1 = project('P0001');
-const panel = () => document.querySelector('aside[aria-label="Project Conversation"]') as HTMLElement;
+const agentsCard = () => document.querySelector('section[aria-label="Агенты проекта"]') as HTMLElement;
 
 beforeEach(() => at('/projects/P0001'));
 afterEach(() => cleanup());
@@ -17,17 +17,17 @@ describe('Architect context access summary (P019)', () => {
     expect(await screen.findByText('Доступ Architect к контексту')).toBeTruthy();
     expect(api.getContextAccess).toHaveBeenCalledWith('P0001');
     expect(api.activateArchitect).not.toHaveBeenCalled();
-    const matrix = within(panel()).getByLabelText('Матрица доступа');
+    const matrix = within(agentsCard()).getByLabelText('Матрица доступа');
     expect(within(matrix).getAllByRole('listitem')).toHaveLength(5);
     expect(within(matrix).getAllByText('только чтение')).toHaveLength(3);
     expect(within(matrix).getByText('чтение и запись')).toBeTruthy();
     expect(within(matrix).getByText('запрещено')).toBeTruthy();
-    expect(within(panel()).queryAllByRole('switch')).toHaveLength(0);
-    expect(within(panel()).queryAllByRole('checkbox')).toHaveLength(0);
-    expect(within(panel()).getByText(/Провайдер\/модель: prov\/model-a/)).toBeTruthy();
-    expect(within(panel()).getByText(/могут отправляться/)).toBeTruthy();
-    expect(within(panel()).queryByText(/consent_required/)).toBeNull();
-    expect(within(panel()).getByText(/не публикуются и не синхронизируются автоматически/)).toBeTruthy();
+    expect(within(agentsCard()).queryAllByRole('switch')).toHaveLength(0);
+    expect(within(agentsCard()).queryAllByRole('checkbox')).toHaveLength(0);
+    expect(within(agentsCard()).getByText(/Провайдер\/модель: prov\/model-a/)).toBeTruthy();
+    expect(within(agentsCard()).getByText(/могут отправляться/)).toBeTruthy();
+    expect(within(agentsCard()).queryByText(/consent_required/)).toBeNull();
+    expect(within(agentsCard()).getByText(/не публикуются и не синхронизируются автоматически/)).toBeTruthy();
   });
 
   it('says so when the tools are not connected to the live session and reports a failed summary', async () => {

@@ -209,6 +209,8 @@ export type ConversationControls = {
   /** Explicit Owner activation of the Project Architect. Resolves to an error message or null. */
   onActivate: () => Promise<string | null>;
   onDeactivate: () => Promise<string | null>;
+  /** Read-only Architect status re-probe after a failed load; never loads chat history or starts a runtime. */
+  onRefreshArchitect: () => void;
   /** Uncertain delivery lookup (never re-sends) and safe retry (only after a provable non-delivery). */
   onReconcile: (messageId: string) => Promise<string | null>;
   onRetryDelivery: (messageId: string) => Promise<string | null>;

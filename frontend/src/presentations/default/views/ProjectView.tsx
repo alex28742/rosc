@@ -2,22 +2,11 @@ import { useState } from 'react';
 import type { ProjectViewProps } from '../../../app/presentation/contracts';
 import { Drawer } from '../ui/Drawer';
 import { Feedback } from '../ui/Feedback';
-import { WorkspaceActions } from '../ui/WorkspaceActions';
 import { ConversationPanel } from '../ui/ConversationPanel';
+import { ProjectAgentsCard } from '../ui/ProjectAgentsCard';
 import { ProjectSettingsPanel } from '../ui/ProjectSettingsPanel';
+import { architectHeadline } from '../ui/architectView';
 import { ChevronRightIcon, DocumentIcon } from '../ui/icons';
-
-function architectState({ architect }: ProjectViewProps['conversation']): string {
-  if (architect.busy) return 'запускается';
-  if (architect.status !== 'ready' || architect.info === null) return 'проверяется';
-  switch (architect.info.state) {
-    case 'ready': return 'активен (проверен)';
-    case 'starting': return 'запускается';
-    case 'error': return 'требует внимания';
-    case 'not_configured': return 'не настроен';
-    default: return 'не активирован';
-  }
-}
 
 type WorkAreaProps = Omit<ProjectViewProps, 'project' | 'projectStatus' | 'onClose' | 'projectId' | 'inert'> & {
   project: NonNullable<ProjectViewProps['project']>;
@@ -32,7 +21,6 @@ type WorkAreaProps = Omit<ProjectViewProps, 'project' | 'projectStatus' | 'onClo
 function ProjectWorkArea({ project, tasks, tasksStatus, feedback, scroll, workspace, conversation, assignments, tab,
   onSelectTab, onRetry, onOpenTask, onNewTask }: WorkAreaProps) {
   const [collapsed, setCollapsed] = useState(false);
-  const architect = architectState(conversation);
   return <div className={collapsed ? 'rosc-project-workspace rosc-project-workspace--collapsed' : 'rosc-project-workspace'}>
     <section className="rosc-project-left" aria-label="Обзор проекта и задачи" ref={scroll.region(`project:${project.id}`)}>
       <Feedback {...feedback} />
@@ -41,19 +29,11 @@ function ProjectWorkArea({ project, tasks, tasksStatus, feedback, scroll, worksp
           <h3>Контекст проекта</h3>
           <p>{project.description}</p>
           <dl className="rosc-facts">
-            <dt>Architect</dt><dd>{architect}</dd>
-            <dt>Workers</dt><dd>{project.active_workers}</dd>
-            <dt>Workspace</dt><dd>{project.workspace_state === 'ready' ? 'готов' : 'нужна сверка'}</dd>
             <dt>Документация</dt><dd>{project.docs_entrypoint ?? 'не указана'}</dd>
           </dl>
         </section>
-        <section className="rosc-panel-card">
-          <h3>Состояние Workspace</h3>
-          {/* Read-only Core fact: a healthy Workspace has no action, only the state it reports. */}
-          {project.workspace_state === 'ready'
-            ? <div className="rosc-repair"><p>Манифест Workspace соответствует записи в базе.</p></div>
-            : <WorkspaceActions key={`${project.id}:${project.workspace_problem}`} state={project.workspace_state} problem={project.workspace_problem} controls={workspace} />}
-        </section>
+        <ProjectAgentsCard project={project} conversation={conversation} workspace={workspace}
+          onOpenSettings={() => onSelectTab('settings')} />
       </div>
       <div className="rosc-tabs" role="tablist" aria-label="Разделы проекта">
         <button className={tab === 'tasks' ? 'rosc-tab rosc-tab--active' : 'rosc-tab'} role="tab"
@@ -88,7 +68,7 @@ function ProjectWorkArea({ project, tasks, tasksStatus, feedback, scroll, worksp
 
 export function ProjectView({ projectId, project, projectStatus, tasks, tasksStatus, feedback, inert, scroll, workspace,
   conversation, assignments, tab, onSelectTab, onClose, onRetry, onOpenTask, onNewTask }: ProjectViewProps) {
-  const architect = architectState(conversation);
+  const architect = conversation.architect;
   const head = <>
     <div className="rosc-drawer__heading">
       <p className="rosc-drawer-eyebrow">PROJECT / WORK AREA</p>
@@ -96,7 +76,11 @@ export function ProjectView({ projectId, project, projectStatus, tasks, tasksSta
       <p>{project?.root_path ?? 'Проект не загружен'}</p>
     </div>
     <div className="rosc-drawer__controls">
-      <span className="rosc-chip">Project Architect · {architect}</span>
+      <span className="rosc-chip">Project Architect · {architectHeadline(architect.status, architect.info, architect.busy)}</span>
+      {project && <span className="rosc-chip">
+        <span className="rosc-chip__dot" aria-hidden="true" />
+        Worker: {project.active_workers > 0 ? `${project.active_workers} в работе` : 'не активен'}
+      </span>}
       {project && <span className={project.workspace_state === 'ready' ? 'rosc-tag rosc-tag--success' : 'rosc-tag rosc-tag--warning'}>
         {project.workspace_state === 'ready' ? 'Workspace готов' : 'Нужна сверка'}
       </span>}

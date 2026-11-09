@@ -392,6 +392,17 @@ export function useWorkspaceController({ route, routeKey, go }: Navigation, api:
     }
   }, [api, patchArchitect, loadAccess, trackRead]);
 
+  /**
+   * Narrow Architect status re-probe for a failed load. It reuses `loadArchitect` and therefore its sequence guard and
+   * ContextAccess refresh; it never reloads chat history and never starts or stops a session.
+   */
+  const refreshArchitect = useCallback(() => {
+    const id = projectIdOf(routeRef.current);
+    if (!id) return;
+    patchArchitect(id, { status: 'loading', error: '' });
+    void loadArchitect(id);
+  }, [loadArchitect, patchArchitect]);
+
   const changeArchitect = useCallback(async (action: 'activate' | 'deactivate'): Promise<string | null> => {
     const id = projectIdOf(routeRef.current);
     if (!id) return 'Проект не открыт.';
@@ -804,6 +815,7 @@ export function useWorkspaceController({ route, routeKey, go }: Navigation, api:
     },
     onActivate: () => changeArchitect('activate'),
     onDeactivate: () => changeArchitect('deactivate'),
+    onRefreshArchitect: refreshArchitect,
     onReconcile: (messageId: string) => changeDelivery(messageId, 'reconcile'),
     onRetryDelivery: (messageId: string) => changeDelivery(messageId, 'retry'),
     onReload: reloadConversation,
