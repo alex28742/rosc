@@ -876,8 +876,9 @@ class ArchitectService:
             "provider": {
                 "provider_id": provider_id, "model_id": model_id,
                 "note": "Results of the Tools above that this verified session may call can be sent to the "
-                        "Owner-selected provider/model during active Architect conversations. Nothing is sent when a "
-                        "Project is merely opened or at activation; only allowed Tool results are."},
+                        "Owner-selected provider/model during active Architect conversations. Opening a Project or "
+                        "restarting ROSC sends nothing to the model. Explicit activation of a NEW native Architect "
+                        "session sends one onboarding request; later conversations can carry allowed Tool results."},
             "publication": {"automatic_sync": False, "architect_git_operations": False,
                             "note": "Private Project documents are never published or synced automatically."},
         }

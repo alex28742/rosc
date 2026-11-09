@@ -758,7 +758,7 @@ export function useWorkspaceController({ route, routeKey, go }: Navigation, api:
       if (track.sawInitializing) {
         track.sawInitializing = false;
         pushEngineNotice(engineNotice('onboarding', 'success', 'Architect готов к работе',
-          'Знакомство с проектом завершено: роль и документы прочитаны.'), ENGINE_SUCCESS_DISMISS_MS);
+          'Начальное знакомство подтверждено: сведения о проекте и правила роли получены через ROSC Tools.'), ENGINE_SUCCESS_DISMISS_MS);
       } else dismissEngineNotice('onboarding');
       return;
     }
