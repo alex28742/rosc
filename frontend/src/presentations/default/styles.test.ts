@@ -180,3 +180,48 @@ describe('Engine notice reference parity (P030)', () => {
       rule.header === '.rosc-engine-notice, .rosc-engine-notice__spin' && rule.declarations.includes('animation: none'))).toBe(true);
   });
 });
+
+describe('Project Work Area UX completion parity (P034)', () => {
+  const allRules = sheets.flatMap(sheet => sheet.rules);
+  const collect = (selector: string, rules: Rule[] = allRules): Rule[] => {
+    const found: Rule[] = [];
+    for (const rule of rules) {
+      if (rule.header === selector) found.push(rule);
+      found.push(...collect(selector, rule.rules));
+    }
+    return found;
+  };
+  const anyRule = (selector: string) => collect(selector).some(rule =>
+    rule.declarations.some(declaration => declaration.trim().length > 0));
+
+  it('keeps the disabled primary button dark with a white label instead of washing it out', () => {
+    const disabled = collect('.rosc-app .rosc-btn--primary:disabled');
+    expect(disabled.length).toBeGreaterThan(0);
+    const declarations = disabled.flatMap(rule => rule.declarations);
+    expect(declarations).toContain('color: #fff');
+    expect(declarations).toContain('background: #286b9d');
+    expect(declarations).toContain('opacity: 1');
+  });
+
+  it('fixes the left header/footer and scrolls only the task list', () => {
+    expect(anyRule('.rosc-project-footer')).toBe(true);
+    expect(anyRule('.rosc-task-panel__head')).toBe(true);
+    expect(anyRule('.rosc-task-scroll')).toBe(true);
+    expect(anyRule('.rosc-task-menu')).toBe(true);
+    expect(anyRule('.rosc-project-actions__menu')).toBe(true);
+    expect(anyRule('.rosc-view-menu__sizes')).toBe(true);
+    expect(anyRule('.rosc-app .rosc-chat-tool:disabled')).toBe(true);
+    const hiddenLeft = collect('.rosc-project-left').some(rule => rule.declarations.includes('overflow: hidden'));
+    expect(hiddenLeft).toBe(true);
+    const scroller = collect('.rosc-task-scroll').flatMap(rule => rule.declarations);
+    expect(scroller).toContain('overflow-y: auto');
+  });
+
+  it('scales text only through the scoped custom property', () => {
+    const usesScale = allRules.flatMap(function walk(rule: Rule): string[] {
+      return [...rule.declarations.filter(declaration => declaration.includes('var(--rosc-text-scale')),
+        ...rule.rules.flatMap(walk)];
+    });
+    expect(usesScale.length).toBeGreaterThan(5);
+  });
+});

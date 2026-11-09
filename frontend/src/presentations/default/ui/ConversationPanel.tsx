@@ -183,7 +183,6 @@ export function ConversationPanel({ projectId, conversation, collapsed, onCollap
         <button type="button" className={searchOpen ? 'rosc-chat-icon rosc-chat-icon--on' : 'rosc-chat-icon'}
           aria-label="Поиск по сообщениям" aria-expanded={searchOpen} title="Поиск по Project Conversation"
           onClick={toggleSearch}>⌕</button>
-        <span className={live ? 'rosc-chip rosc-chip--live' : 'rosc-chip'} aria-live="polite">{view.label}</span>
       </div>
     </header>
     {searchOpen && <div className="rosc-conversation__search">
@@ -260,7 +259,13 @@ export function ConversationPanel({ projectId, conversation, collapsed, onCollap
           }
         }} />
       <div className="rosc-conversation__actions">
-        <small>От: Owner · local_unverified</small>
+        <div className="rosc-conversation__recipients">
+          <button type="button" className="rosc-chat-tool" disabled title="Вложения пока недоступны"
+            aria-label="Прикрепить файлы — пока недоступно">📎</button>
+          <button type="button" className="rosc-chat-tool" disabled title="Адресация участников пока недоступна"
+            aria-label="@ Адресаты — пока недоступно">@ Адресаты ▾</button>
+          <small>От: Owner · local_unverified</small>
+        </div>
         <button type="submit" className="rosc-btn rosc-btn--primary"
           disabled={!draft.trim() || !ready || state.sending || locked}>{state.sending ? 'Сохранение…' : 'Отправить'}</button>
       </div>

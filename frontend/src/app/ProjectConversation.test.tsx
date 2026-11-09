@@ -164,7 +164,7 @@ describe('Project Conversation composing', () => {
   it('labels the Architect as inactive and never claims delivery or a reply', async () => {
     render(<App api={stubApi({ listProjects: vi.fn(async () => [P1]) })} />);
     await screen.findByText('Сообщений пока нет.');
-    expect(screen.getByText('Architect: не активирован')).toBeTruthy();
+    expect(screen.getByText('Project Architect · не активирован')).toBeTruthy();
     expect(screen.getByText(/доставки и ответа не будет/)).toBeTruthy();
     expect(screen.getByText('От: Owner · local_unverified')).toBeTruthy();
   });

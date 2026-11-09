@@ -3,6 +3,7 @@ import { coreApi, type CoreApi } from '../core/api';
 import { useNavigation } from './navigation';
 import { resolvePresentation } from './presentation/registry';
 import { useScrollRegions } from './scroll';
+import { useTextScale } from './useTextScale';
 import { useWorkspaceController } from './useWorkspaceController';
 
 const presentation = resolvePresentation();
@@ -23,6 +24,9 @@ export function App({ api = coreApi }: { api?: CoreApi }) {
   }, [layer]);
 
   const projectId = route.kind === 'dashboard' || route.kind === 'settings' ? null : route.projectId;
+  // Independent local text scales: Project and Task never share a value, and Dashboard has no scope.
+  const projectTextScale = useTextScale(projectId ? `project:${projectId}` : null);
+  const taskTextScale = useTextScale(route.kind === 'task' ? `task:${route.taskId}` : null);
   const taskLayerOpen = (route.kind === 'task' || route.kind === 'new-task') && project !== null;
   const modalOpen = core.registrationOpen;
   const workspace = (kind: 'project' | 'task') => ({
@@ -54,6 +58,7 @@ export function App({ api = coreApi }: { api?: CoreApi }) {
       workspace={workspace('project')}
       conversation={core.conversation}
       assignments={core.assignments}
+      textScale={projectTextScale}
       tab={core.projectTab}
       onSelectTab={tab => go({ kind: 'project', projectId, tab: tab === 'settings' ? 'settings' : undefined })}
       onClose={close}
@@ -78,6 +83,7 @@ export function App({ api = coreApi }: { api?: CoreApi }) {
       inert={modalOpen}
       scroll={scroll}
       workspace={workspace('task')}
+      textScale={taskTextScale}
       onClose={close}
       onRetry={() => void actions.retry()}
     />}

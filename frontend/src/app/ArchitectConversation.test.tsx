@@ -22,8 +22,8 @@ describe('Architect activation control', () => {
   it('shows an inactive Architect and starts nothing by opening the Project or sending text', async () => {
     const api = open();
     render(<App api={api} />);
-    expect(await screen.findByText('Architect: не активирован')).toBeTruthy();
-    expect(screen.getByText('Project Architect · не активирован')).toBeTruthy();
+    expect(await screen.findByText('Project Architect · не активирован')).toBeTruthy();
+    expect(screen.queryByText('Architect: не активирован')).toBeNull();
     expect(screen.queryByText('Агенты не запущены')).toBeNull();
     expect(api.getArchitect).toHaveBeenCalledWith('P0001');
     const box = within(panel()).getByLabelText('Сообщение в Project Conversation');
@@ -39,11 +39,10 @@ describe('Architect activation control', () => {
     const api = open({ activateArchitect: vi.fn(() => pending.promise) });
     render(<App api={api} />);
     fireEvent.click(await screen.findByText('Активировать Architect'));
-    expect(await screen.findByText('Architect: запускается…')).toBeTruthy();
+    expect(await screen.findByText('Project Architect · запускается')).toBeTruthy();
     expect(screen.queryByText('Активировать Architect')).toBeNull();
     pending.resolve(architectStatus({ state: 'ready', can_activate: false, can_deactivate: true }));
-    expect(await screen.findByText('Architect: активен (проверен)')).toBeTruthy();
-    expect(screen.getByText('Project Architect · активен (проверен)')).toBeTruthy();
+    expect(await screen.findByText('Project Architect · активен (проверен)')).toBeTruthy();
     expect(screen.getByText('активен (проверен)')).toBeTruthy();
     expect(api.activateArchitect).toHaveBeenCalledTimes(1);
     expect(screen.getByText('Остановить Architect')).toBeTruthy();
@@ -54,7 +53,7 @@ describe('Architect activation control', () => {
     const api = open({ getArchitect: vi.fn(async () => architectStatus({
       state: 'not_configured', detail: 'runtime_credential_missing', can_activate: false })) });
     render(<App api={api} />);
-    expect(await screen.findByText('Architect: не настроен')).toBeTruthy();
+    expect(await screen.findByText('Project Architect · не настроен')).toBeTruthy();
     expect(screen.getByText(/ROSC создаёт его при активации/)).toBeTruthy();
     expect(screen.queryByText(/OPENCODE_PASSWORD/)).toBeNull();
     expect(screen.queryByText('Активировать Architect')).toBeNull();
@@ -66,11 +65,10 @@ describe('Architect activation control', () => {
       .mockResolvedValueOnce(architectStatus({ state: 'ready', can_activate: false, can_deactivate: true }));
     render(<App api={open({ activateArchitect })} />);
     fireEvent.click(await screen.findByText('Активировать Architect'));
-    expect(await screen.findByText('Architect: ошибка')).toBeTruthy();
-    expect(screen.getByText('Project Architect · требует внимания')).toBeTruthy();
+    expect(await screen.findByText('Project Architect · требует внимания')).toBeTruthy();
     expect(screen.getByText('Runtime не запустился вовремя.')).toBeTruthy();
     fireEvent.click(screen.getByText('Повторить активацию Architect'));
-    expect(await screen.findByText('Architect: активен (проверен)')).toBeTruthy();
+    expect(await screen.findByText('Project Architect · активен (проверен)')).toBeTruthy();
   });
 
   it('renders an unresolved lifecycle as blocked and offers only explicit stop', async () => {
@@ -78,7 +76,7 @@ describe('Architect activation control', () => {
       state: 'error', detail: 'stop_unconfirmed', can_activate: false, can_deactivate: true,
     })) });
     render(<App api={api} />);
-    expect(await screen.findByText('Architect: ошибка')).toBeTruthy();
+    expect(await screen.findByText('Project Architect · требует внимания')).toBeTruthy();
     expect(screen.getByText(/runtime не подтверждена/)).toBeTruthy();
     expect(screen.queryByText('Повторить активацию Architect')).toBeNull();
     expect(screen.getByText('Остановить Architect')).toBeTruthy();
@@ -90,7 +88,7 @@ describe('Architect activation control', () => {
     render(<App api={open({ activateArchitect })} />);
     fireEvent.click(await screen.findByText('Активировать Architect'));
     expect(await screen.findByText(/Не удалось связаться с ядром ROSC/)).toBeTruthy();
-    expect(screen.getByText('Architect: не активирован')).toBeTruthy();
+    expect(screen.getByText('Project Architect · не активирован')).toBeTruthy();
   });
 
   it('keeps the Architect state per Project when switching', async () => {
@@ -98,11 +96,11 @@ describe('Architect activation control', () => {
       ? architectStatus({ state: 'ready', can_activate: false, can_deactivate: true })
       : architectStatus({ project_id: 'P0002', state: 'not_configured', detail: 'no_active_architect_assignment', can_activate: false }));
     render(<App api={open({ getArchitect })} />);
-    expect(await screen.findByText('Architect: активен (проверен)')).toBeTruthy();
+    expect(await screen.findByText('Project Architect · активен (проверен)')).toBeTruthy();
     at('/projects/P0002');
     window.dispatchEvent(new PopStateEvent('popstate'));
-    expect(await screen.findByText('Architect: не настроен')).toBeTruthy();
-    expect(screen.queryByText('Architect: активен (проверен)')).toBeNull();
+    expect(await screen.findByText('Project Architect · не настроен')).toBeTruthy();
+    expect(screen.queryByText('Project Architect · активен (проверен)')).toBeNull();
   });
 });
 
@@ -112,7 +110,7 @@ describe('Project "Агенты проекта" card', () => {
   it('keeps Architect lifecycle controls in the card, not in the conversation panel', async () => {
     const api = open();
     render(<App api={api} />);
-    await screen.findByText('Architect: не активирован');
+    await screen.findByText('Project Architect · не активирован');
     const view = card();
     expect(within(view).getByText('Активировать Architect')).toBeTruthy();
     expect(within(panel()).queryByText('Активировать Architect')).toBeNull();

@@ -62,6 +62,16 @@ export function capabilityPreset(capabilities: readonly string[]): CapabilityPre
 
 export type ProjectTab = 'tasks' | 'settings';
 
+/** The five approved `Aa · Вид` steps. It is local UI state, never Core data. */
+export const TEXT_SCALE_STEPS = [90, 100, 110, 120, 130] as const;
+export type TextScale = (typeof TEXT_SCALE_STEPS)[number];
+
+/** App-owned per-Work-Area text scale; the presentation only renders and reports a chosen step. */
+export type TextScaleControls = {
+  scale: TextScale;
+  onChange: (scale: TextScale) => void;
+};
+
 /** Explicit Owner intent for one Project save; the controller computes the minimal delta against fresh Core records. */
 export type AssignmentIntent = {
   architectAgentId: string | null;
@@ -232,6 +242,8 @@ export type ProjectViewProps = {
   workspace: WorkspaceControls;
   conversation: ConversationControls;
   assignments: ProjectAssignmentsControls;
+  /** Independent left Work Area text scale; never shared with Task or Dashboard. */
+  textScale: TextScaleControls;
   tab: ProjectTab;
   onSelectTab: (tab: ProjectTab) => void;
   onClose: () => void;
@@ -248,6 +260,8 @@ export type TaskViewProps = {  projectName: string;
   inert: boolean;
   scroll: ScrollRegions;
   workspace: WorkspaceControls;
+  /** Independent Task Work Area text scale; never shared with Project or Dashboard. */
+  textScale: TextScaleControls;
   onClose: () => void;
   onRetry: () => void;
 };

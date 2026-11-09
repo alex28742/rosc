@@ -15,6 +15,7 @@ import { Shell } from './Shell';
 const feedback = { error: '', notice: '' };
 const scroll = { region: () => () => {} };
 const workspace = { busy: false, onReconcile: vi.fn(), onRepair: vi.fn() };
+const textScale = { scale: 100 as const, onChange: vi.fn() };
 const conversation = () => ({
   state: { status: 'ready' as const, conversationId: null, messages: [], hasMore: false, nextBefore: null,
     error: '', sending: false, olderLoading: false },
@@ -72,7 +73,7 @@ describe('Dashboard presentation', () => {
 describe('Work area presentation', () => {
   const projectProps = {
     projectId: 'P0001', project: P1, projectStatus: 'ready' as const, tasks: [T1], tasksStatus: 'ready' as const,
-    feedback, inert: false, scroll, workspace, conversation: conversation(), assignments: assignments(),
+    feedback, inert: false, scroll, workspace, conversation: conversation(), assignments: assignments(), textScale,
     tab: 'tasks' as const, onSelectTab: vi.fn(), onClose: vi.fn(), onRetry: vi.fn(), onOpenTask: vi.fn(), onNewTask: vi.fn(),
   };
 
@@ -82,7 +83,7 @@ describe('Work area presentation', () => {
     expect(within(drawer).getByLabelText('Закрыть проект')).toBeTruthy();
     expect(within(drawer).getByText('Tasks (1)')).toBeTruthy();
     expect(within(drawer).getByText('T0001 · Срез работ')).toBeTruthy();
-    expect(within(drawer).getByText('Draft')).toBeTruthy();
+    expect(within(drawer).getByText('Draft', { selector: '.rosc-tag' })).toBeTruthy();
   });
 
   it('shows the Project description, path and workspace facts from the view model', () => {
@@ -106,7 +107,7 @@ describe('Work area presentation', () => {
   });
 
   it('renders a nested Task layer that reads the Task without offering a Run', () => {
-    render(<TaskView projectName="ROSC Platform" taskId="T0001" task={T1} tasksStatus="ready" feedback={feedback} inert={false} scroll={scroll} workspace={workspace} onClose={vi.fn()} onRetry={vi.fn()} />);
+    render(<TaskView projectName="ROSC Platform" taskId="T0001" task={T1} tasksStatus="ready" feedback={feedback} inert={false} scroll={scroll} workspace={workspace} textScale={textScale} onClose={vi.fn()} onRetry={vi.fn()} />);
     const drawer = screen.getByLabelText('Task Work Area');
     expect(within(drawer).getByLabelText('Закрыть задачу')).toBeTruthy();
     expect(within(drawer).getByText('Спецификация задачи · Draft')).toBeTruthy();
@@ -131,7 +132,7 @@ describe('Work area presentation', () => {
 describe('Workspace presentation', () => {
   const baseProject = {
     projectId: 'P0001', projectStatus: 'ready' as const, tasks: [], tasksStatus: 'ready' as const,
-    feedback, inert: false, scroll, conversation: conversation(), assignments: assignments(),
+    feedback, inert: false, scroll, conversation: conversation(), assignments: assignments(), textScale,
     tab: 'tasks' as const, onSelectTab: vi.fn(), onClose: vi.fn(), onRetry: vi.fn(), onOpenTask: vi.fn(), onNewTask: vi.fn(),
   };
   const controls = () => ({ busy: false, onReconcile: vi.fn(), onRepair: vi.fn() });
@@ -144,7 +145,7 @@ describe('Workspace presentation', () => {
     expect(screen.getByText('Манифест Workspace соответствует записи в базе.')).toBeTruthy();
     unmount();
 
-    render(<TaskView projectName="ROSC Platform" taskId="T0001" task={task('T0001', 'P0001')} tasksStatus="ready" feedback={feedback} inert={false} scroll={scroll} workspace={workspace} onClose={vi.fn()} onRetry={vi.fn()} />);
+    render(<TaskView projectName="ROSC Platform" taskId="T0001" task={task('T0001', 'P0001')} tasksStatus="ready" feedback={feedback} inert={false} scroll={scroll} workspace={workspace} textScale={textScale} onClose={vi.fn()} onRetry={vi.fn()} />);
     expect(screen.queryByRole('button', { name: 'Проверить Workspace' })).toBeNull();
     expect(screen.queryByRole('button', { name: 'Восстановить манифест' })).toBeNull();
     expect(workspace.onReconcile).not.toHaveBeenCalled();
@@ -263,7 +264,7 @@ describe('Project assignment presentation', () => {
   it('keeps the Project Conversation mounted while the left Settings tab is selected', () => {
     const props = {
       projectId: 'P0001', project: P1, projectStatus: 'ready' as const, tasks: [T1], tasksStatus: 'ready' as const,
-      feedback, inert: false, scroll, workspace, conversation: conversation(), assignments: assignments(),
+      feedback, inert: false, scroll, workspace, conversation: conversation(), assignments: assignments(), textScale,
       tab: 'settings' as const, onSelectTab: vi.fn(), onClose: vi.fn(), onRetry: vi.fn(), onOpenTask: vi.fn(), onNewTask: vi.fn(),
     };
     render(<ProjectView {...props} />);
@@ -287,6 +288,7 @@ describe('Project assignment presentation', () => {
         },
         onRetry: vi.fn(), onSave: vi.fn(async () => null), onOpenRegistry: vi.fn(),
       },
+      textScale,
       tab: 'settings' as const, onSelectTab: vi.fn(), onClose: vi.fn(), onRetry: vi.fn(), onOpenTask: vi.fn(), onNewTask: vi.fn(),
     };
     render(<ProjectView {...props} />);

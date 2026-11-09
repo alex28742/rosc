@@ -1,9 +1,12 @@
 import type { TaskViewProps } from '../../../app/presentation/contracts';
 import { Drawer } from '../ui/Drawer';
 import { Feedback } from '../ui/Feedback';
+import { TextViewControl } from '../ui/TextViewControl';
 import { WorkspaceActions } from '../ui/WorkspaceActions';
+import { useApplyTextScale } from '../ui/useApplyTextScale';
 
-export function TaskView({ projectName, taskId, task, tasksStatus, feedback, inert, scroll, workspace, onClose, onRetry }: TaskViewProps) {
+export function TaskView({ projectName, taskId, task, tasksStatus, feedback, inert, scroll, workspace, textScale, onClose, onRetry }: TaskViewProps) {
+  const scaleRef = useApplyTextScale(textScale.scale);
   const head = <>
     <div className="rosc-drawer__heading">
       <p className="rosc-drawer-eyebrow">TASK / WORK AREA</p>
@@ -13,9 +16,11 @@ export function TaskView({ projectName, taskId, task, tasksStatus, feedback, ine
     <div className="rosc-drawer__controls">
       {task && <span className="rosc-tag rosc-tag--info">{task.status}</span>}
       <span className="rosc-chip">Агенты не запущены</span>
+      <TextViewControl scopeLabel="Task Work Area" scale={textScale.scale} onChange={textScale.onChange} />
     </div>
   </>;
-  return <Drawer variant="task" label="Task Work Area" closeLabel="Закрыть задачу" inert={inert} onClose={onClose} head={head} bodyRef={scroll.region(`task:${taskId}`)}>
+  return <Drawer variant="task" label="Task Work Area" closeLabel="Закрыть задачу" inert={inert} onClose={onClose}
+    head={head} bodyRef={scroll.region(`task:${taskId}`)} rootRef={scaleRef}>
     <Feedback {...feedback} />
     {!task && (tasksStatus === 'loading'
       ? <div className="rosc-state rosc-state--loading"><span className="rosc-spinner" aria-hidden="true" />Загрузка…</div>
