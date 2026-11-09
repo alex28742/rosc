@@ -24,3 +24,5 @@ export const FolderIcon = (props: IconProps) => <Frame {...props}><path d="M3 7a
 export const AlertIcon = (props: IconProps) => <Frame {...props}><circle cx="12" cy="12" r="9" /><path d="M12 7v6M12 16.5v.5" /></Frame>;
 
 export const CheckIcon = (props: IconProps) => <Frame {...props}><path d="M5 12.5l4.5 4.5L19 7" /></Frame>;
+
+export const PaperclipIcon = (props: IconProps) => <Frame {...props}><path d="M20.5 11.5l-7.6 7.6a5 5 0 0 1-7.1-7.1l8.2-8.2a3.3 3.3 0 0 1 4.7 4.7l-8.2 8.2a1.7 1.7 0 0 1-2.4-2.4l7.6-7.6" /></Frame>;

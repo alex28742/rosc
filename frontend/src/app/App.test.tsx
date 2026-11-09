@@ -218,9 +218,9 @@ describe('Project registration', () => {
 
 describe('Task Draft creation', () => {
   const fillTask = () => {
-    fireEvent.change(screen.getByLabelText('Название'), { target: { value: 'Write docs' } });
-    fireEvent.change(screen.getByLabelText('Описание и контекст'), { target: { value: 'Context' } });
-    fireEvent.change(screen.getByLabelText('Критерии приёмки'), { target: { value: 'Reviewed' } });
+    fireEvent.change(screen.getByLabelText('Название задачи *'), { target: { value: 'Write docs' } });
+    fireEvent.change(screen.getByLabelText('Описание и контекст *'), { target: { value: 'Context' } });
+    fireEvent.change(screen.getByLabelText('Критерии приёмки *'), { target: { value: 'Reviewed' } });
   };
 
   it('shows a failure in the Task layer, keeps the form, and only the project layer stays clean', async () => {
@@ -235,7 +235,7 @@ describe('Task Draft creation', () => {
     fireEvent.submit(screen.getByLabelText('Новая Task').querySelector('form')!);
     const drawer = screen.getByLabelText('Новая Task');
     await waitFor(() => expect(within(drawer).getByRole('alert').textContent).toBe('Project Workspace requires reconciliation'));
-    expect((screen.getByLabelText('Название') as HTMLInputElement).value).toBe('Write docs');
+    expect((screen.getByLabelText('Название задачи *') as HTMLInputElement).value).toBe('Write docs');
     expect(within(screen.getByLabelText('Project Work Area')).queryByRole('alert')).toBeNull();
 
     fireEvent.submit(drawer.querySelector('form')!);

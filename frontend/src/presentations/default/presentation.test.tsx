@@ -121,9 +121,9 @@ describe('Work area presentation', () => {
     const onSubmit = vi.fn();
     render(<NewTaskView projectName="ROSC Platform" feedback={feedback} busy={false} inert={false} onSubmit={onSubmit} onClose={vi.fn()} />);
     const drawer = screen.getByLabelText('Новая Task');
-    fireEvent.change(within(drawer).getByLabelText('Название'), { target: { value: 'New task' } });
-    fireEvent.change(within(drawer).getByLabelText('Описание и контекст'), { target: { value: 'Context' } });
-    fireEvent.change(within(drawer).getByLabelText('Критерии приёмки'), { target: { value: 'Reviewed' } });
+    fireEvent.change(within(drawer).getByLabelText('Название задачи *'), { target: { value: 'New task' } });
+    fireEvent.change(within(drawer).getByLabelText('Описание и контекст *'), { target: { value: 'Context' } });
+    fireEvent.change(within(drawer).getByLabelText('Критерии приёмки *'), { target: { value: 'Reviewed' } });
     fireEvent.submit(drawer.querySelector('form')!);
     expect(onSubmit).toHaveBeenCalledWith({ title: 'New task', description: 'Context', acceptance_criteria: 'Reviewed' });
   });

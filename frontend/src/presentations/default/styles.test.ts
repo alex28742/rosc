@@ -225,3 +225,33 @@ describe('Project Work Area UX completion parity (P034)', () => {
     expect(usesScale.length).toBeGreaterThan(5);
   });
 });
+
+describe('New Task Draft panel geometry (P035)', () => {
+  const allRules = sheets.flatMap(sheet => sheet.rules);
+  const collect = (selector: string, rules: Rule[] = allRules): Rule[] => {
+    const found: Rule[] = [];
+    for (const rule of rules) {
+      if (rule.header === selector) found.push(rule);
+      found.push(...collect(selector, rule.rules));
+    }
+    return found;
+  };
+
+  it('left-aligns a wide form scoped to the New Task view only', () => {
+    const form = collect('.rosc-form.rosc-new-task').flatMap(rule => rule.declarations);
+    expect(form).toContain('width: 100%');
+    expect(form).toContain('max-width: 880px');
+    expect(form).toContain('margin: 0');
+    expect(collect('.rosc-new-task .rosc-field > label').length).toBeGreaterThan(0);
+  });
+
+  it('keeps the two-button footer, the informational notice and the Draft chip', () => {
+    expect(collect('.rosc-new-task__footer').flatMap(rule => rule.declarations)).toContain('justify-content: space-between');
+    expect(collect('.rosc-new-task__footer').flatMap(rule => rule.declarations)).toContain('width: 100%');
+    expect(collect('.rosc-new-task__note').length).toBeGreaterThan(0);
+    expect(collect('.rosc-new-task__hint').length).toBeGreaterThan(0);
+    const narrow = collect('@media (max-width: 850px)');
+    expect(narrow.some(rule => rule.rules.some(nested => nested.header === '.rosc-chip.rosc-new-task__draft-chip'
+      && nested.declarations.includes('display: inline-flex')))).toBe(true);
+  });
+});
