@@ -28,7 +28,7 @@ export function NewTaskView({ projectName, feedback, busy, inert, onSubmit, onCl
       {busy ? 'Создание Task Draft…' : 'Создать Task Draft'}
     </button>
   </div>;
-  return <Drawer variant="task" label="Новая Task" closeLabel="Закрыть новую задачу" inert={inert} onClose={onClose} head={head} onSubmit={submit} footer={footer}>
+  return <Drawer variant="new-task" label="Новая Task" closeLabel="Закрыть новую задачу" inert={inert} onClose={onClose} head={head} onSubmit={submit} footer={footer}>
     <div className="rosc-form rosc-new-task">
       <div className="rosc-new-task__intro">
         <h3>Постановка новой задачи</h3>

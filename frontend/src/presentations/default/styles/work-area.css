@@ -43,6 +43,13 @@
   z-index: var(--rosc-layer-drawer-nested);
 }
 
+/* P036: New Task is a narrow nested layer over the Project Work Area, not a second full Task Work Area.
+   The doubled class keeps the reference width above the generic media-query offsets. */
+.rosc-drawer.rosc-drawer--new-task {
+  left: max(46%, calc(100vw - 760px));
+  z-index: var(--rosc-layer-drawer-nested);
+}
+
 @keyframes rosc-slide-in {
   from { transform: translateX(2.5%); opacity: 0.4; }
   to { transform: translateX(0); opacity: 1; }
@@ -68,7 +75,8 @@
   filter: brightness(1.08);
 }
 
-.rosc-drawer--task .rosc-edge-close {
+.rosc-drawer--task .rosc-edge-close,
+.rosc-drawer--new-task .rosc-edge-close {
   top: 137px;
   background: #203b52;
 }
@@ -89,7 +97,8 @@
   opacity: 0.92;
 }
 
-.rosc-drawer--task .rosc-edge-caption {
+.rosc-drawer--task .rosc-edge-caption,
+.rosc-drawer--new-task .rosc-edge-caption {
   top: 185px;
   background: #334e64;
 }
@@ -1005,7 +1014,8 @@
   }
 
   .rosc-edge-close,
-  .rosc-drawer--task .rosc-edge-close {
+  .rosc-drawer--task .rosc-edge-close,
+  .rosc-drawer--new-task .rosc-edge-close {
     top: 10px;
     right: 10px;
     left: auto;
@@ -2078,14 +2088,18 @@
 }
 
 /*
- * P035 New Task Draft panel.
+ * P035 New Task Draft panel, corrected by P036 to the approved narrow geometry.
  * Scoped to the New Task form only: the shared Drawer, Project/Task work areas and
  * the generic `.rosc-form` used elsewhere keep their current geometry.
  */
+.rosc-drawer--new-task .rosc-drawer__scroll {
+  padding: 24px;
+}
+
 .rosc-form.rosc-new-task {
   width: 100%;
-  max-width: 880px;
-  margin: 0;
+  max-width: 670px;
+  margin: 0 auto;
 }
 
 .rosc-new-task__intro h3 {
@@ -2106,7 +2120,7 @@
 .rosc-new-task__field {
   display: flex;
   flex-direction: column;
-  gap: 8px;
+  gap: 12px;
 }
 
 .rosc-new-task .rosc-field > label {
@@ -2143,19 +2157,33 @@
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 12px;
+  gap: 10px;
   width: 100%;
-  max-width: 880px;
 }
 
 .rosc-new-task__footer .rosc-btn {
   flex: 1 1 0;
-  min-height: 42px;
+  min-height: 39px;
+}
+
+/* P036: the close crosses stay white on the dark Project/Task/New Task edge buttons. */
+.rosc-app .rosc-edge-close,
+.rosc-app .rosc-edge-close:hover,
+.rosc-app .rosc-edge-close:focus,
+.rosc-app .rosc-edge-close:active {
+  color: #fff;
 }
 
 @media (max-width: 850px) {
   /* The New Task header keeps its Draft status chip on narrow screens. */
   .rosc-chip.rosc-new-task__draft-chip {
     display: inline-flex;
+  }
+}
+
+@media (max-width: 700px) {
+  /* Approved reference keeps a visible Project strip instead of a full-width mobile layer. */
+  .rosc-drawer.rosc-drawer--new-task {
+    left: 45px;
   }
 }

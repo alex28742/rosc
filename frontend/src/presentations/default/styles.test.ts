@@ -237,11 +237,11 @@ describe('New Task Draft panel geometry (P035)', () => {
     return found;
   };
 
-  it('left-aligns a wide form scoped to the New Task view only', () => {
+  it('centres the approved 670px form inside the narrow panel only', () => {
     const form = collect('.rosc-form.rosc-new-task').flatMap(rule => rule.declarations);
     expect(form).toContain('width: 100%');
-    expect(form).toContain('max-width: 880px');
-    expect(form).toContain('margin: 0');
+    expect(form).toContain('max-width: 670px');
+    expect(form).toContain('margin: 0 auto');
     expect(collect('.rosc-new-task .rosc-field > label').length).toBeGreaterThan(0);
   });
 
@@ -253,5 +253,58 @@ describe('New Task Draft panel geometry (P035)', () => {
     const narrow = collect('@media (max-width: 850px)');
     expect(narrow.some(rule => rule.rules.some(nested => nested.header === '.rosc-chip.rosc-new-task__draft-chip'
       && nested.declarations.includes('display: inline-flex')))).toBe(true);
+  });
+});
+
+describe('New Task narrow drawer geometry (P036)', () => {
+  const allRules = sheets.flatMap(sheet => sheet.rules);
+  const collect = (selector: string, rules: Rule[] = allRules): Rule[] => {
+    const found: Rule[] = [];
+    for (const rule of rules) {
+      if (rule.header === selector) found.push(rule);
+      found.push(...collect(selector, rule.rules));
+    }
+    return found;
+  };
+  const declarations = (selector: string): string[] => {
+    const walk = (rules: Rule[]): string[] => rules.flatMap(rule => [
+      ...(rule.header.split(',').map(part => part.trim()).includes(selector) ? rule.declarations : []),
+      ...walk(rule.rules),
+    ]);
+    return walk(allRules);
+  };
+
+  it('takes the approved narrow left edge from the reference without changing the ordinary Task drawer', () => {
+    expect(declarations('.rosc-drawer.rosc-drawer--new-task')).toContain('left: max(46%, calc(100vw - 760px))');
+    expect(declarations('.rosc-drawer.rosc-drawer--new-task')).toContain('z-index: var(--rosc-layer-drawer-nested)');
+    expect(declarations('.rosc-drawer--task')).toContain('left: var(--rosc-nested-offset)');
+    expect(declarations('.rosc-drawer--task')).not.toContain('left: max(46%, calc(100vw - 760px))');
+  });
+
+  it('keeps the reference content padding, attachment gap and footer proportions scoped', () => {
+    expect(declarations('.rosc-drawer--new-task .rosc-drawer__scroll')).toContain('padding: 24px');
+    expect(declarations('.rosc-new-task__field')).toContain('gap: 12px');
+    expect(declarations('.rosc-new-task__footer')).toContain('gap: 10px');
+    expect(declarations('.rosc-new-task__footer')).not.toContain('max-width: 880px');
+    expect(declarations('.rosc-new-task__footer .rosc-btn')).toContain('flex: 1 1 0');
+    expect(declarations('.rosc-new-task__footer .rosc-btn')).toContain('min-height: 39px');
+  });
+
+  it('shares the Task edge controls and forces white close crosses by scoped specificity', () => {
+    const dark = declarations('.rosc-drawer--new-task .rosc-edge-close');
+    expect(dark).toContain('background: #203b52');
+    const caption = declarations('.rosc-drawer--new-task .rosc-edge-caption');
+    expect(caption).toContain('background: #334e64');
+    const close = declarations('.rosc-app .rosc-edge-close');
+    expect(close).toContain('color: #fff');
+    for (const state of [':hover', ':focus', ':active']) {
+      expect(declarations(`.rosc-app .rosc-edge-close${state}`)).toContain('color: #fff');
+    }
+  });
+
+  it('keeps the reference Project strip below the 700px breakpoint', () => {
+    const narrow = collect('@media (max-width: 700px)');
+    expect(narrow.some(rule => rule.rules.some(nested => nested.header === '.rosc-drawer.rosc-drawer--new-task'
+      && nested.declarations.includes('left: 45px')))).toBe(true);
   });
 });
