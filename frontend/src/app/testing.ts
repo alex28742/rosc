@@ -82,6 +82,10 @@ export function stubApi(over: Partial<{ [K in keyof CoreApi]: ReturnType<typeof 
     reconcileTask: vi.fn(async () => task('T0001', 'P0001')),
     repairTask: vi.fn(async () => ({ ...task('T0001', 'P0001'), repair: null })),
     getConversation: vi.fn(async () => conversationPage()),
+    getTaskConversation: vi.fn(async () => conversationPage({ task_id: 'T0001' })),
+    sendTaskConversationMessage: vi.fn(async (_projectId: string, _taskId: string, input: ConversationMessageInput) => ({
+      message: conversationMessage(input.body, { recipient: input.recipient ?? null }), replayed: false,
+    })),
     listAgents: vi.fn(async () => [] as AgentDefinition[]),
     getAgent: vi.fn(async () => agentDefinition()),
     registerAgent: vi.fn(async () => agentDefinition('agent-2')),

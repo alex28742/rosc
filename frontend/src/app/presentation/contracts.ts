@@ -1,7 +1,7 @@
 // The only surface a presentation package sees. Presentations render these typed view models and call these
 // callbacks; they never reach the API client, the router or Core persistence.
 import type { ComponentType, ReactNode } from 'react';
-import type { AgentDefinition, AgentFormValues, ArchitectStatus, ContextAccess, ConversationMessage, Project, ProjectFormValues, RepairConfirmation, RoleAssignment, Task, TaskFormValues } from '../../core/models';
+import type { AgentDefinition, AgentFormValues, ArchitectStatus, ContextAccess, ConversationMessage, MessageRecipient, Project, ProjectFormValues, RepairConfirmation, RoleAssignment, Task, TaskFormValues } from '../../core/models';
 import type { ScrollRegions } from '../scroll';
 
 export type LoadStatus = 'loading' | 'ready' | 'failed';
@@ -252,7 +252,17 @@ export type ProjectViewProps = {
   onNewTask: () => void;
 };
 
-export type TaskViewProps = {  projectName: string;
+/** Task Conversation (P038): same state shape as the Project one, scoped to a single Task. */
+export type TaskConversationControls = {
+  state: ConversationState;
+  onReload: () => void;
+  onLoadOlder: () => void;
+  /** Resolves to `null` once the message is stored, otherwise to an error message. */
+  onSend: (body: string, clientKey: string, recipient: MessageRecipient) => Promise<string | null>;
+};
+
+export type TaskViewProps = {
+  projectName: string;
   taskId: string;
   task: Task | null;
   tasksStatus: LoadStatus;
@@ -260,6 +270,7 @@ export type TaskViewProps = {  projectName: string;
   inert: boolean;
   scroll: ScrollRegions;
   workspace: WorkspaceControls;
+  conversation: TaskConversationControls;
   /** Independent Task Work Area text scale; never shared with Project or Dashboard. */
   textScale: TextScaleControls;
   onClose: () => void;

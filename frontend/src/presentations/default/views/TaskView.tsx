@@ -2,10 +2,11 @@ import type { TaskViewProps } from '../../../app/presentation/contracts';
 import { Drawer } from '../ui/Drawer';
 import { Feedback } from '../ui/Feedback';
 import { TextViewControl } from '../ui/TextViewControl';
+import { TaskConversationPanel } from '../ui/TaskConversationPanel';
 import { WorkspaceActions } from '../ui/WorkspaceActions';
 import { useApplyTextScale } from '../ui/useApplyTextScale';
 
-export function TaskView({ projectName, taskId, task, tasksStatus, feedback, inert, scroll, workspace, textScale, onClose, onRetry }: TaskViewProps) {
+export function TaskView({ projectName, taskId, task, tasksStatus, feedback, inert, scroll, workspace, conversation, textScale, onClose, onRetry }: TaskViewProps) {
   const scaleRef = useApplyTextScale(textScale.scale);
   const head = <>
     <div className="rosc-drawer__heading">
@@ -45,5 +46,6 @@ export function TaskView({ projectName, taskId, task, tasksStatus, feedback, ine
         <p className="rosc-hint">Подготовка Prompt и разрешение Run появятся в следующих срезах.</p>
       </section>
     </div>}
+    {task && <TaskConversationPanel key={`${task.project_id}/${task.id}`} taskId={task.id} conversation={conversation} />}
   </Drawer>;
 }

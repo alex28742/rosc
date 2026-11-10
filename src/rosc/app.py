@@ -9,6 +9,7 @@ import uuid
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Literal
 
 from fastapi import FastAPI, HTTPException, Request, Response
 from fastapi.exception_handlers import request_validation_exception_handler
@@ -217,7 +218,13 @@ class ConversationMessageInput(BaseModel):
     body: str = Field(min_length=1, max_length=4000)
 
 
-CONVERSATION_PATH = re.compile(r"^/api/projects/[^/]+/(conversation(/messages(/[^/]+/(reconcile|retry))?)?|architect/(activate|deactivate)|architect(/context-access)?)$")
+class TaskConversationMessageInput(ConversationMessageInput):
+    """P038: adds the explicit addressee. It is stored intent only; nothing is delivered from a Task Conversation."""
+
+    recipient: Literal["architect"] | None = None
+
+
+CONVERSATION_PATH = re.compile(r"^/api/projects/[^/]+/(tasks/[^/]+/conversation(/messages)?|conversation(/messages(/[^/]+/(reconcile|retry))?)?|architect/(activate|deactivate)|architect(/context-access)?)$")
 DEFAULT_GLOBAL_LIBRARY = global_library_dir()  # <checkout>/global (Git-tracked); None for a non-editable install
 
 
@@ -674,6 +681,24 @@ def create_app(db_path: Path | None = None, workspace_root: Path | None = None, 
     @app.get("/api/projects/{project_id}/architect")
     def architect_status(project_id: str) -> dict:
         return conversation_call(architect.status, current_actor(), numeric_id(project_id, "P"))
+
+    @app.get("/api/projects/{project_id}/tasks/{task_id}/conversation")
+    def read_task_conversation(project_id: str, task_id: str, before: int | None = None,
+                               limit: int = DEFAULT_PAGE_SIZE) -> dict:
+        pid, tid = numeric_id(project_id, "P"), numeric_id(task_id, "T")
+        return conversation_call(conversation.read_conversation, current_actor(), pid, before=before, limit=limit,
+                                 task_id=tid)
+
+    @app.post("/api/projects/{project_id}/tasks/{task_id}/conversation/messages", status_code=201)
+    def create_task_conversation_message(project_id: str, task_id: str, data: TaskConversationMessageInput,
+                                         response: Response) -> dict:
+        pid, tid = numeric_id(project_id, "P"), numeric_id(task_id, "T")
+        # Stored only: no Architect submit, OpenCode call or queue. The sender is the trusted local Owner context.
+        result = conversation_call(conversation.create_message, current_actor(), pid, client_key=data.client_key,
+                                   body=data.body, task_id=tid, recipient=data.recipient)
+        if result["replayed"]:
+            response.status_code = 200
+        return result
 
     @app.post("/api/projects/{project_id}/architect/activate")
     def architect_activate(project_id: str) -> dict:

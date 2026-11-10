@@ -109,8 +109,8 @@ _SHAPES: dict[str, tuple[frozenset[str], frozenset[str]]] = {
     RUN_EVIDENCE_REGISTER: (frozenset({"project_id", "run_id"}), frozenset()),
     # agent_id is the *target* of the Owner-curated correspondence; it never selects the actor.
     RUN_LINK_AGENT: (frozenset({"project_id", "run_id", "agent_id"}), frozenset()),
-    CONVERSATION_READ: (frozenset({"project_id"}), frozenset()),
-    CONVERSATION_MESSAGE_CREATE: (frozenset({"project_id"}), frozenset()),
+    CONVERSATION_READ: (frozenset({"project_id"}), frozenset({"task_id"})),
+    CONVERSATION_MESSAGE_CREATE: (frozenset({"project_id"}), frozenset({"task_id"})),
     ARCHITECT_STATUS: (frozenset({"project_id"}), frozenset()),
     ARCHITECT_ACTIVATE: (frozenset({"project_id"}), frozenset()),
     ARCHITECT_DEACTIVATE: (frozenset({"project_id"}), frozenset()),

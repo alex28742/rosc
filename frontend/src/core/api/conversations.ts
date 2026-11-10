@@ -9,6 +9,14 @@ export const getConversation = (projectId: string, before?: number) =>
 export const sendConversationMessage = (projectId: string, input: ConversationMessageInput) =>
   post<ConversationMessageResult>(`/projects/${projectId}/conversation/messages`, input);
 
+/** P038: one Task's own durable conversation. Reading never creates a conversation or starts an agent. */
+export const getTaskConversation = (projectId: string, taskId: string, before?: number) =>
+  request<ConversationPage>(`/projects/${projectId}/tasks/${taskId}/conversation${before === undefined ? '' : `?before=${before}`}`);
+
+/** Stores one Owner message in the Task Conversation; `recipient` is saved intent and nothing is delivered. */
+export const sendTaskConversationMessage = (projectId: string, taskId: string, input: ConversationMessageInput) =>
+  post<ConversationMessageResult>(`/projects/${projectId}/tasks/${taskId}/conversation/messages`, input);
+
 /** Read-only: Core probes liveness but never starts anything. */
 export const getArchitect = (projectId: string) => request<ArchitectStatus>(`/projects/${projectId}/architect`);
 

@@ -423,6 +423,7 @@ class EvidenceRecord(Base):
 # this slice; ``architect``/``worker`` are reserved logical identities that no P014 code path creates.
 CONVERSATION_KIND_PROJECT = "project"
 CONVERSATION_KIND_TASK = "task"
+RECIPIENT_ARCHITECT = "architect"  # P038: stored addressee intent of a Task Conversation message; not a delivery
 PARTICIPANT_OWNER = "owner"
 PARTICIPANT_ARCHITECT = "architect"
 PARTICIPANT_WORKER = "worker"
@@ -509,6 +510,7 @@ class ConversationMessage(Base):
     ordinal: Mapped[int] = mapped_column(Integer)
     body: Mapped[str] = mapped_column(Text)
     client_key: Mapped[str] = mapped_column(String(MAX_CLIENT_KEY))
+    recipient: Mapped[str | None] = mapped_column(String(16), nullable=True)  # None | 'architect' (intent only)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
 
 

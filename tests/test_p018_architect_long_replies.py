@@ -257,7 +257,7 @@ class ReplyBodyMigrationTests(p15.ArchitectCase):
     def snapshot(self) -> dict:
         with self.connect() as connection:
             return {
-                "messages": connection.execute("SELECT * FROM conversation_messages ORDER BY ordinal").fetchall(),
+                "messages": connection.execute("SELECT message_id, conversation_id, sender_participant_id, ordinal, body, client_key, created_at FROM conversation_messages ORDER BY ordinal").fetchall(),
                 "deliveries": connection.execute("SELECT * FROM conversation_deliveries ORDER BY message_id").fetchall(),
                 "participants": connection.execute("SELECT * FROM conversation_participants ORDER BY participant_id").fetchall(),
                 "schema": connection.execute(self.TABLE_INFO).fetchall(),
@@ -295,14 +295,14 @@ class ReplyBodyMigrationTests(p15.ArchitectCase):
             conv, part = connection.execute(
                 "SELECT conversation_id, participant_id FROM conversation_participants LIMIT 1").fetchone()
             new = lambda ordinal, body, key: (str(uuid.uuid4()), conv, part, ordinal, body, key, "2026-01-01")  # noqa: E731
-            connection.execute("INSERT INTO conversation_messages VALUES (?,?,?,?,?,?,?)",
+            connection.execute("INSERT INTO conversation_messages (message_id, conversation_id, sender_participant_id, ordinal, body, client_key, created_at) VALUES (?,?,?,?,?,?,?)",
                                new(50, "x" * 100_000, "key-huge-0001"))
             for bad in (new(51, "", "key-empty-001"), new(50, "dup ordinal", "key-dupord01"),
                         new(52, "dup key", "key-huge-0001"), new(0, "ordinal", "key-ordinal1")):
                 with self.assertRaises(sqlite3.IntegrityError):
-                    connection.execute("INSERT INTO conversation_messages VALUES (?,?,?,?,?,?,?)", bad)
+                    connection.execute("INSERT INTO conversation_messages (message_id, conversation_id, sender_participant_id, ordinal, body, client_key, created_at) VALUES (?,?,?,?,?,?,?)", bad)
             with self.assertRaises(sqlite3.IntegrityError):  # foreign key to a missing participant
-                connection.execute("INSERT INTO conversation_messages VALUES (?,?,?,?,?,?,?)",
+                connection.execute("INSERT INTO conversation_messages (message_id, conversation_id, sender_participant_id, ordinal, body, client_key, created_at) VALUES (?,?,?,?,?,?,?)",
                                    (str(uuid.uuid4()), conv, "missing", 60, "x", "key-fk-00001", "2026-01-01"))
             with self.assertRaises(sqlite3.DatabaseError):  # immutability trigger survives
                 connection.execute("UPDATE conversation_messages SET body='tampered'")

@@ -16,6 +16,12 @@ const feedback = { error: '', notice: '' };
 const scroll = { region: () => () => {} };
 const workspace = { busy: false, onReconcile: vi.fn(), onRepair: vi.fn() };
 const textScale = { scale: 100 as const, onChange: vi.fn() };
+const taskConversation = () => ({
+  state: { status: 'ready' as const, conversationId: null, messages: [], hasMore: false, nextBefore: null,
+    error: '', sending: false, olderLoading: false },
+  onReload: vi.fn(), onLoadOlder: vi.fn(), onSend: vi.fn(async () => null),
+});
+
 const conversation = () => ({
   state: { status: 'ready' as const, conversationId: null, messages: [], hasMore: false, nextBefore: null,
     error: '', sending: false, olderLoading: false },
@@ -107,7 +113,7 @@ describe('Work area presentation', () => {
   });
 
   it('renders a nested Task layer that reads the Task without offering a Run', () => {
-    render(<TaskView projectName="ROSC Platform" taskId="T0001" task={T1} tasksStatus="ready" feedback={feedback} inert={false} scroll={scroll} workspace={workspace} textScale={textScale} onClose={vi.fn()} onRetry={vi.fn()} />);
+    render(<TaskView projectName="ROSC Platform" taskId="T0001" task={T1} tasksStatus="ready" feedback={feedback} inert={false} scroll={scroll} workspace={workspace} conversation={taskConversation()} textScale={textScale} onClose={vi.fn()} onRetry={vi.fn()} />);
     const drawer = screen.getByLabelText('Task Work Area');
     expect(within(drawer).getByLabelText('Закрыть задачу')).toBeTruthy();
     expect(within(drawer).getByText('Спецификация задачи · Draft')).toBeTruthy();
@@ -145,7 +151,7 @@ describe('Workspace presentation', () => {
     expect(screen.getByText('Манифест Workspace соответствует записи в базе.')).toBeTruthy();
     unmount();
 
-    render(<TaskView projectName="ROSC Platform" taskId="T0001" task={task('T0001', 'P0001')} tasksStatus="ready" feedback={feedback} inert={false} scroll={scroll} workspace={workspace} textScale={textScale} onClose={vi.fn()} onRetry={vi.fn()} />);
+    render(<TaskView projectName="ROSC Platform" taskId="T0001" task={task('T0001', 'P0001')} tasksStatus="ready" feedback={feedback} inert={false} scroll={scroll} workspace={workspace} conversation={taskConversation()} textScale={textScale} onClose={vi.fn()} onRetry={vi.fn()} />);
     expect(screen.queryByRole('button', { name: 'Проверить Workspace' })).toBeNull();
     expect(screen.queryByRole('button', { name: 'Восстановить манифест' })).toBeNull();
     expect(workspace.onReconcile).not.toHaveBeenCalled();

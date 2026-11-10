@@ -82,7 +82,10 @@ export type ConversationMessage = {
   sender: ConversationParticipant;
   /** Present on Owner messages only. */
   delivery?: MessageDelivery;
+  /** P038: the addressee the Owner chose in a Task Conversation. Stored intent only, never a delivery. */
+  recipient?: MessageRecipient;
 };
+export type MessageRecipient = 'architect' | null;
 
 /** Verified Project Architect runtime state. `ready` is reported by Core only after a fresh liveness probe. */
 export type ArchitectState = 'not_configured' | 'stopped' | 'starting' | 'ready' | 'error';
@@ -115,19 +118,20 @@ export type ProjectConversation = {
   conversation_id: string;
   kind: string;
   project_id: string;
-  task_id: number | null;
+  task_id: string | null;
   created_at: string;
   participants: ConversationParticipant[];
 };
 
 export type ConversationPage = {
   project_id: string;
+  task_id?: string | null;
   conversation: ProjectConversation | null;
   messages: ConversationMessage[];
   page: { limit: number; has_more: boolean; next_before: number | null };
 };
 
-export type ConversationMessageInput = { client_key: string; body: string };
+export type ConversationMessageInput = { client_key: string; body: string; recipient?: MessageRecipient };
 export type ConversationMessageResult = { message: ConversationMessage; replayed: boolean };
 export type DeliveryResult = { delivery: MessageDelivery };
 

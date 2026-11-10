@@ -1,0 +1,138 @@
+import { useEffect, useRef, useState, type FormEvent } from 'react';
+import type { MessageRecipient } from '../../../core/models';
+import type { TaskConversationControls } from '../../../app/presentation/contracts';
+
+function formatTime(iso: string): string {
+  const date = new Date(iso);
+  return Number.isNaN(date.getTime()) ? '' : date.toLocaleString('ru-RU', { day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' });
+}
+
+/** One client-generated opaque idempotency key per unsent message; retrying the same text and addressee reuses it. */
+function newClientKey(): string {
+  const random = typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function'
+    ? crypto.randomUUID()
+    : `${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`;
+  return `ui-${random}`.replace(/[^A-Za-z0-9._:-]/g, '').slice(0, 96);
+}
+
+/**
+ * Task Conversation: this Task's own saved history and an Owner composer. An addressee is only a saved intent, so an
+ * addressed message is shown as stored and not delivered; nothing here implies the Architect read or answered it.
+ */
+export function TaskConversationPanel({ taskId, conversation }: { taskId: string; conversation: TaskConversationControls }) {
+  const state = conversation.state;
+  const [draft, setDraft] = useState('');
+  const [recipient, setRecipient] = useState<MessageRecipient>(null);
+  const [failure, setFailure] = useState('');
+  const [locked, setLocked] = useState(false);
+  const pending = useRef<{ body: string; recipient: MessageRecipient; key: string } | null>(null);
+  const inFlight = useRef(false);
+  const feed = useRef<HTMLDivElement | null>(null);
+  const preserveOlder = useRef<number | null>(null);
+  const ready = state.status === 'ready';
+  const lastId = state.messages.length > 0 ? state.messages[state.messages.length - 1].message_id : null;
+
+  useEffect(() => {
+    if (feed.current) feed.current.scrollTop = feed.current.scrollHeight;
+  }, [lastId, state.status]);
+
+  useEffect(() => {
+    const element = feed.current;
+    if (!element || preserveOlder.current === null) return;
+    element.scrollTop = element.scrollHeight - preserveOlder.current;
+    preserveOlder.current = null;
+  }, [state.messages.length]);
+
+  const loadOlder = () => {
+    if (!feed.current || !state.hasMore || state.olderLoading) return;
+    preserveOlder.current = feed.current.scrollHeight - feed.current.scrollTop;
+    conversation.onLoadOlder();
+  };
+
+  const submit = async (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    const body = draft.trim();
+    if (!body || !ready || state.sending || inFlight.current) return;
+    inFlight.current = true;
+    setLocked(true);
+    const same = pending.current?.body === body && pending.current.recipient === recipient;
+    const key = same && pending.current ? pending.current.key : newClientKey();
+    pending.current = { body, recipient, key };
+    setFailure('');
+    try {
+      const problem = await conversation.onSend(body, key, recipient);
+      if (problem === null) {
+        setDraft(current => current.trim() === body ? '' : current);
+        pending.current = null;
+      } else setFailure(problem);
+    } finally {
+      inFlight.current = false;
+      setLocked(false);
+    }
+  };
+
+  return <section className="rosc-panel-card rosc-task-chat" aria-label="Task Conversation" data-task-id={taskId}>
+    <header className="rosc-task-chat__head">
+      <h3>Task Conversation</h3>
+      <p>История этой задачи сохраняется в ROSC · Architect из этого чата пока не получает сообщения</p>
+    </header>
+    <div className="rosc-task-chat__feed" role="log" aria-label="Сообщения по задаче" ref={feed}>
+      {state.hasMore && ready && <div className="rosc-conversation__more">
+        <button type="button" className="rosc-btn rosc-btn--small" onClick={loadOlder} disabled={state.olderLoading}>
+          {state.olderLoading ? 'Загрузка…' : 'Загрузить более ранние'}
+        </button>
+      </div>}
+      {state.status === 'loading' && <div className="rosc-state rosc-state--loading"><span className="rosc-spinner"
+        aria-hidden="true" />Загрузка переписки…</div>}
+      {state.status === 'failed' && <div className="rosc-state rosc-state--failed" role="alert">
+        <p>Не удалось загрузить переписку. {state.error}</p>
+        <button className="rosc-btn rosc-btn--small" onClick={conversation.onReload}>Повторить</button>
+      </div>}
+      {ready && state.messages.length === 0 && <div className="rosc-state">
+        <p>Сообщений по этой задаче пока нет.</p>
+        <p>Сообщение Owner сохранится в ROSC. Ответа не будет: доставка Architect из Task Conversation ещё не подключена.</p>
+      </div>}
+      {state.messages.map(message => <article key={message.message_id}
+        className="rosc-chat-message rosc-chat-message--owner" data-message-id={message.message_id}>
+        <span className="rosc-chat-avatar" aria-hidden="true">O</span>
+        <div className="rosc-chat-bubble">
+          <div className="rosc-chat-meta">
+            <span>{message.sender.display_name}{message.recipient === 'architect' ? ' → Architect' : ''}</span>
+            <time dateTime={message.created_at}>{formatTime(message.created_at)}</time>
+          </div>
+          <p className="rosc-chat-body">{message.body}</p>
+          <p className="rosc-chat-delivery">{message.recipient === 'architect' ? 'Сохранено · не доставлено Architect' : 'Сохранено'}</p>
+        </div>
+      </article>)}
+    </div>
+    <form className="rosc-task-chat__compose" onSubmit={submit}>
+      <textarea aria-label="Сообщение в Task Conversation" placeholder="Заметка или вопрос по этой задаче…" rows={3}
+        value={draft} readOnly={locked} aria-busy={locked}
+        onChange={event => setDraft(event.target.value)}
+        onKeyDown={event => {
+          if (event.key === 'Enter' && (event.ctrlKey || event.metaKey)) {
+            event.preventDefault();
+            event.currentTarget.form?.requestSubmit();
+          }
+        }} />
+      <div className="rosc-conversation__actions">
+        <label className="rosc-task-chat__recipient">Адресат
+          <select aria-label="Адресат сообщения" value={recipient ?? ''} disabled={locked}
+            onChange={event => setRecipient(event.target.value === 'architect' ? 'architect' : null)}>
+            <option value="">Без адресата</option>
+            <option value="architect">Architect</option>
+          </select>
+        </label>
+        <button type="submit" className="rosc-btn rosc-btn--primary"
+          disabled={!draft.trim() || !ready || state.sending || locked}>{state.sending ? 'Сохранение…' : 'Сохранить'}</button>
+      </div>
+      {failure && <p className="rosc-conversation__error" role="alert">{failure}</p>}
+      {!ready && <p className="rosc-conversation__hint">Сохранение станет доступно после загрузки истории.</p>}
+      <p className="rosc-conversation__hint">
+        {recipient === 'architect'
+          ? 'Сообщение сохранится в ROSC с адресатом Architect, но не будет ему доставлено.'
+          : 'Сообщение сохранится в ROSC без адресата.'}
+      </p>
+    </form>
+  </section>;
+}

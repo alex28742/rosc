@@ -29,7 +29,7 @@ OWNED_TABLES = ("conversations", "conversation_participants", "conversation_mess
 LEGACY_TABLES = ("projects", "project_root_bindings", "tasks", "agent_definitions", "agent_capabilities",
                  "role_assignments", "assignment_capabilities", "run_records", "run_agent_links", "report_records",
                  "evidence_records")
-HEAD = "0009_architect_onboarding_state"  # P029 added 0009; P019 added 0008; P018 added 0007; P015 added 0006; P014 tables are created by 0005
+HEAD = "0010_task_conversation_recipient"  # P029 added 0009; P019 added 0008; P018 added 0007; P015 added 0006; P014 tables are created by 0005
 
 
 class AgentProvider:
@@ -273,7 +273,7 @@ class AuthorizationTests(ConversationCase):
     def test_scope_shape_rejects_an_extra_or_missing_project(self) -> None:
         self.assertFalse(authz.evaluate(LocalOwnerPolicy(), OWNER, authz.CONVERSATION_READ, ResourceScope()).allowed)
         self.assertFalse(authz.evaluate(LocalOwnerPolicy(), OWNER, authz.CONVERSATION_READ,
-                                        ResourceScope(project_id=1, task_id=1)).allowed)
+                                        ResourceScope(project_id=1, doc_id="x")).allowed)
         self.assertFalse(authz.evaluate(LocalOwnerPolicy(), OWNER, authz.CONVERSATION_MESSAGE_CREATE,
                                         ResourceScope(project_id=True)).allowed)
         self.assertTrue(authz.evaluate(LocalOwnerPolicy(), OWNER, authz.CONVERSATION_MESSAGE_CREATE,

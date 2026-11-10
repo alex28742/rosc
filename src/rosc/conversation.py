@@ -29,7 +29,8 @@ from .authorization import (CONVERSATION_MESSAGE_CREATE, CONVERSATION_READ, Acto
                             ResourceScope, evaluate)
 from .models import (CONVERSATION_KIND_PROJECT, MAX_CLIENT_KEY, MAX_MESSAGE_BODY, PARTICIPANT_ARCHITECT,
                      PARTICIPANT_OWNER, PARTICIPANT_WORKER, Conversation, ConversationMessage, ConversationDelivery, ConversationParticipant,
-                     Project, ProjectIdentityError, validate_project_identity)
+                     CONVERSATION_KIND_TASK, RECIPIENT_ARCHITECT, Project, ProjectIdentityError, Task,
+                     validate_project_identity)
 
 # Failure codes after which nothing can have reached the provider, so an explicit retry cannot duplicate a turn.
 SAFE_RETRY_CODES = frozenset({"session_not_ready", "connection_failed", "not_received", "assignment_changed"})
@@ -87,6 +88,10 @@ def _project_label(project_id: int) -> str:
     return f"P{project_id:04d}"
 
 
+def _task_label(task_id: int) -> str:
+    return f"T{task_id:04d}"
+
+
 def _positive_int(value: object, field: str) -> int:
     if not isinstance(value, int) or isinstance(value, bool) or value < 1:
         raise InvalidConversationInput(f"{field} must be a positive integer")
@@ -135,6 +140,13 @@ def _architect_body(value: object) -> str:
     return _UNSTORABLE.sub("\ufffd", text)
 
 
+def _recipient(value: object) -> str | None:
+    """Explicit addressee: only ``None`` or ``'architect'``. It is a stored intent, never a delivery."""
+    if value is None or value == RECIPIENT_ARCHITECT:
+        return value  # type: ignore[return-value]
+    raise InvalidConversationInput("recipient must be null or 'architect'")
+
+
 def participant_view(participant: ConversationParticipant) -> dict:
     """Public participant identity. A participant is attribution history, not liveness or authority."""
     display_name = {PARTICIPANT_OWNER: "Owner", PARTICIPANT_ARCHITECT: "Architect",
@@ -154,7 +166,7 @@ def conversation_view(conversation: Conversation) -> dict:
         "conversation_id": conversation.conversation_id,
         "kind": conversation.kind,
         "project_id": _project_label(conversation.project_id),
-        "task_id": conversation.task_id,
+        "task_id": None if conversation.task_id is None else _task_label(conversation.task_id),
         "created_at": _utc_iso(conversation.created_at),
         "participants": [participant_view(participant) for participant in conversation.participants],
     }
@@ -187,15 +199,17 @@ def message_view(message: ConversationMessage, sender: ConversationParticipant,
         "body": message.body,
         "created_at": _utc_iso(message.created_at),
         "sender": participant_view(sender),
+        "recipient": message.recipient,
     }
     if sender.kind == PARTICIPANT_OWNER:
         view["delivery"] = delivery_state_view(delivery)
     return view
 
 
-def _empty_page(project_id: int, limit: int) -> dict:
+def _empty_page(project_id: int, limit: int, task_id: int | None = None) -> dict:
     return {
         "project_id": _project_label(project_id),
+        "task_id": None if task_id is None else _task_label(task_id),
         "conversation": None,
         "messages": [],
         "page": {"limit": limit, "has_more": False, "next_before": None},
@@ -234,6 +248,25 @@ class ProjectConversationService:
             Conversation.project_id == project_id, Conversation.kind == CONVERSATION_KIND_PROJECT)).first()
 
     @staticmethod
+    def _task(session: Session, project_id: int, task_id: object) -> Task:
+        """The Task must exist and belong to the named Project; otherwise the same 404 as an unknown Task."""
+        task = session.get(Task, task_id) if isinstance(task_id, int) and not isinstance(task_id, bool) else None
+        if task is None or task.project_id != project_id:
+            raise ConversationNotFound("Task not found")
+        return task
+
+    @staticmethod
+    def _task_conversation(session: Session, task_id: int) -> Conversation | None:
+        return session.scalars(select(Conversation).where(
+            Conversation.task_id == task_id, Conversation.kind == CONVERSATION_KIND_TASK)).first()
+
+    def _scoped_conversation(self, session: Session, project: Project, task_id: object) -> tuple[Conversation | None, int | None]:
+        if task_id is None:
+            return self._project_conversation(session, project.id), None
+        task = self._task(session, project.id, task_id)
+        return self._task_conversation(session, task.id), task.id
+
+    @staticmethod
     def _owner_participant(session: Session, conversation_id: str) -> ConversationParticipant:
         owner = session.scalars(select(ConversationParticipant).where(
             ConversationParticipant.conversation_id == conversation_id,
@@ -243,18 +276,19 @@ class ProjectConversationService:
         return owner
 
     def read_conversation(self, actor: ActorContext, project_id: object, *, before: object = None,
-                          limit: object = DEFAULT_PAGE_SIZE) -> dict:
-        """Read the canonical conversation and one bounded page of messages; never creates or mutates anything."""
-        self._authorize(actor, CONVERSATION_READ, project_id=project_id)
+                          limit: object = DEFAULT_PAGE_SIZE, task_id: object = None) -> dict:
+        """Read the Project (or, with ``task_id``, that Task's) conversation and one bounded page of messages;
+        never creates or mutates anything."""
+        self._authorize(actor, CONVERSATION_READ, project_id=project_id, task_id=task_id)
         page_limit = _positive_int(limit, "limit")
         if page_limit > MAX_PAGE_SIZE:
             raise InvalidConversationInput(f"limit must be at most {MAX_PAGE_SIZE}")
         cursor = None if before is None else _positive_int(before, "before")
         with self._sessions() as session:
             project = self._project(session, project_id)  # type: ignore[arg-type]
-            conversation = self._project_conversation(session, project.id)
+            conversation, scoped_task = self._scoped_conversation(session, project, task_id)
             if conversation is None:
-                return _empty_page(project.id, page_limit)
+                return _empty_page(project.id, page_limit, scoped_task)
             return self._page(session, conversation, cursor, page_limit)
 
     def _page(self, session: Session, conversation: Conversation, before: int | None, limit: int) -> dict:
@@ -276,6 +310,7 @@ class ProjectConversationService:
             messages.append(message_view(row, sender, deliveries.get(row.message_id)))
         return {
             "project_id": _project_label(conversation.project_id),
+            "task_id": None if conversation.task_id is None else _task_label(conversation.task_id),
             "conversation": conversation_view(conversation),
             "messages": messages,
             "page": {"limit": limit, "has_more": has_more,
@@ -283,15 +318,18 @@ class ProjectConversationService:
         }
 
     def create_message(self, actor: ActorContext, project_id: object, *, client_key: object,
-                       body: object) -> dict:
+                       body: object, task_id: object = None, recipient: object = None) -> dict:
         """Persist one Owner message atomically; replay an identical retry, refuse an altered one.
 
         Return value: ``{"message": <view>, "replayed": bool}``. ``replayed`` is true only when the same key and the
         same body already produced exactly this message, in which case nothing is written.
         """
-        self._authorize(actor, CONVERSATION_MESSAGE_CREATE, project_id=project_id)
+        self._authorize(actor, CONVERSATION_MESSAGE_CREATE, project_id=project_id, task_id=task_id)
         key = _client_key(client_key)
         text = _body(body)
+        addressee = _recipient(recipient)
+        if task_id is None and addressee is not None:
+            raise InvalidConversationInput("Project Conversation messages do not take a recipient")
         created = False
         with self._sessions() as session:
             try:
@@ -299,10 +337,12 @@ class ProjectConversationService:
                 # with no other writer, so one Project can never get two conversations or two equal ordinals.
                 session.connection().exec_driver_sql("BEGIN IMMEDIATE")
                 project = self._project(session, project_id)  # type: ignore[arg-type]
-                conversation = self._project_conversation(session, project.id)
+                conversation, scoped_task = self._scoped_conversation(session, project, task_id)
                 if conversation is None:
-                    conversation = Conversation(conversation_id=str(uuid.uuid4()), project_id=project.id,
-                                                task_id=None, kind=CONVERSATION_KIND_PROJECT, created_at=_now())
+                    conversation = Conversation(
+                        conversation_id=str(uuid.uuid4()), project_id=project.id, task_id=scoped_task,
+                        kind=CONVERSATION_KIND_PROJECT if scoped_task is None else CONVERSATION_KIND_TASK,
+                        created_at=_now())
                     session.add(conversation)
                     session.flush()
                     owner = ConversationParticipant(
@@ -317,7 +357,8 @@ class ProjectConversationService:
                     ConversationMessage.conversation_id == conversation.conversation_id,
                     ConversationMessage.client_key == key)).first()
                 if existing is not None:
-                    if existing.body != text or existing.sender_participant_id != owner.participant_id:
+                    if (existing.body != text or existing.sender_participant_id != owner.participant_id
+                            or existing.recipient != addressee):
                         session.rollback()
                         raise ConversationConflict(
                             "This message key was already used for different content; reload the conversation")
@@ -329,7 +370,7 @@ class ProjectConversationService:
                 message = ConversationMessage(
                     message_id=str(uuid.uuid4()), conversation_id=conversation.conversation_id,
                     sender_participant_id=owner.participant_id, ordinal=ordinal, body=text, client_key=key,
-                    created_at=_now())
+                    recipient=addressee, created_at=_now())
                 session.add(message)
                 session.commit()
                 created = True
