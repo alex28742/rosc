@@ -7,7 +7,7 @@ import { conversationMessage, conversationPage, deferred, project, stubApi, task
 const at = (path: string) => history.replaceState(null, '', path);
 const P1 = project('P0001');
 const T1 = task('T0001', 'P0001'), T2 = task('T0002', 'P0001');
-const panel = () => document.querySelector('section[aria-label="Task Conversation"]') as HTMLElement;
+const panel = () => document.querySelector('aside[aria-label="Task Conversation"]') as HTMLElement;
 const open = (extra = {}) => stubApi({ listProjects: vi.fn(async () => [P1]), listTasks: vi.fn(async () => [T1, T2]), ...extra });
 
 beforeEach(() => at('/projects/P0001/tasks/T0001'));

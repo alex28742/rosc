@@ -19,7 +19,9 @@ function newClientKey(): string {
  * Task Conversation: this Task's own saved history and an Owner composer. An addressee is only a saved intent, so an
  * addressed message is shown as stored and not delivered; nothing here implies the Architect read or answered it.
  */
-export function TaskConversationPanel({ taskId, conversation }: { taskId: string; conversation: TaskConversationControls }) {
+type Props = { taskId: string; conversation: TaskConversationControls; collapsed: boolean; onCollapsedChange: (collapsed: boolean) => void };
+
+export function TaskConversationPanel({ taskId, conversation, collapsed, onCollapsedChange }: Props) {
   const state = conversation.state;
   const [draft, setDraft] = useState('');
   const [recipient, setRecipient] = useState<MessageRecipient>(null);
@@ -71,12 +73,21 @@ export function TaskConversationPanel({ taskId, conversation }: { taskId: string
     }
   };
 
-  return <section className="rosc-panel-card rosc-task-chat" aria-label="Task Conversation" data-task-id={taskId}>
-    <header className="rosc-task-chat__head">
-      <h3>Task Conversation</h3>
-      <p>История этой задачи сохраняется в ROSC · Architect из этого чата пока не получает сообщения</p>
+  return <aside className={collapsed ? 'rosc-conversation rosc-conversation--task rosc-conversation--collapsed' : 'rosc-conversation rosc-conversation--task'}
+    aria-label="Task Conversation" data-task-id={taskId}>
+    <button type="button" className="rosc-conversation__collapse" aria-label="Свернуть Task Conversation"
+      title="Свернуть Task Conversation вправо" onClick={() => onCollapsedChange(true)}>›</button>
+    <header className="rosc-conversation__head">
+      <div>
+        <h3>Task Conversation</h3>
+        <p>История этой задачи сохраняется в ROSC · Architect из этого чата пока не получает сообщения</p>
+      </div>
+      <div className="rosc-conversation__head-actions">
+        <button type="button" className="rosc-chat-icon" disabled aria-label="Поиск по Task Conversation — пока недоступно"
+          title="Поиск будет доступен позже">⌕</button>
+      </div>
     </header>
-    <div className="rosc-task-chat__feed" role="log" aria-label="Сообщения по задаче" ref={feed}>
+    <div className="rosc-conversation__feed" role="log" aria-label="Сообщения по задаче" ref={feed}>
       {state.hasMore && ready && <div className="rosc-conversation__more">
         <button type="button" className="rosc-btn rosc-btn--small" onClick={loadOlder} disabled={state.olderLoading}>
           {state.olderLoading ? 'Загрузка…' : 'Загрузить более ранние'}
@@ -105,7 +116,7 @@ export function TaskConversationPanel({ taskId, conversation }: { taskId: string
         </div>
       </article>)}
     </div>
-    <form className="rosc-task-chat__compose" onSubmit={submit}>
+    <form className="rosc-conversation__compose" onSubmit={submit}>
       <textarea aria-label="Сообщение в Task Conversation" placeholder="Заметка или вопрос по этой задаче…" rows={3}
         value={draft} readOnly={locked} aria-busy={locked}
         onChange={event => setDraft(event.target.value)}
@@ -116,13 +127,17 @@ export function TaskConversationPanel({ taskId, conversation }: { taskId: string
           }
         }} />
       <div className="rosc-conversation__actions">
-        <label className="rosc-task-chat__recipient">Адресат
-          <select aria-label="Адресат сообщения" value={recipient ?? ''} disabled={locked}
+        <div className="rosc-conversation__recipients">
+          <button type="button" className="rosc-chat-tool" disabled title="Вложения пока недоступны"
+            aria-label="Прикрепить файлы — пока недоступно">📎</button>
+          <select className="rosc-chat-tool" aria-label="Адресат сообщения" value={recipient ?? ''} disabled={locked}
             onChange={event => setRecipient(event.target.value === 'architect' ? 'architect' : null)}>
-            <option value="">Без адресата</option>
-            <option value="architect">Architect</option>
+            <option value="">@ Адресаты ▾</option>
+            <option value="architect">@ Architect</option>
+            <option value="worker" disabled>@ Worker — будет доступно позже</option>
           </select>
-        </label>
+          <small>От: Owner · local_unverified</small>
+        </div>
         <button type="submit" className="rosc-btn rosc-btn--primary"
           disabled={!draft.trim() || !ready || state.sending || locked}>{state.sending ? 'Сохранение…' : 'Сохранить'}</button>
       </div>
@@ -134,5 +149,10 @@ export function TaskConversationPanel({ taskId, conversation }: { taskId: string
           : 'Сообщение сохранится в ROSC без адресата.'}
       </p>
     </form>
-  </section>;
+    <button type="button" className="rosc-conversation__rail" aria-label="Развернуть Task Conversation"
+      onClick={() => onCollapsedChange(false)}>
+      <span aria-hidden="true">‹</span>
+      <span className="rosc-conversation__rail-label">TASK CONVERSATION</span>
+    </button>
+  </aside>;
 }

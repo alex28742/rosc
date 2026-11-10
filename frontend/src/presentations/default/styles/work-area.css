@@ -2188,66 +2188,427 @@
   }
 }
 
-/* P038 Task Conversation inside the Task drawer: a self-contained card with its own independent feed scroll. */
-.rosc-task-chat {
+/* P038 r02 Task Work Area: [Left canvas | full-height Task Conversation] between the full-width head and footer.
+   Geometry follows the approved prototype's inner Task DOM (.app grid, .lower grid, 44px collapsed rail,
+   70dvh conversation under 700px). The Task Conversation itself reuses the Project Conversation styles. */
+.rosc-task-state {
+  flex: 1;
+  padding: 24px;
+  overflow-y: auto;
+}
+
+.rosc-task-workspace {
+  display: grid;
+  grid-template-columns: minmax(0, 1.22fr) minmax(370px, 0.8fr);
+  flex: 1;
+  min-width: 0;
+  min-height: 0;
+  background: #f4f6f8;
+}
+
+.rosc-task-workspace--collapsed {
+  grid-template-columns: minmax(0, 1fr) 44px;
+}
+
+.rosc-task-left {
   display: flex;
+  min-width: 0;
+  min-height: 0;
   flex-direction: column;
+  gap: 11px;
+  padding: 13px 15px 15px;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  scrollbar-gutter: stable;
+}
+
+.rosc-task-notice {
+  display: flex;
+  align-items: center;
   gap: 10px;
-  margin-top: 14px;
-}
-
-.rosc-task-chat__head h3 {
-  margin: 0 0 4px;
-}
-
-.rosc-task-chat__head p {
-  margin: 0;
+  flex: none;
+  padding: 9px 14px;
+  border: 1px solid var(--rosc-line);
+  border-radius: 10px;
+  background: #fff;
   color: var(--rosc-secondary);
   font-size: 12px;
 }
 
-.rosc-task-chat__feed {
+.rosc-task-notice p {
+  margin: 0;
+  font-size: 11px;
+}
+
+.rosc-task-notice > div {
+  flex: 1;
+  min-width: 0;
+}
+
+.rosc-task-notice__mark {
+  display: inline-grid;
+  place-items: center;
+  flex: none;
+  width: 20px;
+  height: 20px;
+  border-radius: 50%;
+  background: #eef2f5;
+  color: #7d8d98;
+  font-weight: 800;
+  font-size: 12px;
+}
+
+.rosc-task-heading {
   display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+  flex: none;
+}
+
+.rosc-task-heading h3 {
+  margin: 0 0 4px;
+  font-size: 22px;
+  line-height: 1.22;
+  letter-spacing: -0.45px;
+  overflow-wrap: anywhere;
+}
+
+.rosc-task-heading p {
+  margin: 0;
+  color: var(--rosc-secondary);
+  font-size: 11px;
+}
+
+.rosc-task-heading__flags {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  justify-content: flex-end;
+}
+
+.rosc-task-panel {
+  display: flex;
+  min-width: 0;
+  min-height: 0;
   flex-direction: column;
-  gap: 10px;
-  min-height: 120px;
-  max-height: 340px;
-  padding: 10px;
-  overflow-y: auto;
   border: 1px solid var(--rosc-line);
-  border-radius: 9px;
-  background: #f7fafc;
-}
-
-.rosc-task-chat__compose textarea {
-  width: 100%;
-  min-height: 57px;
-  max-height: 170px;
-  padding: 11px;
-  border: 1px solid #dce4e9;
-  border-radius: 9px;
-  font: inherit;
-  font-size: 12px;
-  resize: vertical;
-}
-
-.rosc-task-chat__recipient {
-  display: inline-flex;
-  align-items: center;
-  gap: 7px;
-  font-size: 12px;
-}
-
-.rosc-task-chat__recipient select {
-  padding: 6px 8px;
-  border: 1px solid #dce4e9;
-  border-radius: 7px;
+  border-radius: 10px;
   background: #fff;
-  font: inherit;
+  box-shadow: 0 3px 15px rgba(19, 50, 74, 0.04);
+}
+
+.rosc-task-panel__top {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  flex: none;
+  padding: 13px 15px 8px;
+}
+
+.rosc-task-panel__top h3 {
+  margin: 0;
+  font-size: 14px;
+}
+
+.rosc-task-panel__scroll {
+  flex: 1;
+  min-height: 0;
+  padding: 0 14px 12px;
+  overflow: auto;
+}
+
+.rosc-task-panel__foot {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  flex: none;
+  padding: 8px 14px;
+  border-top: 1px solid #ebeff2;
+  background: #fafbfd;
+  color: var(--rosc-secondary);
+  font-size: 10px;
+}
+
+.rosc-task-panel__foot-actions {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.rosc-task-link {
+  border: 0;
+  background: none;
+  color: #286f9e;
+  font-size: 10px;
+  font-weight: 700;
+}
+
+.rosc-task-spec {
+  flex: none;
+  min-height: 245px;
+  overflow: hidden;
+}
+
+.rosc-task-spec--collapsed {
+  min-height: 0;
+}
+
+.rosc-task-spec__body {
+  display: grid;
+  gap: 13px;
+  flex: 1;
+  padding: 4px 16px 15px;
+}
+
+.rosc-task-spec__body h4,
+.rosc-task-actions h4 {
+  margin: 0 0 6px;
+  font-size: 11px;
+  font-weight: 750;
+}
+
+.rosc-task-text {
+  margin: 0;
+  font-size: 12px;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.rosc-task-lower {
+  display: grid;
+  grid-template-columns: minmax(260px, 0.77fr) minmax(310px, 1.23fr);
+  gap: 11px;
+  flex: 1;
+  min-width: 0;
+  min-height: 340px;
+}
+
+.rosc-task-plan__progress {
+  flex: none;
+  padding: 0 15px 10px;
+}
+
+.rosc-task-plan__label {
+  display: flex;
+  justify-content: space-between;
+  margin-bottom: 5px;
+  color: var(--rosc-secondary);
+  font-size: 11px;
+}
+
+.rosc-task-plan__track {
+  height: 7px;
+  border-radius: 4px;
+  background: #e8eef2;
+}
+
+.rosc-task-facts {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 7px;
+  margin: 0 0 10px;
+}
+
+.rosc-task-facts > div {
+  min-width: 0;
+  padding: 7px 9px;
+  border: 1px solid #ebeff2;
+  border-radius: 8px;
+}
+
+.rosc-task-facts dt {
+  color: var(--rosc-secondary);
+  font-size: 10px;
+}
+
+.rosc-task-facts dd {
+  margin: 0;
+  font-size: 12px;
+  font-weight: 700;
+  overflow-wrap: anywhere;
+}
+
+.rosc-task-agents {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 9px;
+  margin-top: 10px;
+}
+
+.rosc-task-agents > div {
+  min-width: 0;
+  padding: 10px;
+  border: 1px solid var(--rosc-line);
+  border-radius: 8px;
+}
+
+.rosc-task-agents__head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  font-size: 11px;
+}
+
+.rosc-task-agents p {
+  margin: 6px 0 8px;
+  font-size: 11px;
+  color: var(--rosc-secondary);
+}
+
+.rosc-task-actions {
+  margin-top: 12px;
+}
+
+.rosc-task-actions__row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 7px;
+}
+
+.rosc-task-panel .rosc-btn:disabled,
+.rosc-task-notice .rosc-btn:disabled,
+.rosc-drawer__footer .rosc-btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.rosc-task-foot__note {
+  color: var(--rosc-secondary);
+  font-size: 11px;
+}
+
+.rosc-task-foot__actions {
+  display: flex;
+  gap: 8px;
+}
+
+.rosc-chat-icon:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+/* 8b. P038 r02: the addressee control is a native select that wears the composer tool look. */
+.rosc-conversation__recipients select.rosc-chat-tool {
+  max-width: 100%;
+}
+
+/* Breakpoints follow the Task area's own width (the prototype's .app), not the window: the drawer is inset. */
+.rosc-drawer--task .rosc-drawer__scroll--fill {
+  overflow-y: auto;
+  container-type: inline-size;
+}
+
+@container (max-width: 1400px) {
+  .rosc-task-workspace {
+    grid-template-columns: minmax(0, 1.12fr) minmax(340px, 0.85fr);
+  }
+
+  .rosc-task-heading {
+    display: block;
+  }
+
+  .rosc-task-heading__flags {
+    justify-content: flex-start;
+    margin-top: 6px;
+  }
+
+  .rosc-task-lower {
+    grid-template-columns: minmax(225px, 0.8fr) minmax(270px, 1.2fr);
+  }
+}
+
+@container (max-width: 1050px) {
+  .rosc-task-workspace {
+    grid-template-columns: minmax(0, 1fr) minmax(300px, 0.9fr);
+  }
+
+  .rosc-task-workspace--collapsed {
+    grid-template-columns: minmax(0, 1fr) 44px;
+  }
+
+  .rosc-task-left {
+    padding: 11px;
+    gap: 9px;
+  }
+
+  .rosc-task-lower {
+    grid-template-columns: minmax(0, 1fr);
+    min-height: 0;
+    flex: none;
+  }
+
+  .rosc-task-plan {
+    min-height: 300px;
+    max-height: 430px;
+  }
+
+  .rosc-task-context {
+    min-height: 285px;
+  }
+
+  .rosc-task-context .rosc-task-panel__scroll {
+    overflow: visible;
+  }
+}
+
+/* Narrow viewport: the conversation goes under the canvas at 70dvh and the drawer body scrolls as one. */
+@container (max-width: 700px) {
+  .rosc-task-workspace,
+  .rosc-task-workspace--collapsed {
+    display: flex;
+    flex: none;
+    flex-direction: column;
+  }
+
+  .rosc-task-workspace,
+  .rosc-task-workspace--collapsed {
+    width: 100%;
+  }
+
+  .rosc-task-left {
+    flex: none;
+    overflow: visible;
+  }
+
+  .rosc-task-spec {
+    min-height: 0;
+  }
+
+  .rosc-task-lower {
+    display: flex;
+    flex-direction: column;
+  }
+
+  .rosc-task-plan {
+    max-height: 380px;
+  }
+
+  .rosc-task-agents,
+  .rosc-task-facts {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .rosc-conversation--task {
+    flex: none;
+    height: 70dvh;
+    min-height: 600px;
+    border-top: 1px solid var(--rosc-line-strong);
+    border-left: 0;
+  }
+
+  .rosc-task-workspace--collapsed .rosc-conversation--task {
+    width: auto;
+    height: 39px;
+    min-height: 39px;
+  }
 }
 
 @media (max-width: 700px) {
-  .rosc-task-chat__feed {
-    max-height: 260px;
+  .rosc-drawer--task .rosc-drawer__footer {
+    padding: 10px 14px;
   }
 }

@@ -116,11 +116,37 @@ describe('Work area presentation', () => {
     render(<TaskView projectName="ROSC Platform" taskId="T0001" task={T1} tasksStatus="ready" feedback={feedback} inert={false} scroll={scroll} workspace={workspace} conversation={taskConversation()} textScale={textScale} onClose={vi.fn()} onRetry={vi.fn()} />);
     const drawer = screen.getByLabelText('Task Work Area');
     expect(within(drawer).getByLabelText('Закрыть задачу')).toBeTruthy();
-    expect(within(drawer).getByText('Спецификация задачи · Draft')).toBeTruthy();
-    expect(within(drawer).getByText('Описание', { selector: 'dt' })).toBeTruthy();
-    expect(within(drawer).getByText('Критерии приёмки', { selector: 'dt' })).toBeTruthy();
+    expect(within(drawer).getByLabelText('Спецификация задачи')).toBeTruthy();
+    expect(within(drawer).getByText('Описание задачи', { selector: 'h4' })).toBeTruthy();
+    expect(within(drawer).getByText('Критерии приёмки', { selector: 'h4' })).toBeTruthy();
     expect(within(drawer).getByText(/чтение Task не запускает агента/)).toBeTruthy();
     expect(within(drawer).queryByRole('button', { name: /Запустить|Run/ })).toBeNull();
+  });
+
+  it('assembles every Task Work Area region without backend data, with disabled future controls and a working rail', () => {
+    render(<TaskView projectName="ROSC Platform" taskId="T0001" task={T1} tasksStatus="ready" feedback={feedback} inert={false} scroll={scroll} workspace={workspace} conversation={taskConversation()} textScale={textScale} onClose={vi.fn()} onRetry={vi.fn()} />);
+    const drawer = screen.getByLabelText('Task Work Area');
+    const main = drawer.querySelector('.rosc-task-workspace')!;
+    expect(Array.from(main.children).map(child => child.className.split(' ')[0])).toEqual(['rosc-task-left', 'rosc-conversation']);
+    const lower = drawer.querySelector('.rosc-task-lower')!;
+    expect(lower.children.length).toBe(2);
+    for (const name of ['Блокеры', 'Спецификация задачи', 'Рабочий план Worker', 'Контекст и действия', 'Task Conversation']) {
+      expect(within(drawer).getByLabelText(name)).toBeTruthy();
+    }
+    expect(within(drawer).getByText('Рабочий план пока недоступен.')).toBeTruthy();
+    expect(drawer.querySelector('.rosc-drawer__footer')).toBeTruthy();
+    expect(main.contains(drawer.querySelector('.rosc-drawer__footer'))).toBe(false);
+    for (const label of ['Сохранить Spec', 'Ответить на блокер', 'Architect в Task', 'Выбрать Worker', 'Prompt Draft']) {
+      const button = within(drawer).getByRole('button', { name: new RegExp(label) }) as HTMLButtonElement;
+      expect(button.disabled, label).toBe(true);
+    }
+    expect(within(drawer).queryByText(/B-014|S0\d|R5002/)).toBeNull();
+    fireEvent.click(within(drawer).getByLabelText('Свернуть Task Conversation'));
+    expect(main.className).toContain('rosc-task-workspace--collapsed');
+    fireEvent.click(within(drawer).getByLabelText('Развернуть Task Conversation'));
+    expect(main.className).not.toContain('collapsed');
+    fireEvent.click(within(drawer).getByText('Свернуть спецификацию ⌃'));
+    expect(within(drawer).queryByText('Описание задачи', { selector: 'h4' })).toBeNull();
   });
 
   it('keeps the Task Draft form labelled and submits through the typed callback only', () => {
