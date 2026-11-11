@@ -3,7 +3,7 @@ from __future__ import annotations
 import uuid
 from datetime import datetime, timezone
 
-from sqlalchemy import CheckConstraint, DateTime, ForeignKey, Index, Integer, String, Text, UniqueConstraint, select, text
+from sqlalchemy import Boolean, CheckConstraint, DateTime, ForeignKey, Index, Integer, String, Text, UniqueConstraint, select, text
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 
 # Root Binding states. Exactly one ``current`` binding per Project; older ones stay as history.
@@ -589,6 +589,26 @@ class ConversationDelivery(Base):
     context_categories: Mapped[str | None] = mapped_column(String(160), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
+
+
+class ConversationNativeSession(Base):
+    """P039: which native provider conversation of ONE Architect host answers one ROSC Task Conversation.
+
+    One logical Project Architect host (``ArchitectSession``) serves the Project Conversation through its own native
+    session and each Task Conversation through a separate native session of the same OpenCode server.  The row is a
+    pointer, not memory: it holds no text, and it is keyed by host incarnation, so a new host never reuses an old id.
+    ``primed`` records that the short Task context has already been sent into this native session.
+    """
+
+    __tablename__ = "conversation_native_sessions"
+
+    conversation_id: Mapped[str] = mapped_column(ForeignKey("conversations.conversation_id", ondelete="RESTRICT"),
+                                                 primary_key=True)
+    architect_session_id: Mapped[str] = mapped_column(
+        ForeignKey("architect_sessions.session_id", ondelete="RESTRICT"), primary_key=True)
+    runtime_session_id: Mapped[str] = mapped_column(String(96))
+    primed: Mapped[bool] = mapped_column(Boolean, default=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
 
 
 # P019 Project Context Access. The audit rows record WHICH tool operation ran, never its content.

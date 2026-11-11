@@ -84,6 +84,18 @@ TOOLS: list[dict] = [
     {"name": "source_git", "description": "Non-executing Git facts of the bound checkout: head, status or log.",
      "inputSchema": _schema({"operation": {"type": "string", "enum": ["head", "status", "log"]},
                              "limit": {"type": "integer", "minimum": 1}})},
+    {"name": "task_list", "description": "List the Tasks of the current Project (read-only): id, title, status, "
+     "workspace state. Use task_read for the full specification.",
+     "inputSchema": _schema({"offset": {"type": "integer", "minimum": 0}, "limit": {"type": "integer", "minimum": 1}})},
+    {"name": "task_read", "description": "Read one Task of the current Project (read-only): title, description, "
+     "acceptance criteria, status, workspace state. task_id such as T0001 only names the target; other Projects' "
+     "Tasks are not readable.", "inputSchema": _schema({"task_id": {"type": "string"}}, ["task_id"])},
+    {"name": "run_list", "description": "List registered Runs of the current Project (read-only claims, not verified "
+     "results); optional task_id narrows to one Task.",
+     "inputSchema": _schema({"task_id": {"type": "string"}, "offset": {"type": "integer", "minimum": 0},
+                             "limit": {"type": "integer", "minimum": 1}})},
+    {"name": "run_read", "description": "Read one registered Run of the current Project with its report and evidence "
+     "references (read-only, unverified claims).", "inputSchema": _schema({"run_id": {"type": "string"}}, ["run_id"])},
 ]
 TOOL_NAMES = tuple(tool["name"] for tool in TOOLS)
 _DISPATCH_TOOL_ARGS = {tool["name"]: set(tool["inputSchema"]["properties"]) | {"project"} for tool in TOOLS}

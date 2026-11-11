@@ -17,6 +17,10 @@ export const getTaskConversation = (projectId: string, taskId: string, before?: 
 export const sendTaskConversationMessage = (projectId: string, taskId: string, input: ConversationMessageInput) =>
   post<ConversationMessageResult>(`/projects/${projectId}/tasks/${taskId}/conversation/messages`, input);
 
+/** P039: the explicit delivery of ONE saved, Architect-addressed Task message. Saving alone never calls this. */
+export const sendTaskMessageToArchitect = (projectId: string, taskId: string, messageId: string) =>
+  post<DeliveryResult>(`/projects/${projectId}/tasks/${taskId}/conversation/messages/${messageId}/send`);
+
 /** Read-only: Core probes liveness but never starts anything. */
 export const getArchitect = (projectId: string) => request<ArchitectStatus>(`/projects/${projectId}/architect`);
 

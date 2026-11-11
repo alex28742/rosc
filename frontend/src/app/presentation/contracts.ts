@@ -255,10 +255,20 @@ export type ProjectViewProps = {
 /** Task Conversation (P038): same state shape as the Project one, scoped to a single Task. */
 export type TaskConversationControls = {
   state: ConversationState;
+  /** P039: read-only Architect availability for this Project (never starts anything). */
+  architect: { status: LoadStatus; info: ArchitectStatus | null };
   onReload: () => void;
   onLoadOlder: () => void;
-  /** Resolves to `null` once the message is stored, otherwise to an error message. */
+  /**
+   * Resolves to `null` once the message is stored, otherwise to an error message. A message addressed to the Architect
+   * is also handed to it right away when Core reports a verified live Architect; otherwise it stays `not_sent`.
+   */
   onSend: (body: string, clientKey: string, recipient: MessageRecipient) => Promise<string | null>;
+  /** The explicit send of one saved Architect-addressed message. Resolves to an error message or null. */
+  onSendToArchitect: (messageId: string) => Promise<string | null>;
+  /** Uncertain delivery lookup (never re-sends) and safe retry (only after a provable non-delivery). */
+  onReconcile: (messageId: string) => Promise<string | null>;
+  onRetryDelivery: (messageId: string) => Promise<string | null>;
 };
 
 export type TaskViewProps = {

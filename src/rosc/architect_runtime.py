@@ -586,10 +586,10 @@ class OpenCodeRuntime:
             raise RuntimeUnavailable("runtime_status_unknown")
 
     def _create_session(self, session_id: str, port: int, provider_id: str, model_id: str, workdir: Path,
-                        with_tools: bool = False) -> str:
+                        with_tools: bool = False, title: str = "ROSC Project Architect") -> str:
         wanted = TOOLS_PERMISSIONS if with_tools else DENY_ALL
         created = self._data(self._call(session_id, port, "POST", "/api/session", {
-            "title": "ROSC Project Architect", "agent": RUNTIME_AGENT,
+            "title": title, "agent": RUNTIME_AGENT,
             "model": {"id": model_id, "providerID": provider_id},
             "location": {"directory": str(workdir)}, "permissions": wanted}))
         if not isinstance(created, dict) or not isinstance(created.get("id"), str):
@@ -609,6 +609,29 @@ class OpenCodeRuntime:
             if not isinstance(decision, dict) or decision.get("effect") != effect:
                 raise RuntimeUnavailable("restricted_mode_unconfirmed")
         return created["id"]
+
+    def create_native_session(self, session_id: str, handle: RuntimeHandle, provider_id: str, model_id: str,
+                              title: str, with_tools: bool) -> str:
+        """P039: one more native conversation on the SAME owned server (a Task Conversation's own context).
+
+        Same restriction proof as the Project session: the permission rules are echoed back and evaluated before the id
+        is returned, so a Task conversation can never run with more rights than the Project one.  Nothing is prompted."""
+        if not owned_process(handle.pid, handle.ticks, session_id) or handle.rosc_session_id != session_id:
+            raise RuntimeUnavailable("runtime_status_unknown")
+        return self._create_session(session_id, handle.port, provider_id, model_id, self._root / session_id,
+                                    with_tools, title[:120])
+
+    def tools_connected(self, session_id: str, handle: RuntimeHandle) -> bool:
+        """P039: does the server itself still list the ROSC tool server as connected (the ROSC-side token alone is not
+        proof: the server can lose a runtime registration)."""
+        try:
+            listed = self._data(self._call(session_id, handle.port, "GET", "/api/mcp", timeout=5.0))
+        except RuntimeProblem:
+            return False
+        entry = next((item for item in listed if isinstance(item, dict) and item.get("name") == SERVER_NAME),
+                     None) if isinstance(listed, list) else None
+        status = entry.get("status") if isinstance(entry, dict) else None
+        return isinstance(status, dict) and status.get("status") == "connected"
 
     def probe(self, session_id: str, handle: RuntimeHandle) -> bool:
         if not owned_process(handle.pid, handle.ticks, session_id):

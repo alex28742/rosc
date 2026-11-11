@@ -44,6 +44,7 @@ INSTALLED = {
 ACTIVE = ["role", "onboarding", "context-maintenance", "pipeline-management"]
 REFERENCE = ["autonomy", "research", "review", "communication", "run-checkpoints", "worker-task-authoring", "task-run-git"]
 MANIFEST = "agents/architect/ruleset.yaml"
+P039_READ_TOOLS = ("task_list", "task_read", "run_list", "run_read")
 PRE_P021_TOOLS = ("briefing", "global_list", "global_read", "docs_list", "docs_search", "docs_read", "docs_create",
                   "docs_update", "docs_delete", "docs_restore", "source_list", "source_read", "source_search", "source_git")
 
@@ -446,7 +447,7 @@ class ServiceRulesTests(p19.ContextCase):
         self.activate()
 
     def test_no_new_tool_and_unchanged_docs_privileges(self) -> None:
-        self.assertEqual(TOOL_NAMES, PRE_P021_TOOLS)
+        self.assertEqual(TOOL_NAMES, PRE_P021_TOOLS + P039_READ_TOOLS)  # P039 only appended read-only Task/Run tools
         self.assertFalse([n for n in TOOL_NAMES if re.search(r"init|pipeline|handoff|approv|worker|rules", n)])
         session_id = self.activate()
         # generic docs_create/docs_update keep working exactly as before (no reserved-role dispatch exists in P021)
@@ -616,7 +617,7 @@ class PinnedGlobalReadTests(p19.ContextCase):
         listed = self.direct(session_id, "global_list")["result"]
         self.assertEqual([e["path"] for e in listed["entries"]], self.listed_definitions())
         self.assertNotIn("pinned_sha256", json.dumps(listed))  # listing is discovery, never endorsement
-        self.assertEqual(TOOL_NAMES, PRE_P021_TOOLS)
+        self.assertEqual(TOOL_NAMES, PRE_P021_TOOLS + P039_READ_TOOLS)  # P039 only appended read-only Task/Run tools
         from rosc.project_context import ProjectContextBroker
         unbound = ProjectContextBroker(self.sessions, self.data / "workspace", self.lib)
         self.assertIsNone(unbound._rules_lookup)  # an ArchitectService without a loader never claims approved rules

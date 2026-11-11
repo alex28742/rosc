@@ -222,7 +222,7 @@ class TransportTests(ContextCase):
         names = set(TOOL_NAMES)
         self.assertEqual(names, {"briefing", "global_list", "global_read", "docs_list", "docs_search", "docs_read",
                                  "docs_create", "docs_update", "docs_delete", "docs_restore", "source_list",
-                                 "source_read", "source_search", "source_git"})
+                                 "source_read", "source_search", "source_git", "task_list", "task_read", "run_list", "run_read"})
         for tool in TOOLS:  # writes exist only for ROSC documents and name no target Project
             if tool["name"] in ("docs_create", "docs_update", "docs_delete", "docs_restore"):
                 self.assertNotIn("project", tool["inputSchema"]["properties"])
@@ -419,7 +419,7 @@ class NoConsentGateTests(ContextCase):
         self.assertIn("Owner-selected provider/model", view["provider"]["note"])
         self.assertEqual(view["source"], {"bound": True, "binding_version": 1, "docs_entrypoint": "README.md",
                                           "access": "read_only"})
-        self.assertEqual([m["mode"] for m in view["matrix"]], ["read_only", "read_write", "denied", "read_only", "denied"])
+        self.assertEqual([m["mode"] for m in view["matrix"]], ["read_only", "read_write", "read_only", "denied", "read_only", "denied"])
         self.assertFalse(view["publication"]["automatic_sync"])
 
     def test_agents_have_no_authority_over_the_summary(self) -> None:
@@ -858,7 +858,7 @@ class BriefingAndContextTests(ContextCase):
         self.assertEqual(briefing["architect_documents"]["count"], 1)
         self.assertEqual(briefing["core_facts"]["task_count"], 0)
         self.assertNotIn("git", json.dumps(briefing["core_facts"]).lower().replace("git evidence", ""))
-        self.assertEqual(len(briefing["access_matrix"]), 5)
+        self.assertEqual(len(briefing["access_matrix"]), 6)
 
     def test_warm_turn_carries_only_the_owner_message_and_no_documents_or_source(self) -> None:
         self.activate()

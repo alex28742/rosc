@@ -188,7 +188,8 @@ class MultiStepLookupTests(AdapterCase):
     def test_h_tool_surface_and_permissions_are_unchanged(self) -> None:
         self.assertEqual(set(TOOL_NAMES), {"briefing", "global_list", "global_read", "docs_list", "docs_search",
                                            "docs_read", "docs_create", "docs_update", "docs_delete", "docs_restore",
-                                           "source_list", "source_read", "source_search", "source_git"})
+                                           "source_list", "source_read", "source_search", "source_git",
+                                           "task_list", "task_read", "run_list", "run_read"})
         self.assertEqual(TOOLS_PERMISSIONS, DENY_ALL + [{"action": "rosc_*", "resource": "*", "effect": "allow"}])
         self.assertNotIn("provider_error", SAFE_RETRY_CODES)
 

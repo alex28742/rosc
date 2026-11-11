@@ -17,6 +17,8 @@ from http.server import BaseHTTPRequestHandler, HTTPServer
 from urllib.parse import parse_qs, urlsplit
 
 PASSWORD = os.environ.get("OPENCODE_PASSWORD", "")
+import re
+SESSION_PATH = re.compile(r"^/api/(?:experimental/)?session/(?P<sid>ses_fake(?:_[0-9]+)?)(?P<rest>|/message|/permission|/prompt|/wait)$")
 
 
 def mode() -> str:
@@ -29,17 +31,23 @@ def mode() -> str:
         return "ok"
 
 
-STATE: dict = {"session": None, "messages": [], "mcp": {}}
+# P039: several native sessions on ONE server.  The first created session keeps the historical id ``ses_fake`` (older
+# tests rely on it); later ones are ``ses_fake_2``...  Messages and permissions are per session.
+STATE: dict = {"sessions": {}, "mcp": {}, "counter": 0}
+
+
+def sess(sid: str = "ses_fake") -> dict | None:
+    return STATE["sessions"].get(sid)
 
 
 def beside(name: str) -> str:
     return os.path.join(os.path.dirname(os.path.realpath(sys.argv[0])), name)
 
 
-def permission_effect(action: str) -> str:
+def permission_effect(action: str, sid: str = "ses_fake") -> str:
     """Like the real 2.2.5 evaluator (verified live): the last matching rule wins, no match means deny."""
     effect = "deny"
-    for rule in (STATE["session"] or {}).get("permissions") or []:
+    for rule in (sess(sid) or {}).get("permissions") or []:
         if fnmatch.fnmatchcase(action, rule["action"]) and fnmatch.fnmatchcase("*", rule["resource"]):
             effect = rule["effect"]
     return effect
@@ -75,7 +83,7 @@ def connect_mcp(name: str) -> None:
         STATE["mcp"][name]["status"] = "failed"
 
 
-def run_scripted_tool_calls() -> None:
+def run_scripted_tool_calls(sid: str = "ses_fake") -> None:
     """Test-only stand-in for the model deciding to call tools: ``tool_calls.json`` beside the launcher lists
     ``{"tool": ..., "args": {...}}`` (an MCP tool) or ``{"native": "read"}`` (an OpenCode builtin).  Each call is
     first checked against the session's permission rules exactly like a real tool call would be."""
@@ -87,11 +95,12 @@ def run_scripted_tool_calls() -> None:
     with open(beside("tool_log.jsonl"), "a", encoding="utf-8") as log:
         for call in calls:
             if "native" in call:
-                log.write(json.dumps({"call": call, "allowed": permission_effect(call["native"]) == "allow"}) + "\n")
+                log.write(json.dumps({"call": call, "session": sid,
+                                     "allowed": permission_effect(call["native"], sid) == "allow"}) + "\n")
                 continue
             action = f"rosc_{call['tool']}"
-            allowed = permission_effect(action) == "allow" and "rosc" in STATE["mcp"]
-            entry = {"call": call, "allowed": allowed}
+            allowed = permission_effect(action, sid) == "allow" and "rosc" in STATE["mcp"]
+            entry = {"call": call, "allowed": allowed, "session": sid}
             if allowed:
                 try:
                     _status, answer = mcp_post(STATE["mcp"]["rosc"]["config"], {
@@ -150,22 +159,26 @@ class Handler(BaseHTTPRequestHandler):
                 models.append({"providerID": "opencode-go", "id": "deepseek-v4.1-flash"})
             return self._send({"data": models})
         if path == "/api/mcp":
+            if mode() == "mcp_lost":  # the server dropped the runtime registration (seen live in P039 Gate A)
+                return self._send({"location": {"directory": "/"}, "data": []})
             return self._send({"location": {"directory": "/"}, "data": [
                 {"name": name, "status": {"status": item["status"]}} for name, item in STATE["mcp"].items()]})
-        if path == "/api/session/ses_fake":
-            return self._send({"data": STATE["session"]})
-        if path == "/api/session/ses_fake/message":
-            if STATE.get("pending_final") and os.path.exists(beside("release")):
-                STATE["messages"].append(STATE.pop("pending_final"))
+        match = SESSION_PATH.match(path)
+        if match and match["rest"] == "" and sess(match["sid"]) is not None:
+            return self._send({"data": sess(match["sid"])["view"]})
+        if match and match["rest"] == "/message" and sess(match["sid"]) is not None:
+            me = sess(match["sid"])
+            if me.get("pending_final") and os.path.exists(beside("release")):
+                me["messages"].append(me.pop("pending_final"))
             query = parse_qs(parsed.query)
             cursor = query.get("cursor", [None])[0]
             offset = int(cursor.removeprefix("cursor-")) if cursor else 0
             if mode() == "pagination_error" and offset:
                 return self._send({"_tag": "UnknownError"}, 500)
             limit = min(int(query.get("limit", [200])[0]), 200)
-            items = STATE["messages"][offset:offset + limit]
+            items = me["messages"][offset:offset + limit]
             next_offset = offset + len(items)
-            next_cursor = f"cursor-{next_offset}" if next_offset < len(STATE["messages"]) else None
+            next_cursor = f"cursor-{next_offset}" if next_offset < len(me["messages"]) else None
             previous = f"cursor-{max(0, offset - limit)}" if offset else None
             return self._send({"data": items, "cursor": {"previous": previous, "next": next_cursor}})
         self._send({}, 404)
@@ -190,26 +203,41 @@ class Handler(BaseHTTPRequestHandler):
         path, body = self.path.split("?")[0], self._body()
         if path == "/api/session":
             permissions = [] if mode() == "unrestricted" else body.get("permissions")
-            STATE["session"] = {"id": "ses_fake", "permissions": permissions}
+            STATE["counter"] += 1
+            sid = "ses_fake" if STATE["counter"] == 1 else f"ses_fake_{STATE['counter']}"
+            view = {"id": sid, "permissions": permissions, "title": body.get("title")}
+            STATE["sessions"][sid] = {"view": view, "permissions": permissions, "messages": []}
+            me = STATE["sessions"][sid]
+            if mode() == "refuse_new_session" and STATE["counter"] > 1:
+                del STATE["sessions"][sid]
+                return self._send({"_tag": "UnknownError"}, 500)
             if mode() == "file_reply":
-                STATE["messages"] = [
+                me["messages"] = [
                     {"id": f"msg_before_{index}", "type": "assistant", "finish": "stop", "time": {"completed": 1},
                      "content": [{"type": "text", "text": text}]}
                     for index, text in enumerate(synthetic_reply().get("before", []))]
             if mode() in ("long_history", "long_match", "pagination_error"):
-                STATE["messages"] = [
+                me["messages"] = [
                     {"id": f"msg_history_{index}", "type": "assistant", "finish": "stop",
                      "time": {"completed": 1}, "content": [{"type": "text", "text": f"history {index}"}]}
                     for index in range(450)
                 ]
-            return self._send({"data": STATE["session"]})
-        if path == "/api/session/ses_fake/permission":
-            effect = permission_effect(body.get("action", ""))
+            return self._send({"data": view})
+        match = SESSION_PATH.match(path)
+        sid = match["sid"] if match else None
+        if match and match["rest"] == "/permission" and sess(sid) is not None:
+            effect = permission_effect(body.get("action", ""), sid)
             if mode() == "leaky_permission" and body.get("action") == "read":
                 effect = "allow"
             return self._send({"data": {"id": "per_1", "effect": effect}})
-        if path == "/api/session/ses_fake/prompt":
-            STATE["messages"].append({"id": body["id"], "type": "user", "text": body["text"]})
+        if match and match["rest"] == "/prompt" and sess(sid) is not None:
+            me = sess(sid)
+            me["messages"].append({"id": body["id"], "type": "user", "text": body["text"]})
+            try:
+                with open(beside("prompts_by_session.log"), "a", encoding="utf-8") as handle:
+                    handle.write(json.dumps({"session": sid, "id": body["id"], "text": body["text"]}) + "\n")
+            except OSError:
+                pass
             try:
                 with open(beside("last_prompt.txt"), "w", encoding="utf-8") as handle:
                     handle.write(body["text"])
@@ -220,9 +248,13 @@ class Handler(BaseHTTPRequestHandler):
                     handle.write(body["id"] + "\n")
             except OSError:
                 pass
-            run_scripted_tool_calls()
-            if mode() in ("ok", "long_match"):
-                STATE["messages"].append({"id": "msg_a1", "type": "assistant", "finish": "stop",
+            run_scripted_tool_calls(sid)
+            if mode() in ("echo", "mcp_lost"):
+                me["messages"].append({"id": "msg_a_" + body["id"], "type": "assistant", "finish": "stop",
+                                       "time": {"completed": 1},
+                                       "content": [{"type": "text", "text": f"ECHO[{sid}] " + body["text"][-120:]}]})
+            elif mode() in ("ok", "long_match"):
+                me["messages"].append({"id": "msg_a1", "type": "assistant", "finish": "stop",
                                           "time": {"completed": 1},
                                           "content": [{"type": "text", "text": "Fake architect reply"}]})
             elif mode() == "file_reply":
@@ -232,7 +264,7 @@ class Handler(BaseHTTPRequestHandler):
                 # "incomplete", "error" (finish=error + error object), "stop_error" (finish=stop + error object),
                 # or any other string used verbatim as ``finish``.  ``then_user`` appends a later user message.
                 for index in range(int(reply.get("intermediate", 0))):
-                    STATE["messages"].append({
+                    me["messages"].append({
                         "id": f"msg_step_{index}", "type": "assistant", "finish": "tool-calls",
                         "time": {"completed": 1}, "content": [{"type": "text", "text": f"INTERMEDIATE {index}"}]})
                 terminal = reply.get("terminal", "stop")
@@ -249,18 +281,18 @@ class Handler(BaseHTTPRequestHandler):
                 if reply.get("late_final"):
                     # Surfaces on a later message read, only once a test creates the ``release`` file beside the
                     # launcher: the model finishing after ROSC stopped waiting.
-                    STATE["pending_final"] = final
+                    me["pending_final"] = final
                 elif terminal != "none":
-                    STATE["messages"].append(final)
+                    me["messages"].append(final)
                 if reply.get("then_user"):
-                    STATE["messages"].append({"id": "msg_user_later", "type": "user", "text": "later"})
-                    STATE["messages"].append({**final, "id": "msg_a_later", "content": [
+                    me["messages"].append({"id": "msg_user_later", "type": "user", "text": "later"})
+                    me["messages"].append({**final, "id": "msg_a_later", "content": [
                         {"type": "text", "text": "LATER TURN ANSWER"}], "finish": "stop", "time": {"completed": 1}})
             elif mode() == "refuse":
-                STATE["messages"].append({"id": "msg_a1", "type": "assistant", "finish": "error",
+                me["messages"].append({"id": "msg_a1", "type": "assistant", "finish": "error",
                                           "error": {"name": "x"}, "time": {"completed": 1}, "content": []})
             return self._send({"data": {"id": body["id"]}})
-        if path == "/api/experimental/session/ses_fake/wait":
+        if match and match["rest"] == "/wait" and sess(sid) is not None:
             self.send_response(204)
             self.end_headers()
             return

@@ -94,6 +94,7 @@ export function stubApi(over: Partial<{ [K in keyof CoreApi]: ReturnType<typeof 
     createAssignment: vi.fn(async () => roleAssignment('assignment-1')),
     revokeAssignment: vi.fn(async () => roleAssignment('assignment-1', { state: 'revoked', version: 2 })),
     getArchitect: vi.fn(async () => architectStatus()),
+    sendTaskMessageToArchitect: vi.fn(async () => ({ delivery: { state: 'pending', error_code: null, reply_message_id: null, can_retry: false, can_reconcile: true } })),
     activateArchitect: vi.fn(async () => architectStatus({ state: 'ready', can_activate: false, can_deactivate: true })),
     deactivateArchitect: vi.fn(async () => architectStatus()),
     getContextAccess: vi.fn(async () => contextAccess()),

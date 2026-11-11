@@ -19,7 +19,9 @@ const textScale = { scale: 100 as const, onChange: vi.fn() };
 const taskConversation = () => ({
   state: { status: 'ready' as const, conversationId: null, messages: [], hasMore: false, nextBefore: null,
     error: '', sending: false, olderLoading: false },
-  onReload: vi.fn(), onLoadOlder: vi.fn(), onSend: vi.fn(async () => null),
+  architect: { status: 'ready' as const, info: null },
+  onReload: vi.fn(), onLoadOlder: vi.fn(), onSend: vi.fn(async () => null), onSendToArchitect: vi.fn(async () => null),
+  onReconcile: vi.fn(async () => null), onRetryDelivery: vi.fn(async () => null),
 });
 
 const conversation = () => ({

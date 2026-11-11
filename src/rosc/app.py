@@ -224,7 +224,7 @@ class TaskConversationMessageInput(ConversationMessageInput):
     recipient: Literal["architect"] | None = None
 
 
-CONVERSATION_PATH = re.compile(r"^/api/projects/[^/]+/(tasks/[^/]+/conversation(/messages)?|conversation(/messages(/[^/]+/(reconcile|retry))?)?|architect/(activate|deactivate)|architect(/context-access)?)$")
+CONVERSATION_PATH = re.compile(r"^/api/projects/[^/]+/(tasks/[^/]+/conversation(/messages(/[^/]+/send)?)?|conversation(/messages(/[^/]+/(reconcile|retry))?)?|architect/(activate|deactivate)|architect(/context-access)?)$")
 DEFAULT_GLOBAL_LIBRARY = global_library_dir()  # <checkout>/global (Git-tracked); None for a non-editable install
 
 
@@ -693,12 +693,19 @@ def create_app(db_path: Path | None = None, workspace_root: Path | None = None, 
     def create_task_conversation_message(project_id: str, task_id: str, data: TaskConversationMessageInput,
                                          response: Response) -> dict:
         pid, tid = numeric_id(project_id, "P"), numeric_id(task_id, "T")
-        # Stored only: no Architect submit, OpenCode call or queue. The sender is the trusted local Owner context.
+        # Stored only (P039: delivery is the separate explicit /send action): no Architect submit, OpenCode call or queue. The sender is the trusted local Owner context.
         result = conversation_call(conversation.create_message, current_actor(), pid, client_key=data.client_key,
                                    body=data.body, task_id=tid, recipient=data.recipient)
         if result["replayed"]:
             response.status_code = 200
         return result
+
+    @app.post("/api/projects/{project_id}/tasks/{task_id}/conversation/messages/{message_id}/send")
+    def send_task_conversation_message(project_id: str, task_id: str, message_id: str) -> dict:
+        """P039: the one explicit delivery action.  Hands ONE saved, Architect-addressed Task message to the Project
+        Architect's native session for this Task; saving a message (above) still delivers nothing."""
+        pid, tid = numeric_id(project_id, "P"), numeric_id(task_id, "T")
+        return {"delivery": conversation_call(architect.send_task_message, current_actor(), pid, tid, message_id)}
 
     @app.post("/api/projects/{project_id}/architect/activate")
     def architect_activate(project_id: str) -> dict:

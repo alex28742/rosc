@@ -1,6 +1,15 @@
 import { useEffect, useRef, useState, type FormEvent } from 'react';
 import type { MessageRecipient } from '../../../core/models';
 import type { TaskConversationControls } from '../../../app/presentation/contracts';
+import { architectReason, describeArchitect } from './architectView';
+
+/** Delivery wording is about the stored Owner message, never proof that the Architect answered. */
+const DELIVERY_TEXT: Record<string, string> = {
+  pending: 'Отправлено Architect, ожидается ответ…',
+  delivered: 'Architect ответил в этой задаче',
+  failed: 'Не доставлено Architect',
+  unknown: 'Результат доставки неизвестен — повторная отправка не выполнялась',
+};
 
 function formatTime(iso: string): string {
   const date = new Date(iso);
@@ -16,8 +25,9 @@ function newClientKey(): string {
 }
 
 /**
- * Task Conversation: this Task's own saved history and an Owner composer. An addressee is only a saved intent, so an
- * addressed message is shown as stored and not delivered; nothing here implies the Architect read or answered it.
+ * Task Conversation: this Task's own saved history and an Owner composer. Saving and sending are separate: a message
+ * addressed to the Architect is handed over only when Core reports a verified live Architect (or by the explicit send
+ * action); the reply, delivery state and failures are shown exactly as Core reports them.
  */
 type Props = { taskId: string; conversation: TaskConversationControls; collapsed: boolean; onCollapsedChange: (collapsed: boolean) => void };
 
@@ -27,6 +37,9 @@ export function TaskConversationPanel({ taskId, conversation, collapsed, onColla
   const [recipient, setRecipient] = useState<MessageRecipient>(null);
   const [failure, setFailure] = useState('');
   const [locked, setLocked] = useState(false);
+  const [deliveryFailure, setDeliveryFailure] = useState('');
+  const view = describeArchitect(conversation.architect.info, conversation.architect.status === 'ready', false);
+  const live = view.live && conversation.architect.info?.state === 'ready';
   const pending = useRef<{ body: string; recipient: MessageRecipient; key: string } | null>(null);
   const inFlight = useRef(false);
   const feed = useRef<HTMLDivElement | null>(null);
@@ -80,7 +93,9 @@ export function TaskConversationPanel({ taskId, conversation, collapsed, onColla
     <header className="rosc-conversation__head">
       <div>
         <h3>Task Conversation</h3>
-        <p>История этой задачи сохраняется в ROSC · Architect из этого чата пока не получает сообщения</p>
+        <p>{live ? 'История задачи в ROSC · сообщения для Architect передаются ему, ответ придёт сюда'
+          : 'История задачи сохраняется в ROSC · Architect не активен — сообщения только сохраняются'}</p>
+        <p className={`rosc-conversation__architect rosc-conversation__architect--${view.tone}`}>{view.label}</p>
       </div>
       <div className="rosc-conversation__head-actions">
         <button type="button" className="rosc-chat-icon" disabled aria-label="Поиск по Task Conversation — пока недоступно"
@@ -101,20 +116,44 @@ export function TaskConversationPanel({ taskId, conversation, collapsed, onColla
       </div>}
       {ready && state.messages.length === 0 && <div className="rosc-state">
         <p>Сообщений по этой задаче пока нет.</p>
-        <p>Сообщение Owner сохранится в ROSC. Ответа не будет: доставка Architect из Task Conversation ещё не подключена.</p>
+        <p>{live ? 'Сообщение с адресатом Architect будет ему передано, ответ сохранится здесь.'
+          : 'Сообщение Owner сохранится в ROSC. Architect не активен, поэтому ответа не будет.'}</p>
       </div>}
-      {state.messages.map(message => <article key={message.message_id}
-        className="rosc-chat-message rosc-chat-message--owner" data-message-id={message.message_id}>
-        <span className="rosc-chat-avatar" aria-hidden="true">O</span>
-        <div className="rosc-chat-bubble">
-          <div className="rosc-chat-meta">
-            <span>{message.sender.display_name}{message.recipient === 'architect' ? ' → Architect' : ''}</span>
-            <time dateTime={message.created_at}>{formatTime(message.created_at)}</time>
+      {state.messages.map(message => {
+        const fromArchitect = message.sender.kind === 'architect';
+        const delivery = message.delivery;
+        const addressed = message.recipient === 'architect';
+        return <article key={message.message_id}
+          className={fromArchitect ? 'rosc-chat-message rosc-chat-message--architect' : 'rosc-chat-message rosc-chat-message--owner'}
+          data-message-id={message.message_id}>
+          <span className="rosc-chat-avatar" aria-hidden="true">{fromArchitect ? 'A' : 'O'}</span>
+          <div className="rosc-chat-bubble">
+            <div className="rosc-chat-meta">
+              <span>{message.sender.display_name}{addressed && !fromArchitect ? ' → Architect' : ''}</span>
+              <time dateTime={message.created_at}>{formatTime(message.created_at)}</time>
+            </div>
+            <p className="rosc-chat-body">{message.body}</p>
+            {!fromArchitect && (!delivery || delivery.state === 'not_sent') && <p className="rosc-chat-delivery">
+              {addressed ? 'Сохранено · не отправлено Architect' : 'Сохранено'}
+              {addressed && <button type="button" className="rosc-btn rosc-btn--small" disabled={!live}
+                title={live ? undefined : 'Architect не активен — активируйте его в Project Conversation'}
+                onClick={async () => setDeliveryFailure(await conversation.onSendToArchitect(message.message_id) ?? '')}>
+                Отправить Architect</button>}
+            </p>}
+            {delivery && delivery.state !== 'not_sent' && <p className={`rosc-chat-delivery rosc-chat-delivery--${delivery.state}`}
+              aria-live="polite">
+              {DELIVERY_TEXT[delivery.state]}{delivery.error_code ? ` (${architectReason(delivery.error_code) || delivery.error_code})` : ''}
+              {delivery.can_retry && <button type="button" className="rosc-btn rosc-btn--small"
+                onClick={async () => setDeliveryFailure(await conversation.onRetryDelivery(message.message_id) ?? '')}>
+                Повторить отправку</button>}
+              {delivery.can_reconcile && (delivery.state === 'unknown' || delivery.state === 'failed') && <button type="button"
+                className="rosc-btn rosc-btn--small"
+                onClick={async () => setDeliveryFailure(await conversation.onReconcile(message.message_id) ?? '')}>
+                {delivery.state === 'failed' ? 'Восстановить ответ' : 'Проверить результат'}</button>}
+            </p>}
           </div>
-          <p className="rosc-chat-body">{message.body}</p>
-          <p className="rosc-chat-delivery">{message.recipient === 'architect' ? 'Сохранено · не доставлено Architect' : 'Сохранено'}</p>
-        </div>
-      </article>)}
+        </article>;
+      })}
     </div>
     <form className="rosc-conversation__compose" onSubmit={submit}>
       <textarea aria-label="Сообщение в Task Conversation" placeholder="Заметка или вопрос по этой задаче…" rows={3}
@@ -139,14 +178,17 @@ export function TaskConversationPanel({ taskId, conversation, collapsed, onColla
           <small>От: Owner · local_unverified</small>
         </div>
         <button type="submit" className="rosc-btn rosc-btn--primary"
-          disabled={!draft.trim() || !ready || state.sending || locked}>{state.sending ? 'Сохранение…' : 'Сохранить'}</button>
+          disabled={!draft.trim() || !ready || state.sending || locked}>{state.sending ? 'Сохранение…'
+            : recipient === 'architect' && live ? 'Отправить' : 'Сохранить'}</button>
       </div>
       {failure && <p className="rosc-conversation__error" role="alert">{failure}</p>}
+      {deliveryFailure && <p className="rosc-conversation__error" role="alert">{deliveryFailure}</p>}
       {!ready && <p className="rosc-conversation__hint">Сохранение станет доступно после загрузки истории.</p>}
       <p className="rosc-conversation__hint">
         {recipient === 'architect'
-          ? 'Сообщение сохранится в ROSC с адресатом Architect, но не будет ему доставлено.'
-          : 'Сообщение сохранится в ROSC без адресата.'}
+          ? (live ? 'Сообщение сохранится в ROSC и будет передано Architect; ранее сохранённые сообщения не пересылаются.'
+            : 'Architect не активен: сообщение сохранится в ROSC с адресатом Architect, его можно отправить позже кнопкой «Отправить Architect».')
+          : 'Сообщение сохранится в ROSC без адресата и никому не передаётся.'}
       </p>
     </form>
     <button type="button" className="rosc-conversation__rail" aria-label="Развернуть Task Conversation"

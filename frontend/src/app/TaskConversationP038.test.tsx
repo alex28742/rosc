@@ -39,7 +39,7 @@ describe('Task Conversation in the Task drawer', () => {
     fireEvent.change(view.getByLabelText('Адресат сообщения'), { target: { value: 'architect' } });
     fireEvent.change(box, { target: { value: 'Для Architect' } });
     fireEvent.click(view.getByRole('button', { name: 'Сохранить' }));
-    await view.findByText('Сохранено · не доставлено Architect');
+    await view.findByText('Сохранено · не отправлено Architect');
     expect(api.sendTaskConversationMessage).toHaveBeenLastCalledWith('P0001', 'T0001',
       expect.objectContaining({ body: 'Для Architect', recipient: 'architect' }));
     expect(view.queryByText(/Architect ответил|печатает|в сети/)).toBeNull();
@@ -87,7 +87,7 @@ describe('Task Conversation in the Task drawer', () => {
     first.unmount();
     render(<App api={api} />);
     expect(await screen.findByText('Пережило обновление')).toBeTruthy();
-    expect(screen.getByText('Сохранено · не доставлено Architect')).toBeTruthy();
+    expect(screen.getByText('Сохранено · не отправлено Architect')).toBeTruthy();
     expect(api.getTaskConversation).toHaveBeenCalledTimes(2);
   });
 });
