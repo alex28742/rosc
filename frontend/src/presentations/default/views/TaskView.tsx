@@ -1,4 +1,8 @@
-import { useState } from 'react';
+import { useCallback, useRef, useState } from 'react';
+import type { SpecRevision } from '../../../core/models';
+import { describeArchitect } from '../ui/architectView';
+import { PromptDraftDrawer } from '../ui/PromptDraftDrawer';
+import { RichEditor, RichToolbar, RichView, type RichEditorHandle } from '../ui/RichText';
 import type { TaskViewProps } from '../../../app/presentation/contracts';
 import { Drawer } from '../ui/Drawer';
 import { Feedback } from '../ui/Feedback';
@@ -19,14 +23,45 @@ function Later({ children, label }: { children: string; label?: string }) {
  * Working Plan | Context & Actions, full-height Task Conversation, full-width head/footer). Core data fills the
  * regions it has; the rest are honest empty states with disabled controls, never simulated state.
  */
-export function TaskView({ projectName, taskId, task, tasksStatus, feedback, inert, scroll, workspace, conversation, textScale, onClose, onRetry }: TaskViewProps) {
+export function TaskView({ projectName, taskId, task, tasksStatus, feedback, inert, scroll, workspace, conversation, authoring, textScale, onClose, onRetry }: TaskViewProps) {
   const scaleRef = useApplyTextScale(textScale.scale);
   const [chatCollapsed, setChatCollapsed] = useState(false);
   const [specCollapsed, setSpecCollapsed] = useState(false);
+  const [draftOpen, setDraftOpen] = useState(false);
+  const [specDirty, setSpecDirty] = useState(false);
+  const [specNote, setSpecNote] = useState('');
+  const [specFailure, setSpecFailure] = useState('');
+  const [past, setPast] = useState<SpecRevision | null>(null);
+  const descriptionEditor = useRef<RichEditorHandle | null>(null);
+  const criteriaEditor = useRef<RichEditorHandle | null>(null);
+  const markDirty = useCallback(() => { setSpecDirty(true); setSpecNote(''); }, []);
+  const data = authoring.data;
+  const spec = data?.spec ?? null;
+  const architectView = describeArchitect(conversation.architect.info, conversation.architect.status === 'ready', false);
+  const canEditSpec = data?.editable === true && past === null;
+  const saveSpec = async () => {
+    setSpecFailure(''); setSpecNote('');
+    const result = await authoring.onSaveSpec({ description: descriptionEditor.current?.html() ?? '', acceptance_criteria: criteriaEditor.current?.html() ?? '' });
+    if (result.error) { setSpecFailure(result.error); return; }
+    setSpecDirty(false);
+    setSpecNote(result.created ? 'Новая версия Spec сохранена.' : 'Изменений нет — новая версия не создана.');
+  };
+  const discardSpec = () => { setSpecDirty(false); setSpecFailure(''); setPast(null); authoring.onReload(); };
+  const openPast = async (revision: number) => {
+    setSpecFailure('');
+    if (spec && revision === spec.revision) { setPast(null); return; }
+    const result = await authoring.onLoadSpecRevision(revision);
+    if (typeof result === 'string') setSpecFailure(result); else setPast(result);
+  };
+  const shown = past ?? spec;
+  const next = data?.next ?? null;
+  const prompt = data?.prompt ?? null;
+  const promptText = prompt ? `v${prompt.revision} · ${prompt.state === 'stale' ? 'устарел' : prompt.state === 'approved' ? 'утверждён' : 'не утверждён'}` : 'нет';
+  const primaryEnabled = next !== null && next.enabled && !authoring.busy;
   const head = <>
     <div className="rosc-drawer__heading">
       <p className="rosc-drawer-eyebrow">TASK / WORK AREA</p>
-      <h2>{task ? `${task.id} · ${task.title}` : taskId}</h2>
+      <h2>{task ? `${task.id} · ${spec?.title ?? task.title}` : taskId}</h2>
       <p>{projectName} · чтение Task не запускает агента</p>
     </div>
     <div className="rosc-drawer__controls">
@@ -64,8 +99,8 @@ export function TaskView({ projectName, taskId, task, tasksStatus, feedback, ine
           </section>
           <div className="rosc-task-heading">
             <div>
-              <h3>{task.title}</h3>
-              <p>Task {task.id} · Spec Draft · Run не создан · Исполнитель: не назначен</p>
+              <h3>{spec?.title ?? task.title}</h3>
+              <p>Task {task.id} · {spec ? `Spec v${spec.revision}` : 'Spec'} · {data?.run.label ?? 'Run не авторизован'} · Исполнитель: не назначен</p>
             </div>
             <div className="rosc-task-heading__flags">
               <span className="rosc-chip">Проект: {projectName}</span>
@@ -73,15 +108,48 @@ export function TaskView({ projectName, taskId, task, tasksStatus, feedback, ine
             </div>
           </div>
           <section className={specCollapsed ? 'rosc-task-panel rosc-task-spec rosc-task-spec--collapsed' : 'rosc-task-panel rosc-task-spec'} aria-label="Спецификация задачи">
-            <div className="rosc-task-panel__top"><h3>Спецификация задачи</h3><span className="rosc-chip">Draft</span></div>
-            {!specCollapsed && <div className="rosc-task-spec__body">
-              <div><h4>Описание задачи</h4><p className="rosc-task-text">{task.description}</p></div>
-              <div><h4>Критерии приёмки</h4><p className="rosc-task-text">{task.acceptance_criteria}</p></div>
+            <div className="rosc-task-panel__top"><h3>Спецификация задачи</h3>
+              <span className="rosc-task-panel__chips">
+                {shown && <span className="rosc-chip" data-testid="spec-version">Spec v{shown.revision}</span>}
+                {shown && <span className="rosc-chip">Автор: {shown.provenance === 'architect' ? 'Architect' : shown.provenance === 'legacy_import' ? 'импорт' : 'Owner'}</span>}
+                {data?.prompt?.state === 'stale' && <span className="rosc-tag rosc-tag--warning">Prompt устарел</span>}
+                <span className="rosc-chip">{data?.editable ? 'Редактируется до разрешения Run' : 'Зафиксирована'}</span>
+              </span>
+            </div>
+            {authoring.status === 'failed' && <p className="rosc-task-spec__error" role="alert">Не удалось загрузить Spec. {authoring.error} <button type="button" className="rosc-task-link" onClick={authoring.onReload}>Повторить</button></p>}
+            {authoring.status === 'loading' && !spec && <div className="rosc-state rosc-state--loading"><span className="rosc-spinner" aria-hidden="true" />Загрузка Spec…</div>}
+            {past && <p className="rosc-task-spec__past" role="status">Просмотр прежней версии Spec v{past.revision} — только чтение. <button type="button" className="rosc-task-link" onClick={() => setPast(null)}>К текущей версии</button></p>}
+            {shown && <div className="rosc-task-spec__body" hidden={specCollapsed}>
+              <div>
+                <h4>Описание задачи</h4>
+                {canEditSpec && <RichToolbar editor={descriptionEditor} attachLater />}
+                {canEditSpec
+                  ? <RichEditor ref={descriptionEditor} html={shown.description_html} resetKey={`d${shown.revision}${shown.digest}`} label="Описание задачи" onInput={markDirty} />
+                  : <RichView html={shown.description_html} />}
+                {shown.scope && <p className="rosc-task-scope"><strong>Границы (scope):</strong> {shown.scope}</p>}
+              </div>
+              <div>
+                <h4>Критерии приёмки <small>Общие для Worker, Architect и Owner</small></h4>
+                {canEditSpec && <RichToolbar editor={criteriaEditor} />}
+                {canEditSpec
+                  ? <RichEditor ref={criteriaEditor} html={shown.criteria_html} resetKey={`c${shown.revision}${shown.digest}`} label="Критерии приёмки" onInput={markDirty} />
+                  : <RichView html={shown.criteria_html} />}
+              </div>
             </div>}
+            {(specNote || specFailure) && <p className={specFailure ? 'rosc-task-spec__error' : 'rosc-task-spec__note'} role={specFailure ? 'alert' : 'status'}>{specFailure || specNote}</p>}
             <div className="rosc-task-panel__foot">
-              <span>Редактирование Spec и версии появятся позже.</span>
+              <span className="rosc-task-spec__versions"><strong>Одна версия критериев</strong> для исполнения, проверки и приёмки.
+                {authoring.specHistory.length > 1 && <span className="rosc-task-spec__history" aria-label="Версии Spec">
+                  {authoring.specHistory.map(item => <button key={item.revision} type="button" className="rosc-task-link"
+                    aria-current={shown?.revision === item.revision} disabled={specDirty}
+                    title={specDirty ? 'Сохраните или отмените правки' : `Открыть Spec v${item.revision}`}
+                    onClick={() => void openPast(item.revision)}>v{item.revision}</button>)}
+                </span>}
+              </span>
               <span className="rosc-task-panel__foot-actions">
-                <Later>Сохранить Spec</Later>
+                {specDirty && <button type="button" className="rosc-btn rosc-btn--small" onClick={discardSpec}>Отменить</button>}
+                {canEditSpec && <button type="button" className="rosc-btn rosc-btn--small rosc-btn--primary" disabled={!specDirty || authoring.busy}
+                  onClick={() => void saveSpec()}>Сохранить Spec</button>}
                 <button type="button" className="rosc-task-link" aria-expanded={!specCollapsed}
                   onClick={() => setSpecCollapsed(value => !value)}>{specCollapsed ? 'Развернуть спецификацию ⌄' : 'Свернуть спецификацию ⌃'}</button>
               </span>
@@ -103,22 +171,37 @@ export function TaskView({ projectName, taskId, task, tasksStatus, feedback, ine
               </div>
             </section>
             <section className="rosc-task-panel rosc-task-context" aria-label="Контекст и действия">
-              <div className="rosc-task-panel__top"><h3>Контекст и действия</h3><span className="rosc-chip">Следующий ход пока не определён</span></div>
+              <div className="rosc-task-panel__top"><h3>Контекст и действия</h3>
+                <span className="rosc-chip">{next ? `Следующий ход: ${next.next_actor}` : 'Следующий ход пока не определён'}</span></div>
               <div className="rosc-task-panel__scroll">
                 <dl className="rosc-task-facts">
                   <div><dt>Проект</dt><dd>{projectName}</dd></div>
                   <div><dt>Task</dt><dd>{task.status}</dd></div>
-                  <div><dt>Workspace</dt><dd>{task.workspace_state === 'ready' ? 'готов' : 'нужна сверка'}</dd></div>
-                  <div><dt>Worker</dt><dd>не назначен</dd></div>
+                  <div><dt>Spec</dt><dd>{spec ? `v${spec.revision}${specDirty ? ' · есть несохранённые правки' : ''}` : '—'}</dd></div>
+                  <div><dt>Prompt Draft</dt><dd data-testid="draft-fact">{promptText}</dd></div>
+                  <div><dt>Architect</dt><dd>{architectView.state}</dd></div>
+                  <div><dt>Worker</dt><dd>{data?.run.worker ?? 'не назначен'}</dd></div>
                   <div><dt>Blocker</dt><dd>нет данных</dd></div>
-                  <div><dt>Run / Checkpoint</dt><dd>не создан</dd></div>
+                  <div><dt>Run / Checkpoint</dt><dd>{data?.run.label ?? 'не создан'}</dd></div>
+                  <div><dt>Workspace</dt><dd>{task.workspace_state === 'ready' ? 'готов' : 'нужна сверка'}</dd></div>
                 </dl>
                 <WorkspaceActions key={`${task.id}:${task.workspace_problem}`} state={task.workspace_state} problem={task.workspace_problem} controls={workspace} />
+                <div className="rosc-task-primary" aria-label="Основное действие">
+                  <h4>{specDirty ? 'Сохраните Spec' : next?.label ?? 'Загрузка…'}</h4>
+                  <p className="rosc-hint">{specDirty ? 'Есть несохранённые правки Spec. Сохраните их — каждая версия фиксируется отдельно.' : next?.hint ?? ''}</p>
+                  <div className="rosc-task-actions__row">
+                    {specDirty
+                      ? <button type="button" className="rosc-btn rosc-btn--primary" disabled={authoring.busy} onClick={() => void saveSpec()}>Подготовить / Сохранить Spec</button>
+                      : <button type="button" className="rosc-btn rosc-btn--primary" disabled={!primaryEnabled}
+                        title={next && !next.enabled ? next.hint : undefined} onClick={() => setDraftOpen(true)}>{next?.label ?? 'Загрузка…'}</button>}
+                    {!specDirty && next?.action === 'authorize_run' && data?.prompt && <button type="button" className="rosc-btn rosc-btn--small" onClick={() => setDraftOpen(true)}>
+                      {next.secondary ?? 'Просмотреть утверждённый Draft'}</button>}
+                  </div>
+                </div>
                 <div className="rosc-task-agents">
                   <div>
-                    <div className="rosc-task-agents__head"><strong>Project Architect</strong><span className="rosc-chip">Не активен</span></div>
-                    <p>Архитектор проекта не запускается из Task Work Area.</p>
-                    <Later>Architect в Task</Later>
+                    <div className="rosc-task-agents__head"><strong>Project Architect</strong><span className="rosc-chip">{architectView.state}</span></div>
+                    <p>Architect может готовить Spec и Draft через защищённые Tools; утверждает только Owner.</p>
                   </div>
                   <div>
                     <div className="rosc-task-agents__head"><strong>Worker этой Task</strong><span className="rosc-chip">Не запущен</span></div>
@@ -127,21 +210,21 @@ export function TaskView({ projectName, taskId, task, tasksStatus, feedback, ine
                   </div>
                 </div>
                 <div className="rosc-task-actions">
-                  <h4>Следующие действия</h4>
-                  <p className="rosc-hint">Подготовка Prompt и разрешение Run появятся в следующих срезах.</p>
+                  <h4>Документы Task</h4>
                   <div className="rosc-task-actions__row">
-                    <Later>Prompt Draft</Later>
-                    <Later>Разрешить запуск</Later>
+                    <Later>Prompt / контракт</Later>
                     <Later>Журнал выполнения</Later>
+                    <Later>Ревизии плана</Later>
                   </div>
                 </div>
               </div>
-              <div className="rosc-task-panel__foot"><span>Действия включатся, когда Core получит соответствующий API.</span></div>
+              <div className="rosc-task-panel__foot"><span>Утверждение Draft не разрешает запуск: разрешение Run — отдельная операция Core.</span></div>
             </section>
           </div>
         </div>
         <TaskConversationPanel key={`${task.project_id}/${task.id}`} taskId={task.id} conversation={conversation}
           collapsed={chatCollapsed} onCollapsedChange={setChatCollapsed} />
+        {draftOpen && <PromptDraftDrawer key={`${task.project_id}/${task.id}`} taskId={task.id} authoring={authoring} onClose={() => setDraftOpen(false)} />}
       </div>}
   </Drawer>;
 }

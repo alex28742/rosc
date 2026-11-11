@@ -67,6 +67,9 @@ OUTCOMES = frozenset({
     "ok", "idle", "reply", "scheduled", "existing", "not_sent", "conflict", "ready", "committed", "not_committed",
     "delivered", "failed", "unknown", "pending", "none", "interrupted", "no_state", "exception", "in_progress",
     "absent", "uncertain", "error", OUTCOME_OTHER,
+    # P040 authoring Tool error codes (task_authoring.AuthoringError.code)
+    "forbidden", "invalid", "spec_conflict", "prompt_conflict", "source_not_current", "prompt_stale", "not_head",
+    "not_editable", "digest_mismatch", "project_unavailable",
     # runtime (RuntimeProblem) codes
     "connection_failed", "connection_lost", "empty_reply", "endpoint_identity_mismatch", "lookup_failed",
     "malformed_response", "model_unavailable", "no_reply", "process_exited", "process_identity_unproven",

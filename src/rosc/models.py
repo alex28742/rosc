@@ -3,7 +3,7 @@ from __future__ import annotations
 import uuid
 from datetime import datetime, timezone
 
-from sqlalchemy import Boolean, CheckConstraint, DateTime, ForeignKey, Index, Integer, String, Text, UniqueConstraint, select, text
+from sqlalchemy import Boolean, CheckConstraint, DateTime, ForeignKey, ForeignKeyConstraint, Index, Integer, String, Text, UniqueConstraint, select, text
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 
 # Root Binding states. Exactly one ``current`` binding per Project; older ones stay as history.
@@ -638,4 +638,86 @@ class Task(Base):
     acceptance_criteria: Mapped[str] = mapped_column(Text)
     status: Mapped[str] = mapped_column(String(16), default="Draft")
     workspace_state: Mapped[str] = mapped_column(String(16), default="provisioning")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
+
+
+# P040 Task authoring. A Spec / Prompt revision is an immutable row; ``head``, ``stale`` and ``approved`` are derived
+# from the rows (never stored as flags). ``Task.title/description/acceptance_criteria`` stay as a denormalized
+# projection of the current Spec head, updated in the same transaction as the revision.
+PROVENANCE_OWNER = "owner"
+PROVENANCE_ARCHITECT = "architect"
+PROVENANCE_LEGACY = "legacy_import"
+
+
+class TaskSpecRevision(Base):
+    __tablename__ = "task_spec_revisions"
+    __table_args__ = (
+        UniqueConstraint("task_id", "revision", name="uq_task_spec_revisions_task_revision"),
+        CheckConstraint("revision >= 1", name="ck_task_spec_revisions_revision"),
+        CheckConstraint("provenance IN ('owner', 'architect', 'legacy_import')", name="ck_task_spec_revisions_provenance"),
+        Index("ix_task_spec_revisions_project_task", "project_id", "task_id"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    project_id: Mapped[int] = mapped_column(ForeignKey("projects.id", ondelete="RESTRICT"))
+    task_id: Mapped[int] = mapped_column(ForeignKey("tasks.id", ondelete="RESTRICT"))
+    revision: Mapped[int] = mapped_column(Integer)
+    title: Mapped[str] = mapped_column(String(160))
+    scope: Mapped[str] = mapped_column(Text, default="")
+    description_html: Mapped[str] = mapped_column(Text)  # canonical whitelist HTML (see rosc.rich_text)
+    criteria_html: Mapped[str] = mapped_column(Text)
+    digest: Mapped[str] = mapped_column(String(64))
+    provenance: Mapped[str] = mapped_column(String(16))
+    actor_kind: Mapped[str] = mapped_column(String(16))
+    actor_id: Mapped[str] = mapped_column(String(64))
+    actor_assurance: Mapped[str] = mapped_column(String(32))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
+
+
+class PromptRevision(Base):
+    __tablename__ = "prompt_revisions"
+    __table_args__ = (
+        UniqueConstraint("task_id", "revision", name="uq_prompt_revisions_task_revision"),
+        CheckConstraint("revision >= 1", name="ck_prompt_revisions_revision"),
+        CheckConstraint("length(summary) >= 1 AND length(body) >= 1", name="ck_prompt_revisions_text"),
+        ForeignKeyConstraint(["task_id", "source_spec_revision"],
+                             ["task_spec_revisions.task_id", "task_spec_revisions.revision"],
+                             ondelete="RESTRICT", name="fk_prompt_revisions_spec"),
+        Index("ix_prompt_revisions_project_task", "project_id", "task_id"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    project_id: Mapped[int] = mapped_column(ForeignKey("projects.id", ondelete="RESTRICT"))
+    task_id: Mapped[int] = mapped_column(ForeignKey("tasks.id", ondelete="RESTRICT"))
+    revision: Mapped[int] = mapped_column(Integer)
+    source_spec_revision: Mapped[int] = mapped_column(Integer)
+    body: Mapped[str] = mapped_column(Text)
+    summary: Mapped[str] = mapped_column(Text)
+    digest: Mapped[str] = mapped_column(String(64))
+    rules_ref: Mapped[str | None] = mapped_column(String(160), nullable=True)  # only a verified instruction/rules reference
+    actor_kind: Mapped[str] = mapped_column(String(16))
+    actor_id: Mapped[str] = mapped_column(String(64))
+    actor_assurance: Mapped[str] = mapped_column(String(32))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
+
+
+class PromptApproval(Base):
+    """Owner approval of ONE exact saved Prompt revision. Not a Run authorization (P041)."""
+
+    __tablename__ = "prompt_approvals"
+    __table_args__ = (
+        UniqueConstraint("prompt_revision_id", name="uq_prompt_approvals_revision"),
+        Index("ix_prompt_approvals_task", "task_id"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    prompt_revision_id: Mapped[int] = mapped_column(ForeignKey("prompt_revisions.id", ondelete="RESTRICT"))
+    project_id: Mapped[int] = mapped_column(ForeignKey("projects.id", ondelete="RESTRICT"))
+    task_id: Mapped[int] = mapped_column(ForeignKey("tasks.id", ondelete="RESTRICT"))
+    spec_revision: Mapped[int] = mapped_column(Integer)
+    prompt_revision: Mapped[int] = mapped_column(Integer)
+    digest: Mapped[str] = mapped_column(String(64))
+    actor_kind: Mapped[str] = mapped_column(String(16))
+    actor_id: Mapped[str] = mapped_column(String(64))
+    actor_assurance: Mapped[str] = mapped_column(String(32))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))

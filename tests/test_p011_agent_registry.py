@@ -609,15 +609,15 @@ class MigrationTests(RegistryCase):
 
     def test_single_head_and_fresh_schema(self) -> None:
         from alembic.script import ScriptDirectory
-        self.assertEqual(ScriptDirectory.from_config(self.alembic).get_heads(), ["0011_task_native_sessions"])
+        self.assertEqual(ScriptDirectory.from_config(self.alembic).get_heads(), ["0012_task_spec_prompt_authoring"])
         self.assertTrue({"agent_definitions", "agent_capabilities", "role_assignments", "assignment_capabilities"}
                         <= self.table_names())
 
     def test_upgrade_from_populated_0002_preserves_rows_bindings_and_manifests(self) -> None:
-        command.downgrade(self.alembic, "0002_project_identity_binding")
-        self.assertNotIn("role_assignments", self.table_names())
         self.assertEqual(self.register(self.new_root()).status_code, 201)
         self.assertEqual(self.client.post("/api/projects/P0001/tasks", json=TASK).status_code, 201)
+        command.downgrade(self.alembic, "0002_project_identity_binding")  # P040: Task creation needs the Spec tables
+        self.assertNotIn("role_assignments", self.table_names())
         documents = ArchitectDocumentService(make_session_factory(self.data / "rosc.db"), self.data / "workspace",
                                              LocalOwnerPolicy())
         documents.write_document(OWNER, 1, "notes", "# kept bytes\n")

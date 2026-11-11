@@ -1,7 +1,7 @@
 // The only surface a presentation package sees. Presentations render these typed view models and call these
 // callbacks; they never reach the API client, the router or Core persistence.
 import type { ComponentType, ReactNode } from 'react';
-import type { AgentDefinition, AgentFormValues, ArchitectStatus, ContextAccess, ConversationMessage, MessageRecipient, Project, ProjectFormValues, RepairConfirmation, RoleAssignment, Task, TaskFormValues } from '../../core/models';
+import type { AgentDefinition, AgentFormValues, ArchitectStatus, ContextAccess, ConversationMessage, MessageRecipient, Project, ProjectFormValues, RepairConfirmation, RoleAssignment, SpecRevision, SpecRevisionSummary, Task, TaskAuthoring, TaskFormValues } from '../../core/models';
 import type { ScrollRegions } from '../scroll';
 
 export type LoadStatus = 'loading' | 'ready' | 'failed';
@@ -271,6 +271,23 @@ export type TaskConversationControls = {
   onRetryDelivery: (messageId: string) => Promise<string | null>;
 };
 
+/** P040: Spec revisions, Prompt Draft revisions and the Owner approval of one exact Draft. Never starts a Run. */
+export type TaskAuthoringControls = {
+  status: LoadStatus;
+  data: TaskAuthoring | null;
+  specHistory: SpecRevisionSummary[];
+  error: string;
+  busy: boolean;
+  onReload: () => void;
+  /** Saves a new Spec revision from the edited rich text. Resolves to an error message or `null`; `created` is false when nothing changed. */
+  onSaveSpec: (input: { description: string; acceptance_criteria: string }) => Promise<{ error: string | null; created: boolean }>;
+  onLoadSpecRevision: (revision: number) => Promise<SpecRevision | string>;
+  /** Saves a new Prompt Draft revision for the current Spec. Resolves to an error message or `null`. */
+  onSavePrompt: (body: string, summary: string) => Promise<string | null>;
+  /** Approves the exact saved head Prompt revision (Owner only). Resolves to an error message or `null`. */
+  onApprove: () => Promise<string | null>;
+};
+
 export type TaskViewProps = {
   projectName: string;
   taskId: string;
@@ -281,6 +298,7 @@ export type TaskViewProps = {
   scroll: ScrollRegions;
   workspace: WorkspaceControls;
   conversation: TaskConversationControls;
+  authoring: TaskAuthoringControls;
   /** Independent Task Work Area text scale; never shared with Project or Dashboard. */
   textScale: TextScaleControls;
   onClose: () => void;

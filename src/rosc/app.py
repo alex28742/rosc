@@ -29,6 +29,7 @@ from .architect_rules import ArchitectRulesLoader
 from .architect_service import ArchitectService, runtime_message_id
 from .architect_tools import ToolHost
 from .project_context import ProjectContextBroker
+from .task_authoring import (AuthoringError, TaskAuthoringService)
 from .config import data_dir, global_library_dir, repo_private_paths
 from .conversation import (DEFAULT_PAGE_SIZE, ConversationConflict, ConversationDenied, ConversationError,
                            ConversationNotFound, ConversationStoreError, InvalidConversationInput,
@@ -72,6 +73,25 @@ class TaskInput(BaseModel):
         if not value:
             raise ValueError("Required text cannot be blank")
         return value
+
+
+class SpecSaveInput(BaseModel):
+    expected_revision: int = Field(ge=1)
+    title: str = Field(min_length=1, max_length=160)
+    scope: str | None = Field(default=None, max_length=20000)
+    description: str = Field(min_length=1, max_length=100000)
+    acceptance_criteria: str = Field(min_length=1, max_length=100000)
+
+
+class PromptSaveInput(BaseModel):
+    expected_revision: int | None = Field(default=None, ge=0)
+    source_spec_revision: int = Field(ge=1)
+    body: str = Field(min_length=1, max_length=100000)
+    summary: str = Field(min_length=1, max_length=8000)
+
+
+class PromptApproveInput(BaseModel):
+    digest: str = Field(min_length=64, max_length=64)
 
 
 def utc_iso(value: datetime) -> str:
@@ -369,8 +389,10 @@ def create_app(db_path: Path | None = None, workspace_root: Path | None = None, 
     conversation = ProjectConversationService(sessions, policy)
     # The runtime is a Python-level composition seam like the policy: no request can select or configure it.
     library_root = global_library_root or DEFAULT_GLOBAL_LIBRARY
+    authoring = TaskAuthoringService(sessions, policy, workspace_root)
     context_broker = ProjectContextBroker(sessions, workspace_root, library_root,
-                                        private_roots=(db_path.parent, db_path, *repo_private_paths()))
+                                        private_roots=(db_path.parent, db_path, *repo_private_paths()),
+                                        authoring=authoring)
     # P024: opt-in latency diagnostics (ROSC_ARCHITECT_LATENCY_TRACE); unset means DISABLED and zero output.  ``latency_trace``
     # is a Python-level test seam like the runtime; no request can enable or configure it.
     trace = latency_trace if latency_trace is not None else LatencyTrace.from_environment(db_path.parent)
@@ -538,30 +560,21 @@ def create_app(db_path: Path | None = None, workspace_root: Path | None = None, 
                 raise HTTPException(404, "Project not found")
             return [task_view(t, workspace_root) for t in session.scalars(select(Task).where(Task.project_id == pid).order_by(Task.id))]
 
+    def authoring_call(call, *args, **kwargs):
+        """Run one authoring service call; typed errors keep a machine-readable ``code`` the UI can branch on."""
+        try:
+            return call(*args, **kwargs)
+        except AuthoringError as exc:
+            raise HTTPException(exc.http, {"code": exc.code, "message": str(exc)}) from None
+
     @app.post("/api/projects/{project_id}/tasks", status_code=201)
     def create_task(project_id: str, data: TaskInput) -> dict:
         pid = numeric_id(project_id, "P")
         authorize(authz.TASK_CREATE, project_id=pid)
+        created = authoring_call(authoring.create_task, current_actor(), pid, title=data.title,
+                                 description=data.description, acceptance_criteria=data.acceptance_criteria)
         with sessions() as session:
-            project = session.get(Project, pid)
-            if not project:
-                raise HTTPException(404, "Project not found")
-            require_project_identity(project)
-            if project.workspace_state != "ready" or inspect_project(workspace_root, project).problem != READY:
-                raise HTTPException(409, "Project Workspace requires reconciliation")
-            task = Task(project_id=pid, title=data.title, description=data.description,
-                        acceptance_criteria=data.acceptance_criteria, status="Draft", workspace_state="provisioning")
-            session.add(task)
-            session.commit()
-            try:
-                provision_task(workspace_root, task)
-            except WorkspaceConflict as exc:
-                raise HTTPException(409, f"Task T{task.id:04d} saved, but its Workspace manifest collides: {conflict_detail(exc)}") from exc
-            except OSError as exc:
-                raise HTTPException(503, f"Task T{task.id:04d} saved; Task Workspace provisioning failed") from exc
-            task.workspace_state = "ready"
-            session.commit()
-            return task_view(task, workspace_root)
+            return task_view(session.get(Task, int(created["task_id"][1:])), workspace_root)
 
     def load_task(session, project_id: str, task_id: str) -> Task:
         pid, tid = numeric_id(project_id, "P"), numeric_id(task_id, "T")
@@ -604,6 +617,53 @@ def create_app(db_path: Path | None = None, workspace_root: Path | None = None, 
             task.workspace_state = "ready"
             session.commit()
             return repair_response(task_view(task, workspace_root), record)
+
+    # -- P040 Task Spec / Prompt Draft authoring (Owner via policy; the Architect uses scoped Tools) -----------------
+    def task_ids(project_id: str, task_id: str) -> tuple[int, int]:
+        return numeric_id(project_id, "P"), numeric_id(task_id, "T")
+
+    @app.get("/api/projects/{project_id}/tasks/{task_id}/authoring")
+    def task_authoring(project_id: str, task_id: str) -> dict:
+        return authoring_call(authoring.projection, current_actor(), *task_ids(project_id, task_id))
+
+    @app.get("/api/projects/{project_id}/tasks/{task_id}/spec/revisions")
+    def list_spec_revisions(project_id: str, task_id: str) -> list[dict]:
+        return authoring_call(authoring.list_spec_revisions, current_actor(), *task_ids(project_id, task_id))
+
+    @app.get("/api/projects/{project_id}/tasks/{task_id}/spec/revisions/{revision}")
+    def read_spec_revision(project_id: str, task_id: str, revision: int) -> dict:
+        return authoring_call(authoring.read_spec, current_actor(), *task_ids(project_id, task_id), revision)
+
+    @app.post("/api/projects/{project_id}/tasks/{task_id}/spec/revisions", status_code=201)
+    def save_spec(project_id: str, task_id: str, data: SpecSaveInput, response: Response) -> dict:
+        result = authoring_call(authoring.save_spec, current_actor(), *task_ids(project_id, task_id),
+                                expected_revision=data.expected_revision, title=data.title, scope=data.scope,
+                                description=data.description, acceptance_criteria=data.acceptance_criteria)
+        if not result["created"]:
+            response.status_code = 200
+        return result
+
+    @app.get("/api/projects/{project_id}/tasks/{task_id}/prompt/revisions")
+    def list_prompt_revisions(project_id: str, task_id: str) -> list[dict]:
+        return authoring_call(authoring.list_prompt_revisions, current_actor(), *task_ids(project_id, task_id))
+
+    @app.get("/api/projects/{project_id}/tasks/{task_id}/prompt/revisions/{revision}")
+    def read_prompt_revision(project_id: str, task_id: str, revision: int) -> dict:
+        return authoring_call(authoring.read_prompt, current_actor(), *task_ids(project_id, task_id), revision)
+
+    @app.post("/api/projects/{project_id}/tasks/{task_id}/prompt/revisions", status_code=201)
+    def save_prompt(project_id: str, task_id: str, data: PromptSaveInput, response: Response) -> dict:
+        result = authoring_call(authoring.save_prompt, current_actor(), *task_ids(project_id, task_id),
+                                expected_revision=data.expected_revision, source_spec_revision=data.source_spec_revision,
+                                body=data.body, summary=data.summary)
+        if not result["created"]:
+            response.status_code = 200
+        return result
+
+    @app.post("/api/projects/{project_id}/tasks/{task_id}/prompt/revisions/{revision}/approve")
+    def approve_prompt(project_id: str, task_id: str, revision: int, data: PromptApproveInput) -> dict:
+        return authoring_call(authoring.approve_prompt, current_actor(), *task_ids(project_id, task_id), revision,
+                              digest=data.digest)
 
     # -- M2-C Owner-only Agent registry and scoped assignments (no agent-facing surface) ----------------------
     @app.get("/api/agents")

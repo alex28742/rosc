@@ -44,7 +44,7 @@ INSTALLED = {
 ACTIVE = ["role", "onboarding", "context-maintenance", "pipeline-management"]
 REFERENCE = ["autonomy", "research", "review", "communication", "run-checkpoints", "worker-task-authoring", "task-run-git"]
 MANIFEST = "agents/architect/ruleset.yaml"
-P039_READ_TOOLS = ("task_list", "task_read", "run_list", "run_read")
+P039_READ_TOOLS = ("task_list", "task_read", "task_create", "task_spec_read", "task_spec_save", "prompt_draft_read", "prompt_draft_save", "run_list", "run_read")
 PRE_P021_TOOLS = ("briefing", "global_list", "global_read", "docs_list", "docs_search", "docs_read", "docs_create",
                   "docs_update", "docs_delete", "docs_restore", "source_list", "source_read", "source_search", "source_git")
 

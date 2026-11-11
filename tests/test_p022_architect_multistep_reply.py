@@ -189,7 +189,7 @@ class MultiStepLookupTests(AdapterCase):
         self.assertEqual(set(TOOL_NAMES), {"briefing", "global_list", "global_read", "docs_list", "docs_search",
                                            "docs_read", "docs_create", "docs_update", "docs_delete", "docs_restore",
                                            "source_list", "source_read", "source_search", "source_git",
-                                           "task_list", "task_read", "run_list", "run_read"})
+                                           "task_list", "task_read", "task_create", "task_spec_read", "task_spec_save", "prompt_draft_read", "prompt_draft_save", "run_list", "run_read"})
         self.assertEqual(TOOLS_PERMISSIONS, DENY_ALL + [{"action": "rosc_*", "resource": "*", "effect": "allow"}])
         self.assertNotIn("provider_error", SAFE_RETRY_CODES)
 

@@ -1,7 +1,8 @@
 // Test fixtures shared by the application tests. Not imported by production code.
 import { vi } from 'vitest';
+import type { TaskAuthoringControls } from './presentation/contracts';
 import type { CoreApi } from '../core/api';
-import type { AgentDefinition, ArchitectStatus, ContextAccess, ConversationMessage, ConversationPage, ConversationParticipant, ConversationMessageInput, Project, RoleAssignment, Task } from '../core/models';
+import type { TaskAuthoring, AgentDefinition, ArchitectStatus, ContextAccess, ConversationMessage, ConversationPage, ConversationParticipant, ConversationMessageInput, Project, RoleAssignment, Task } from '../core/models';
 
 export const project = (id: string, over: Partial<Project> = {}): Project => ({
   id, name: `Project ${id}`, description: `About ${id}`, root_path: `/tmp/${id}`, mode: 'existing', docs_entrypoint: null,
@@ -71,6 +72,22 @@ export const roleAssignment = (id: string, over: Partial<RoleAssignment> = {}): 
   revoked_by: null, revoked_by_assurance: null, ...over,
 });
 
+export const taskAuthoring = (over: Partial<TaskAuthoring> = {}): TaskAuthoring => ({
+  task_id: 'T0001', editable: true,
+  spec: { revision: 1, title: 'Task T0001', scope: '', description_html: '<p>Do T0001</p>', criteria_html: '<p>Done T0001</p>',
+    description_text: 'Do T0001', acceptance_criteria_text: 'Done T0001', digest: 'd'.repeat(64), provenance: 'owner',
+    actor: { kind: 'owner', id: 'local-owner' }, created_at: '2026-10-31T00:00:00Z', current: true },
+  prompt: null, prompt_history: [], run: { authorized: false, label: 'Run не авторизован', worker: 'Worker не запускался' },
+  next: { action: 'create_prompt', label: 'Создать Prompt Draft', enabled: true, next_actor: 'Owner', hint: 'Создание Draft не запускает Worker.' },
+  ...over,
+});
+
+export const authoringControls = (over: Partial<TaskAuthoringControls> = {}): TaskAuthoringControls => ({
+  status: 'ready', data: taskAuthoring(), specHistory: [], error: '', busy: false, onReload: vi.fn(),
+  onSaveSpec: vi.fn(async () => ({ error: null, created: true })), onLoadSpecRevision: vi.fn(async () => taskAuthoring().spec),
+  onSavePrompt: vi.fn(async () => null), onApprove: vi.fn(async () => null), ...over,
+});
+
 export function stubApi(over: Partial<{ [K in keyof CoreApi]: ReturnType<typeof vi.fn> }> = {}) {
   const api = {
     listProjects: vi.fn(async () => [] as Project[]),
@@ -103,6 +120,14 @@ export function stubApi(over: Partial<{ [K in keyof CoreApi]: ReturnType<typeof 
     sendConversationMessage: vi.fn(async (_projectId: string, input: ConversationMessageInput) => ({
       message: conversationMessage(input.body), replayed: false,
     })),
+    getTaskAuthoring: vi.fn(async () => taskAuthoring()),
+    listSpecRevisions: vi.fn(async () => [{ revision: 1, title: 'Task T0001', scope: '', digest: 'd'.repeat(64), provenance: 'owner' as const,
+      actor: { kind: 'owner', id: 'local-owner' }, created_at: '2026-10-31T00:00:00Z', current: true }]),
+    getSpecRevision: vi.fn(async () => taskAuthoring().spec),
+    saveSpec: vi.fn(async () => ({ created: true, spec: taskAuthoring().spec })),
+    savePrompt: vi.fn(async () => ({ created: true, prompt: { revision: 1, source_spec_revision: 1, summary: 's', body: 'b', digest: 'p'.repeat(64),
+      rules_ref: null, state: 'unapproved' as const, actor: { kind: 'owner', id: 'local-owner' }, created_at: '2026-10-31T00:00:00Z', approval: null } })),
+    approvePrompt: vi.fn(async () => ({ created: true, prompt: taskAuthoring().spec as never })),
     ...over,
   };
   return api as typeof api & CoreApi;

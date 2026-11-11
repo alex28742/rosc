@@ -78,6 +78,13 @@ CONVERSATION_DELIVERY_RECONCILE = "conversation.delivery.reconcile"
 # calls are NOT authorized through this policy: they go through the session-scoped broker (``project_context``) which
 # never impersonates the Owner.
 ARCHITECT_CONTEXT_READ = "architect.context.read"
+# P040 Task authoring. Spec/Prompt read and write are shared by Owner (policy) and the Project Architect (scoped Tools).
+# ``prompt.approve`` is Owner-only and is NOT ``run.approve``: it approves one exact saved Prompt revision and nothing else.
+TASK_SPEC_READ = "task.spec.read"
+TASK_SPEC_SAVE = "task.spec.save"
+PROMPT_DRAFT_READ = "task.prompt.read"
+PROMPT_DRAFT_SAVE = "task.prompt.save"
+PROMPT_APPROVE = "task.prompt.approve"
 
 # Resource shapes: which identifiers an action must carry and which it may carry.
 # (required fields, optional fields); every other field must be absent.
@@ -117,6 +124,11 @@ _SHAPES: dict[str, tuple[frozenset[str], frozenset[str]]] = {
     ARCHITECT_REPLY_COMMIT: (frozenset({"project_id"}), frozenset()),
     CONVERSATION_DELIVERY_RECONCILE: (frozenset({"project_id"}), frozenset()),
     ARCHITECT_CONTEXT_READ: (frozenset({"project_id"}), frozenset()),
+    TASK_SPEC_READ: (frozenset({"project_id", "task_id"}), frozenset()),
+    TASK_SPEC_SAVE: (frozenset({"project_id", "task_id"}), frozenset()),
+    PROMPT_DRAFT_READ: (frozenset({"project_id", "task_id"}), frozenset()),
+    PROMPT_DRAFT_SAVE: (frozenset({"project_id", "task_id"}), frozenset()),
+    PROMPT_APPROVE: (frozenset({"project_id", "task_id"}), frozenset()),
 }
 IMPLEMENTED_ACTIONS = frozenset(_SHAPES)
 

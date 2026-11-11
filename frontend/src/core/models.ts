@@ -235,3 +235,28 @@ export function toAgentInput(values: AgentFormValues): AgentInput {
 export function toAgentUpdateInput(values: AgentFormValues, expectedVersion: number): AgentUpdateInput {
   return { ...toAgentInput(values), expected_version: expectedVersion };
 }
+
+/** P040 Task authoring. Rich text is canonical whitelist HTML produced by Core; still re-sanitised on render. */
+export type AuthoringActor = { kind: string; id: string };
+export type SpecRevision = {
+  revision: number; title: string; scope: string; description_html: string; criteria_html: string;
+  description_text: string; acceptance_criteria_text: string; digest: string; provenance: 'owner' | 'architect' | 'legacy_import';
+  actor: AuthoringActor; created_at: string; current: boolean;
+};
+export type SpecRevisionSummary = Pick<SpecRevision, 'revision' | 'title' | 'scope' | 'digest' | 'provenance' | 'actor' | 'created_at' | 'current'>;
+export type PromptState = 'unapproved' | 'stale' | 'approved' | 'superseded';
+export type PromptApprovalRecord = { spec_revision: number; prompt_revision: number; digest: string; actor: AuthoringActor; created_at: string };
+export type PromptRevision = {
+  revision: number; source_spec_revision: number; summary: string; body?: string; digest: string; rules_ref: string | null;
+  state: PromptState; actor: AuthoringActor; created_at: string; approval: PromptApprovalRecord | null; current?: boolean;
+};
+export type NextAction = {
+  action: 'none' | 'create_prompt' | 'review_prompt' | 'update_prompt' | 'authorize_run';
+  label: string; enabled: boolean; next_actor: string; hint: string; secondary?: string;
+};
+export type TaskAuthoring = {
+  task_id: string; editable: boolean; spec: SpecRevision; prompt: PromptRevision | null; prompt_history: PromptRevision[];
+  run: { authorized: boolean; label: string; worker: string }; next: NextAction;
+};
+export type SpecSaveInput = { expected_revision: number; title: string; description: string; acceptance_criteria: string };
+export type PromptSaveInput = { expected_revision: number | null; source_spec_revision: number; body: string; summary: string };

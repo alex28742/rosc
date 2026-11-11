@@ -90,6 +90,30 @@ TOOLS: list[dict] = [
     {"name": "task_read", "description": "Read one Task of the current Project (read-only): title, description, "
      "acceptance criteria, status, workspace state. task_id such as T0001 only names the target; other Projects' "
      "Tasks are not readable.", "inputSchema": _schema({"task_id": {"type": "string"}}, ["task_id"])},
+    {"name": "task_create", "description": "Create a Draft Task in the CURRENT Project with Spec v1. Plain text with "
+     "'- ' bullets and '1. ' lists is allowed. Starts no Worker/Run.",
+     "inputSchema": _schema({"title": {"type": "string"}, "description": {"type": "string"},
+                             "acceptance_criteria": {"type": "string"}, "scope": {"type": "string"}},
+                            ["title", "description", "acceptance_criteria"])},
+    {"name": "task_spec_read", "description": "Read a Task Spec revision (current by default) as readable text, with "
+     "its revision number to use as expected_revision.",
+     "inputSchema": _schema({"task_id": {"type": "string"}, "revision": {"type": "integer", "minimum": 1}}, ["task_id"])},
+    {"name": "task_spec_save", "description": "Save a NEW Task Spec revision (expected_revision = the revision you read). "
+     "Any earlier Prompt Draft becomes STALE.",
+     "inputSchema": _schema({"task_id": {"type": "string"}, "expected_revision": {"type": "integer", "minimum": 1},
+                             "title": {"type": "string"}, "description": {"type": "string"},
+                             "acceptance_criteria": {"type": "string"}, "scope": {"type": "string"}},
+                            ["task_id", "expected_revision", "title", "description", "acceptance_criteria"])},
+    {"name": "prompt_draft_read", "description": "Read a Prompt Draft revision (current by default) with its state "
+     "(unapproved/stale/approved), source Spec revision and summary.",
+     "inputSchema": _schema({"task_id": {"type": "string"}, "revision": {"type": "integer", "minimum": 1}}, ["task_id"])},
+    {"name": "prompt_draft_save", "description": "Save a NEW unapproved Prompt Draft revision for the CURRENT Spec. "
+     "expected_revision is the Draft revision you read (omit/0 for the first). summary is your honest section-by-section "
+     "list of what this revision contains or changed. You cannot approve a Draft or authorize a Run.",
+     "inputSchema": _schema({"task_id": {"type": "string"}, "expected_revision": {"type": "integer", "minimum": 0},
+                             "source_spec_revision": {"type": "integer", "minimum": 1}, "body": {"type": "string"},
+                             "summary": {"type": "string"}},
+                            ["task_id", "source_spec_revision", "body", "summary"])},
     {"name": "run_list", "description": "List registered Runs of the current Project (read-only claims, not verified "
      "results); optional task_id narrows to one Task.",
      "inputSchema": _schema({"task_id": {"type": "string"}, "offset": {"type": "integer", "minimum": 0},

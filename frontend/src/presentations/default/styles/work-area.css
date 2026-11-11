@@ -2612,3 +2612,245 @@
     padding: 10px 14px;
   }
 }
+
+/* P040 Spec editor, primary Task action and Prompt Draft side drawer (layout follows the approved prototype). */
+.rosc-task-panel__chips {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 6px;
+}
+
+.rosc-rich {
+  font-size: 12px;
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+}
+
+.rosc-rich p {
+  margin: 0 0 7px;
+}
+
+.rosc-rich ul,
+.rosc-rich ol {
+  margin: 0 0 7px;
+  padding-left: 22px;
+}
+
+.rosc-rich--edit {
+  min-height: 54px;
+  padding: 7px 9px;
+  border: 1px solid var(--rosc-line);
+  border-radius: 0 0 8px 8px;
+  background: var(--rosc-panel);
+  outline: none;
+}
+
+.rosc-rich--edit:focus {
+  border-color: var(--rosc-blue);
+  box-shadow: 0 0 0 2px var(--rosc-blue-line);
+}
+
+.rosc-rich-toolbar {
+  display: flex;
+  gap: 4px;
+  padding: 4px 6px;
+  border: 1px solid var(--rosc-line);
+  border-bottom: 0;
+  border-radius: 8px 8px 0 0;
+  background: var(--rosc-soft);
+}
+
+.rosc-rich-toolbar button {
+  min-width: 26px;
+  height: 24px;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--rosc-ink);
+  font-size: 12px;
+}
+
+.rosc-rich-toolbar button:hover:not(:disabled) {
+  border-color: var(--rosc-line-strong);
+  background: var(--rosc-panel);
+}
+
+.rosc-rich-toolbar button:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+.rosc-task-spec__body h4 small {
+  margin-left: 8px;
+  color: var(--rosc-secondary);
+  font-weight: 500;
+}
+
+.rosc-task-spec__past,
+.rosc-task-spec__note,
+.rosc-task-spec__error {
+  margin: 0 16px 8px;
+  font-size: 11px;
+}
+
+.rosc-task-spec__error {
+  color: var(--rosc-red);
+}
+
+.rosc-task-spec__history {
+  display: inline-flex;
+  gap: 8px;
+  margin-left: 10px;
+}
+
+.rosc-task-spec__history [aria-current="true"] {
+  text-decoration: underline;
+}
+
+.rosc-task-scope {
+  margin: 6px 0 0;
+  font-size: 11px;
+}
+
+.rosc-task-primary {
+  margin: 10px 0 0;
+  padding: 10px 12px;
+  border: 1px solid var(--rosc-blue-line);
+  border-radius: 8px;
+  background: var(--rosc-soft-blue);
+}
+
+.rosc-task-primary h4 {
+  margin: 0 0 4px;
+  font-size: 12px;
+}
+
+.rosc-task-primary .rosc-hint {
+  margin: 0 0 8px;
+}
+
+.rosc-draft-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 60;
+  display: flex;
+  justify-content: flex-end;
+  background: rgba(31, 39, 48, 0.28);
+}
+
+.rosc-draft-drawer {
+  display: flex;
+  flex-direction: column;
+  width: min(560px, 100%);
+  height: 100%;
+  background: var(--rosc-panel);
+  box-shadow: -8px 0 28px rgba(31, 39, 48, 0.18);
+}
+
+.rosc-draft-drawer--wide {
+  width: min(980px, 100%);
+}
+
+.rosc-draft-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 10px;
+  flex: none;
+  padding: 14px 16px 10px;
+  border-bottom: 1px solid var(--rosc-line);
+}
+
+.rosc-draft-head h2 {
+  margin: 0;
+  font-size: 16px;
+}
+
+.rosc-draft-head p {
+  margin: 3px 0 0;
+  color: var(--rosc-secondary);
+  font-size: 11px;
+}
+
+.rosc-draft-head__actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.rosc-draft-body {
+  flex: 1;
+  min-height: 0;
+  padding: 12px 16px;
+  overflow: auto;
+}
+
+.rosc-draft-body h3 {
+  margin: 0 0 4px;
+  font-size: 13px;
+}
+
+.rosc-draft-body section > p {
+  margin: 0 0 6px;
+  color: var(--rosc-secondary);
+  font-size: 11px;
+}
+
+.rosc-draft-body textarea {
+  display: block;
+  width: 100%;
+  min-height: 120px;
+  padding: 8px 10px;
+  border: 1px solid var(--rosc-line);
+  border-radius: 8px;
+  font: inherit;
+  font-size: 12px;
+  resize: vertical;
+}
+
+.rosc-draft-full {
+  margin-top: 12px;
+}
+
+.rosc-draft-full textarea {
+  min-height: 300px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+
+.rosc-draft-note {
+  margin: 10px 0 0;
+  font-size: 11px;
+  color: var(--rosc-secondary);
+}
+
+.rosc-draft-note--warn {
+  color: var(--rosc-amber);
+}
+
+.rosc-draft-note--error {
+  color: var(--rosc-red);
+}
+
+.rosc-draft-foot {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 8px;
+  flex: none;
+  padding: 10px 16px;
+  border-top: 1px solid var(--rosc-line);
+  background: var(--rosc-soft);
+}
+
+@media (max-width: 700px) {
+  .rosc-draft-drawer,
+  .rosc-draft-drawer--wide {
+    width: 100%;
+  }
+}
+
+.rosc-task-spec__body[hidden] {
+  display: none;
+}

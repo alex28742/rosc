@@ -3,7 +3,7 @@
 export type ApiErrorKind = 'network' | 'conflict' | 'server' | 'client';
 
 export class ApiError extends Error {
-  constructor(message: string, readonly kind: ApiErrorKind, readonly status: number | null) {
+  constructor(message: string, readonly kind: ApiErrorKind, readonly status: number | null, readonly code: string | null = null) {
     super(message);
     this.name = 'ApiError';
   }
@@ -30,14 +30,19 @@ export async function request<T>(path: string, init?: RequestInit): Promise<T> {
     throw new ApiError(NETWORK_MESSAGE, 'network', null);
   }
   if (!response.ok) {
+    let code: string | null = null;
     let detail = response.status >= 500
       ? `Ядро ROSC недоступно или вернуло ошибку (HTTP ${response.status}). Проверьте, что backend запущен, и повторите.`
       : `HTTP ${response.status}`;
     try {
       const json = await response.json();
-      detail = typeof json.detail === 'string' ? json.detail : detail;
+      if (typeof json.detail === 'string') detail = json.detail;
+      else if (json.detail && typeof json.detail === 'object' && typeof json.detail.message === 'string') {
+        detail = json.detail.message;
+        code = typeof json.detail.code === 'string' ? json.detail.code : null;
+      }
     } catch { /* keep the status-based message */ }
-    throw new ApiError(detail, kindFor(response.status), response.status);
+    throw new ApiError(detail, kindFor(response.status), response.status, code);
   }
   return response.json() as Promise<T>;
 }
