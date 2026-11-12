@@ -3,8 +3,9 @@
 One service is used by the Owner (UI/API, authorized through ``AuthorizationPolicy``) and by the Project Architect (scoped
 Tools, identified by an ``ArchitectAuthor`` that only ``ProjectContextBroker`` can build from a verified live session).
 Revisions are immutable rows; the Spec head, ``stale`` and ``approved`` are derived from them.  Approval of a Prompt
-revision is Owner-only and is NOT a Run authorization: this module never creates a Run, Execution Package, lease or
-Worker session.
+revision is Owner-only and is NOT a Run authorization.  The only package-related code here is the INTERNAL
+``build_execution_package`` / ``execution_package_view`` pair (P041) for the future launch command: no HTTP route, no
+Architect action; this module never creates a Run, lease or Worker session.
 """
 from __future__ import annotations
 
@@ -20,7 +21,7 @@ from sqlalchemy.orm import Session, sessionmaker
 
 from . import authorization as authz
 from . import rich_text
-from .models import (PROVENANCE_ARCHITECT, PROVENANCE_OWNER, Project, PromptApproval, PromptRevision, Task,
+from .models import (PROVENANCE_ARCHITECT, PROVENANCE_OWNER, ExecutionPackage, Project, PromptApproval, PromptRevision, Task,
                      TaskSpecRevision, ProjectIdentityError, validate_project_identity)
 from .workspace import READY, WorkspaceConflict, inspect_project, provision_task
 
@@ -416,6 +417,70 @@ class TaskAuthoringService:
                 session.rollback()
                 raise AuthoringConflict("prompt_conflict", "Another change is in progress; retry") from None
 
+    # -- Execution Package (P041, internal) ----------------------------------------------------------------------------
+    def build_execution_package(self, project_id: int, task_id: int) -> dict:
+        """Internal Core builder for the future launch command (not an endpoint, not an authorization).
+
+        In one transaction verifies Project identity/Root Binding, the current Spec head and the head Prompt revision with
+        its exact Owner approval, then creates -- or idempotently returns -- the single package of that approval.
+        Records nothing else: no Run, Worker, Task status change or copied content.
+        """
+        with self._sessions() as session:
+            try:
+                session.connection().exec_driver_sql("BEGIN IMMEDIATE")
+                project = self._project(session, project_id)
+                binding = validate_project_identity(project)
+                self._task(session, project_id, task_id)
+                spec_head, head = self._spec_head(session, task_id), self._prompt_head(session, task_id)
+                if spec_head is None or head is None:
+                    raise AuthoringNotFound("Approved Prompt revision not found")
+                approval = self._approval(session, head.id)
+                if head.source_spec_revision != spec_head.revision:
+                    raise AuthoringConflict("prompt_stale", "The Spec changed after this Prompt Draft")
+                if approval is None:
+                    raise AuthoringConflict("not_approved", "The current Prompt revision is not approved by the Owner")
+                spec_row = session.scalars(select(TaskSpecRevision).where(
+                    TaskSpecRevision.task_id == task_id, TaskSpecRevision.revision == head.source_spec_revision)).first()
+                if (spec_row is None or approval.project_id != project_id or approval.task_id != task_id
+                        or approval.prompt_revision != head.revision or approval.spec_revision != head.source_spec_revision
+                        or approval.digest != head.digest
+                        or head.digest != prompt_digest(head.source_spec_revision, head.summary, head.body)
+                        or spec_row.digest != spec_digest(spec_row.title, spec_row.scope, spec_row.description_html,
+                                                          spec_row.criteria_html)):
+                    raise AuthoringConflict("digest_mismatch", "Stored revisions do not match the approved digests")
+                package = session.scalars(select(ExecutionPackage).where(
+                    ExecutionPackage.prompt_approval_id == approval.id)).first()
+                created = package is None
+                if created:
+                    package = ExecutionPackage(project_id=project_id, task_id=task_id, prompt_approval_id=approval.id,
+                                               root_binding_version=binding.version)
+                    session.add(package)
+                    session.commit()
+                return {"created": created, "package_id": package.id}
+            except OperationalError:
+                session.rollback()
+                raise AuthoringConflict("package_conflict", "Another change is in progress; retry") from None
+            except IntegrityError:
+                session.rollback()
+                raise AuthoringConflict("package_conflict", "The Execution Package changed concurrently; retry") from None
+
+    def execution_package_view(self, project_id: int, task_id: int, package_id: int) -> dict:
+        """Internal read-only immutable view reconstructed from the exact revisions; independent of current heads."""
+        with self._sessions() as session:
+            package = session.get(ExecutionPackage, package_id)
+            if package is None or package.project_id != project_id or package.task_id != task_id:
+                raise AuthoringNotFound("Execution Package not found")
+            approval = session.get(PromptApproval, package.prompt_approval_id)
+            prompt = session.get(PromptRevision, approval.prompt_revision_id)
+            spec = session.scalars(select(TaskSpecRevision).where(
+                TaskSpecRevision.task_id == task_id, TaskSpecRevision.revision == approval.spec_revision)).first()
+            if spec is None or prompt is None:
+                raise AuthoringNotFound("Execution Package revisions not found")
+            return {"package_id": package.id, "project_id": project_id, "task_id": f"T{task_id:04d}",
+                    "root_binding_version": package.root_binding_version, "created_at": _iso(package.created_at),
+                    "spec": spec_view(spec), "prompt": {k: v for k, v in prompt_view(
+                        prompt, state="approved", approval=approval).items() if k != "state"}}
+
     # -- projection --------------------------------------------------------------------------------------------------
     def projection(self, author: object, project_id: int, task_id: int) -> dict:
         """Owner-readable authoring state of one Task, including the single next primary action (derived, not stored)."""
@@ -459,5 +524,5 @@ class TaskAuthoringService:
         if state == "unapproved":
             return {"action": "review_prompt", "label": "Просмотреть и утвердить Prompt", "enabled": True,
                     "next_actor": "Owner", "hint": "Утверждение Draft не даёт разрешения на запуск."}
-        return {"action": "authorize_run", "label": "Проверить и разрешить Run", "enabled": False, "next_actor": "Owner",
-                "hint": "Разрешение Run появится в P041", "secondary": "Просмотреть утверждённый Draft"}
+        return {"action": "authorize_run", "label": "Запустить Run", "enabled": False, "next_actor": "Owner",
+                "hint": "Запуск Run станет доступен после подключения Worker и передачи задания (P042)", "secondary": "Просмотреть утверждённый Draft"}

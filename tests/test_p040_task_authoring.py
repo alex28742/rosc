@@ -146,8 +146,8 @@ class PromptTests(AuthoringCase):
         self.assertFalse(self.client.post(f"{self.t}/prompt/revisions/1/approve", json={"digest": one["digest"]}).json()["created"])
         p = self.proj()
         self.assertEqual((p["prompt"]["state"], p["next"]["label"], p["next"]["enabled"]),
-                         ("approved", "Проверить и разрешить Run", False))
-        self.assertIn("P041", p["next"]["hint"])
+                         ("approved", "Запустить Run", False))
+        self.assertIn("P042", p["next"]["hint"])
         two = self.prompt(1, 1, body="Edited after approval").json()["prompt"]
         self.assertEqual(two["state"], "unapproved")
         self.assertIsNone(two["approval"])

@@ -702,7 +702,7 @@ class PromptRevision(Base):
 
 
 class PromptApproval(Base):
-    """Owner approval of ONE exact saved Prompt revision. Not a Run authorization (P041)."""
+    """Owner approval of ONE exact saved Prompt revision. Not a Run authorization."""
 
     __tablename__ = "prompt_approvals"
     __table_args__ = (
@@ -720,4 +720,29 @@ class PromptApproval(Base):
     actor_kind: Mapped[str] = mapped_column(String(16))
     actor_id: Mapped[str] = mapped_column(String(64))
     actor_assurance: Mapped[str] = mapped_column(String(32))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
+
+
+class ExecutionPackage(Base):
+    """P041: minimal durable handle of the frozen contract of ONE approved Prompt revision.
+
+    Spec/Prompt content is never copied; it is reconstructed from the immutable revisions reachable through
+    ``prompt_approval_id``. Not a Run authorization and not bound to a Worker; created only by the internal Core builder.
+    """
+
+    __tablename__ = "execution_packages"
+    __table_args__ = (
+        UniqueConstraint("prompt_approval_id", name="uq_execution_packages_approval"),
+        ForeignKeyConstraint(["project_id", "root_binding_version"],
+                             ["project_root_bindings.project_id", "project_root_bindings.version"],
+                             ondelete="RESTRICT", name="fk_execution_packages_binding"),
+        CheckConstraint("root_binding_version >= 1", name="ck_execution_packages_binding"),
+        Index("ix_execution_packages_task", "project_id", "task_id"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    project_id: Mapped[int] = mapped_column(ForeignKey("projects.id", ondelete="RESTRICT"))
+    task_id: Mapped[int] = mapped_column(ForeignKey("tasks.id", ondelete="RESTRICT"))
+    prompt_approval_id: Mapped[int] = mapped_column(ForeignKey("prompt_approvals.id", ondelete="RESTRICT"))
+    root_binding_version: Mapped[int] = mapped_column(Integer)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))

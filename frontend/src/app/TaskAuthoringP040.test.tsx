@@ -120,16 +120,16 @@ describe('Context & actions and the Prompt Draft drawer (P040)', () => {
     expect(screen.getByLabelText('Task Conversation')).toBeTruthy(); // closing returns to the Task with the chat intact
   });
 
-  it('after approval offers a disabled "Проверить и разрешить Run" that never starts anything', async () => {
+  it('after approval offers a disabled "Запустить Run" that never starts anything', async () => {
     const approved = prompt({ state: 'approved', approval: { spec_revision: 1, prompt_revision: 1, digest: 'p'.repeat(64),
       actor: { kind: 'owner', id: 'local-owner' }, created_at: '2026-10-31T00:00:00Z' } });
-    const api = open(withPrompt(approved, { action: 'authorize_run', label: 'Проверить и разрешить Run', enabled: false, next_actor: 'Owner',
-      hint: 'Разрешение Run появится в P041', secondary: 'Просмотреть утверждённый Draft' }));
+    const api = open(withPrompt(approved, { action: 'authorize_run', label: 'Запустить Run', enabled: false, next_actor: 'Owner',
+      hint: 'Запуск Run станет доступен после подключения Worker и передачи задания (P042)', secondary: 'Просмотреть утверждённый Draft' }));
     render(<App api={api} />);
     const ctx = await context();
-    const cta = await ctx.findByRole('button', { name: 'Проверить и разрешить Run' }) as HTMLButtonElement;
+    const cta = await ctx.findByRole('button', { name: 'Запустить Run' }) as HTMLButtonElement;
     expect(cta.disabled).toBe(true);
-    expect(cta.title).toContain('P041');
+    expect(cta.title).toContain('P042');
     expect(ctx.getByTestId('draft-fact').textContent).toContain('утверждён');
     expect(ctx.getByText('Run не авторизован')).toBeTruthy();
     const worker = within(ctx.getByLabelText('Worker этой Task'));

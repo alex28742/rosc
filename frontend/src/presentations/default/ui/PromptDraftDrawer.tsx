@@ -93,7 +93,7 @@ export function PromptDraftDrawer({ taskId, authoring, onClose }: Props) {
   const approve = async () => {
     setFailure(''); setMessage('');
     const error = await authoring.onApprove();
-    if (error) setFailure(error); else setMessage(`Draft v${head?.revision} утверждён. Разрешение Run — отдельное действие (появится в P041).`);
+    if (error) setFailure(error); else setMessage(`Draft v${head?.revision} утверждён. Запуск Run пока недоступен: он появится после подключения Worker и передачи задания (P042).`);
   };
   const copy = async () => {
     try { await navigator.clipboard.writeText(viewing ? past.body ?? '' : body); setMessage('Весь текст Draft скопирован.'); }

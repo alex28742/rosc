@@ -651,7 +651,7 @@ class HardeningTests(StageCase):
                                   "role_assignments", "assignment_capabilities", "run_records", "run_agent_links",
                                   "report_records", "evidence_records", "conversations", "conversation_participants",
                                   "conversation_messages", "architect_sessions", "conversation_deliveries",
-                                  "architect_tool_audit", "conversation_native_sessions", "task_spec_revisions", "prompt_revisions",
+                                  "architect_tool_audit", "conversation_native_sessions", "execution_packages", "task_spec_revisions", "prompt_revisions",
                                   "prompt_approvals", "alembic_version"})
 
 
