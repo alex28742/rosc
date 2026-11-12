@@ -141,3 +141,40 @@ describe('Task Conversation chat behaviour (P040 r02)', () => {
     expect(panel().querySelector('b')).toBeNull();
   });
 });
+
+describe('Project and Task search isolation', () => {
+  it('uses distinct mark IDs and navigates only within the matching Conversation feed', async () => {
+    const api = open({
+      getConversation: vi.fn(async () => conversationPage({
+        messages: [conversationMessage('PC alpha', { message_id: 'pc-alpha' })],
+      })),
+      getTaskConversation: vi.fn(async () => conversationPage({
+        task_id: 'T0001',
+        messages: [conversationMessage('TC alpha alpha', { message_id: 'tc-alpha' })],
+      })),
+    });
+    render(<App api={api} />);
+    await screen.findByText('TC alpha alpha');
+    const pc = document.querySelector('aside[aria-label="Project Conversation"]') as HTMLElement;
+    const tc = panel();
+    await waitFor(() => expect(pc.textContent).toContain('PC alpha'));
+
+    fireEvent.click(pc.querySelector('button[aria-label="Поиск по сообщениям"]')!);
+    fireEvent.change(pc.querySelector('input[type="search"]')!, { target: { value: 'alpha' } });
+    fireEvent.click(tc.querySelector('button[aria-label="Поиск по сообщениям"]')!);
+    fireEvent.change(tc.querySelector('input[type="search"]')!, { target: { value: 'alpha' } });
+
+    const pcMarks = pc.querySelectorAll('mark.rosc-chat-mark');
+    const tcMarks = tc.querySelectorAll('mark.rosc-chat-mark');
+    expect(pcMarks).toHaveLength(1);
+    expect(tcMarks).toHaveLength(2);
+    const ids = [...pcMarks, ...tcMarks].map(mark => mark.id);
+    expect(new Set(ids).size).toBe(3);
+    expect(document.getElementById(tcMarks[0].id)).toBe(tcMarks[0]);
+    expect(pcMarks[0].classList.contains('rosc-chat-mark--current')).toBe(true);
+
+    fireEvent.click(tc.querySelector('button[aria-label="Следующее совпадение"]')!);
+    expect(tcMarks[1].classList.contains('rosc-chat-mark--current')).toBe(true);
+    expect(pcMarks[0].classList.contains('rosc-chat-mark--current')).toBe(true);
+  });
+});

@@ -5,8 +5,8 @@ export type Match = { messageId: string; start: number; end: number; id: string 
 
 export const MAX_MATCHES = 500;
 
-/** Case-insensitive, client-local search over the messages that are already loaded. */
-export function findMatches(messages: ConversationMessage[], term: string): Match[] {
+/** Case-insensitive, client-local search. IDs are unique to the mounted Conversation, not global match indices. */
+export function findMatches(messages: ConversationMessage[], term: string, instanceId: string): Match[] {
   const needle = term.toLocaleLowerCase('ru');
   const matches: Match[] = [];
   if (!needle) return matches;
@@ -17,7 +17,7 @@ export function findMatches(messages: ConversationMessage[], term: string): Matc
     while (at !== -1) {
       if (matches.length >= MAX_MATCHES) return matches;
       matches.push({ messageId: message.message_id, start: at, end: at + needle.length,
-        id: `rosc-chat-match-${matches.length}` });
+        id: `rosc-chat-match-${instanceId}-${matches.length}` });
       from = at + needle.length;
       at = haystack.indexOf(needle, from);
     }

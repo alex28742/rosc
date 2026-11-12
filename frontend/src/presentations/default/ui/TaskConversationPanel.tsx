@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState, type FormEvent } from 'react';
+import { useEffect, useId, useMemo, useRef, useState, type FormEvent } from 'react';
 import type { MessageRecipient } from '../../../core/models';
 import type { TaskConversationControls } from '../../../app/presentation/contracts';
 import { architectReason, describeArchitect } from './architectView';
@@ -50,7 +50,9 @@ export function TaskConversationPanel({ taskId, conversation, collapsed, onColla
   const [searchTerm, setSearchTerm] = useState('');
   const [matchIndex, setMatchIndex] = useState(0);
   const composing = useRef(false);
-  const matches = useMemo(() => findMatches(state.messages, searchTerm.trim()), [state.messages, searchTerm]);
+  const searchInstanceId = useId();
+  const matches = useMemo(() => findMatches(state.messages, searchTerm.trim(), searchInstanceId),
+    [state.messages, searchTerm, searchInstanceId]);
   const currentMatch = matches.length === 0 ? -1 : Math.min(matchIndex, matches.length - 1);
   const currentId = currentMatch >= 0 ? matches[currentMatch].id : null;
   const lastId = state.messages.length > 0 ? state.messages[state.messages.length - 1].message_id : null;
@@ -62,8 +64,10 @@ export function TaskConversationPanel({ taskId, conversation, collapsed, onColla
 
   useEffect(() => {
     if (!currentId) return;
-    document.getElementById(currentId)?.scrollIntoView?.({ block: 'center' });
-  }, [currentId]);
+    const target = Array.from(feed.current?.querySelectorAll<HTMLElement>('.rosc-chat-mark') ?? [])
+      .find(element => element.id === currentId);
+    target?.scrollIntoView?.({ block: 'center' });
+  }, [currentId, searchTerm]);
 
   const toggleSearch = () => {
     if (searchOpen) { setSearchOpen(false); setSearchTerm(''); setMatchIndex(0); } else setSearchOpen(true);

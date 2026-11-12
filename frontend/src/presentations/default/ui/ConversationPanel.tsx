@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState, type FormEvent } from 'react';
+import { useEffect, useId, useMemo, useRef, useState, type FormEvent } from 'react';
 import type { ConversationControls } from '../../../app/presentation/contracts';
 import { architectReason, describeArchitect } from './architectView';
 import { findMatches, renderBody } from './chatSearch';
@@ -55,7 +55,9 @@ export function ConversationPanel({ projectId, conversation, collapsed, onCollap
   const feed = useRef<HTMLDivElement | null>(null);
   const preserveOlder = useRef<number | null>(null);
 
-  const matches = useMemo(() => findMatches(state.messages, searchTerm.trim()), [state.messages, searchTerm]);
+  const searchInstanceId = useId();
+  const matches = useMemo(() => findMatches(state.messages, searchTerm.trim(), searchInstanceId),
+    [state.messages, searchTerm, searchInstanceId]);
   const currentMatch = matches.length === 0 ? -1 : Math.min(matchIndex, matches.length - 1);
   const currentId = currentMatch >= 0 ? matches[currentMatch].id : null;
   const lastMessageId = state.messages.length > 0 ? state.messages[state.messages.length - 1].message_id : null;
@@ -75,8 +77,10 @@ export function ConversationPanel({ projectId, conversation, collapsed, onCollap
 
   useEffect(() => {
     if (!currentId) return;
-    document.getElementById(currentId)?.scrollIntoView?.({ block: 'center' });
-  }, [currentId]);
+    const target = Array.from(feed.current?.querySelectorAll<HTMLElement>('.rosc-chat-mark') ?? [])
+      .find(element => element.id === currentId);
+    target?.scrollIntoView?.({ block: 'center' });
+  }, [currentId, searchTerm]);
 
   const loadOlder = () => {
     if (!feed.current || !state.hasMore || state.olderLoading) return;
