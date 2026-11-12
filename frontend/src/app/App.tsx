@@ -31,6 +31,16 @@ export function App({ api = coreApi }: { api?: CoreApi }) {
   const taskTextScale = useTextScale(route.kind === 'task' ? `task:${route.taskId}` : null);
   const taskConversation = useTaskConversation(api, route.kind === 'task' ? route.projectId : null,
     route.kind === 'task' ? route.taskId : null);
+  const taskConversationControls = {
+    ...taskConversation,
+    // The ONE Project Architect is activated through the existing Project action; the Task only re-reads its status.
+    onActivateArchitect: async () => {
+      const problem = await core.conversation.onActivate();
+      taskConversation.onRefreshArchitect();
+      return problem;
+    },
+    architectBusy: core.conversation.architect.busy,
+  };
   const taskAuthoring = useTaskAuthoring(api, route.kind === 'task' ? route.projectId : null,
     route.kind === 'task' ? route.taskId : null);
   const taskLayerOpen = (route.kind === 'task' || route.kind === 'new-task') && project !== null;
@@ -81,6 +91,7 @@ export function App({ api = coreApi }: { api?: CoreApi }) {
       onClose={close}
     />}
     {route.kind === 'task' && project && <Task
+      key={route.taskId}
       projectName={project.name}
       taskId={route.taskId}
       task={core.task}
@@ -89,11 +100,12 @@ export function App({ api = coreApi }: { api?: CoreApi }) {
       inert={modalOpen}
       scroll={scroll}
       workspace={workspace('task')}
-      conversation={taskConversation}
+      conversation={taskConversationControls}
       authoring={taskAuthoring}
       textScale={taskTextScale}
       onClose={close}
       onRetry={() => void actions.retry()}
+      onOpenProjectSettings={() => go({ kind: 'project', projectId: route.projectId, tab: 'settings' })}
     />}
     {route.kind === 'settings' && <Settings
       state={core.registryControls.state}

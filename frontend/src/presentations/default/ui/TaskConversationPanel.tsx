@@ -1,7 +1,8 @@
-import { useEffect, useRef, useState, type FormEvent } from 'react';
+import { useEffect, useMemo, useRef, useState, type FormEvent } from 'react';
 import type { MessageRecipient } from '../../../core/models';
 import type { TaskConversationControls } from '../../../app/presentation/contracts';
 import { architectReason, describeArchitect } from './architectView';
+import { findMatches, renderBody } from './chatSearch';
 
 /** Delivery wording is about the stored Owner message, never proof that the Architect answered. */
 const DELIVERY_TEXT: Record<string, string> = {
@@ -45,11 +46,32 @@ export function TaskConversationPanel({ taskId, conversation, collapsed, onColla
   const feed = useRef<HTMLDivElement | null>(null);
   const preserveOlder = useRef<number | null>(null);
   const ready = state.status === 'ready';
+  const [searchOpen, setSearchOpen] = useState(false);
+  const [searchTerm, setSearchTerm] = useState('');
+  const [matchIndex, setMatchIndex] = useState(0);
+  const composing = useRef(false);
+  const matches = useMemo(() => findMatches(state.messages, searchTerm.trim()), [state.messages, searchTerm]);
+  const currentMatch = matches.length === 0 ? -1 : Math.min(matchIndex, matches.length - 1);
+  const currentId = currentMatch >= 0 ? matches[currentMatch].id : null;
   const lastId = state.messages.length > 0 ? state.messages[state.messages.length - 1].message_id : null;
 
   useEffect(() => {
+    if (searchTerm.trim()) return;
     if (feed.current) feed.current.scrollTop = feed.current.scrollHeight;
-  }, [lastId, state.status]);
+  }, [lastId, state.status, searchTerm]);
+
+  useEffect(() => {
+    if (!currentId) return;
+    document.getElementById(currentId)?.scrollIntoView?.({ block: 'center' });
+  }, [currentId]);
+
+  const toggleSearch = () => {
+    if (searchOpen) { setSearchOpen(false); setSearchTerm(''); setMatchIndex(0); } else setSearchOpen(true);
+  };
+  const step = (delta: number) => {
+    if (matches.length === 0) return;
+    setMatchIndex(current => (current + delta + matches.length) % matches.length);
+  };
 
   useEffect(() => {
     const element = feed.current;
@@ -98,10 +120,28 @@ export function TaskConversationPanel({ taskId, conversation, collapsed, onColla
         <p className={`rosc-conversation__architect rosc-conversation__architect--${view.tone}`}>{view.label}</p>
       </div>
       <div className="rosc-conversation__head-actions">
-        <button type="button" className="rosc-chat-icon" disabled aria-label="Поиск по Task Conversation — пока недоступно"
-          title="Поиск будет доступен позже">⌕</button>
+        <button type="button" className={searchOpen ? 'rosc-chat-icon rosc-chat-icon--on' : 'rosc-chat-icon'}
+          aria-label="Поиск по сообщениям" aria-expanded={searchOpen} title="Поиск по этой Task Conversation"
+          onClick={toggleSearch}>⌕</button>
       </div>
     </header>
+    {searchOpen && <div className="rosc-conversation__search">
+      <input type="search" aria-label="Поиск по сообщениям" placeholder="Найти в переписке Task…"
+        value={searchTerm} autoFocus
+        onChange={event => { setSearchTerm(event.target.value); setMatchIndex(0); }}
+        onKeyDown={event => {
+          if (event.key === 'Enter') { event.preventDefault(); step(event.shiftKey ? -1 : 1); }
+          if (event.key === 'Escape') { event.stopPropagation(); toggleSearch(); }
+        }} />
+      <span className="rosc-conversation__count" aria-live="polite">
+        {matches.length === 0 ? '0 / 0' : `${currentMatch + 1} / ${matches.length}`}
+      </span>
+      <button type="button" className="rosc-chat-nav" aria-label="Предыдущее совпадение"
+        onClick={() => step(-1)} disabled={matches.length === 0}>‹</button>
+      <button type="button" className="rosc-chat-nav" aria-label="Следующее совпадение"
+        onClick={() => step(1)} disabled={matches.length === 0}>›</button>
+    </div>}
+    {searchOpen && <p className="rosc-conversation__scope">Поиск по загруженным сообщениям{state.hasMore ? ' — загрузите более ранние, чтобы искать глубже' : ''}.</p>}
     <div className="rosc-conversation__feed" role="log" aria-label="Сообщения по задаче" ref={feed}>
       {state.hasMore && ready && <div className="rosc-conversation__more">
         <button type="button" className="rosc-btn rosc-btn--small" onClick={loadOlder} disabled={state.olderLoading}>
@@ -132,7 +172,8 @@ export function TaskConversationPanel({ taskId, conversation, collapsed, onColla
               <span>{message.sender.display_name}{addressed && !fromArchitect ? ' → Architect' : ''}</span>
               <time dateTime={message.created_at}>{formatTime(message.created_at)}</time>
             </div>
-            <p className="rosc-chat-body">{message.body}</p>
+            <p className="rosc-chat-body">{renderBody(message.body,
+              matches.filter(match => match.messageId === message.message_id), currentId)}</p>
             {!fromArchitect && (!delivery || delivery.state === 'not_sent') && <p className="rosc-chat-delivery">
               {addressed ? 'Сохранено · не отправлено Architect' : 'Сохранено'}
               {addressed && <button type="button" className="rosc-btn rosc-btn--small" disabled={!live}
@@ -156,14 +197,18 @@ export function TaskConversationPanel({ taskId, conversation, collapsed, onColla
       })}
     </div>
     <form className="rosc-conversation__compose" onSubmit={submit}>
-      <textarea aria-label="Сообщение в Task Conversation" placeholder="Заметка или вопрос по этой задаче…" rows={3}
+      <textarea aria-label="Сообщение в Task Conversation" placeholder="Сообщение по этой задаче…" rows={3}
         value={draft} readOnly={locked} aria-busy={locked}
         onChange={event => setDraft(event.target.value)}
+        onCompositionStart={() => { composing.current = true; }}
+        onCompositionEnd={() => { composing.current = false; }}
         onKeyDown={event => {
-          if (event.key === 'Enter' && (event.ctrlKey || event.metaKey)) {
-            event.preventDefault();
-            event.currentTarget.form?.requestSubmit();
-          }
+          if (event.key !== 'Enter') return;
+          // Enter sends, Shift+Enter is a new line; Ctrl/Cmd+Enter also send. An IME confirmation never sends.
+          if (event.nativeEvent.isComposing || composing.current || event.keyCode === 229) return;
+          if (event.shiftKey && !event.ctrlKey && !event.metaKey) return;
+          event.preventDefault();
+          event.currentTarget.form?.requestSubmit();
         }} />
       <div className="rosc-conversation__actions">
         <div className="rosc-conversation__recipients">
@@ -178,17 +223,16 @@ export function TaskConversationPanel({ taskId, conversation, collapsed, onColla
           <small>От: Owner · local_unverified</small>
         </div>
         <button type="submit" className="rosc-btn rosc-btn--primary"
-          disabled={!draft.trim() || !ready || state.sending || locked}>{state.sending ? 'Сохранение…'
-            : recipient === 'architect' && live ? 'Отправить' : 'Сохранить'}</button>
+          disabled={!draft.trim() || !ready || state.sending || locked}>{state.sending ? 'Отправка…' : 'Отправить'}</button>
       </div>
       {failure && <p className="rosc-conversation__error" role="alert">{failure}</p>}
       {deliveryFailure && <p className="rosc-conversation__error" role="alert">{deliveryFailure}</p>}
-      {!ready && <p className="rosc-conversation__hint">Сохранение станет доступно после загрузки истории.</p>}
+      {!ready && <p className="rosc-conversation__hint">Отправка станет доступна после загрузки истории.</p>}
       <p className="rosc-conversation__hint">
         {recipient === 'architect'
-          ? (live ? 'Сообщение сохранится в ROSC и будет передано Architect; ранее сохранённые сообщения не пересылаются.'
-            : 'Architect не активен: сообщение сохранится в ROSC с адресатом Architect, его можно отправить позже кнопкой «Отправить Architect».')
-          : 'Сообщение сохранится в ROSC без адресата и никому не передаётся.'}
+          ? (live ? 'Опубликуется в Task Conversation и будет передано Architect; ранее сохранённые сообщения не пересылаются.'
+            : 'Опубликуется в Task Conversation, но Architect не активен — не доставлено; отправьте ему позже кнопкой «Отправить Architect».')
+          : 'Опубликуется в Task Conversation; адресата нет — Architect не получит. Enter — отправить, Shift+Enter — новая строка.'}
       </p>
     </form>
     <button type="button" className="rosc-conversation__rail" aria-label="Развернуть Task Conversation"

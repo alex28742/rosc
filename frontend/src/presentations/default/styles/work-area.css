@@ -2222,42 +2222,6 @@
   scrollbar-gutter: stable;
 }
 
-.rosc-task-notice {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  flex: none;
-  padding: 9px 14px;
-  border: 1px solid var(--rosc-line);
-  border-radius: 10px;
-  background: #fff;
-  color: var(--rosc-secondary);
-  font-size: 12px;
-}
-
-.rosc-task-notice p {
-  margin: 0;
-  font-size: 11px;
-}
-
-.rosc-task-notice > div {
-  flex: 1;
-  min-width: 0;
-}
-
-.rosc-task-notice__mark {
-  display: inline-grid;
-  place-items: center;
-  flex: none;
-  width: 20px;
-  height: 20px;
-  border-radius: 50%;
-  background: #eef2f5;
-  color: #7d8d98;
-  font-weight: 800;
-  font-size: 12px;
-}
-
 .rosc-task-heading {
   display: flex;
   align-items: flex-start;
@@ -2268,7 +2232,7 @@
 
 .rosc-task-heading h3 {
   margin: 0 0 4px;
-  font-size: 22px;
+  font-size: calc(22px * var(--rosc-text-scale, 1));
   line-height: 1.22;
   letter-spacing: -0.45px;
   overflow-wrap: anywhere;
@@ -2277,7 +2241,7 @@
 .rosc-task-heading p {
   margin: 0;
   color: var(--rosc-secondary);
-  font-size: 11px;
+  font-size: calc(11px * var(--rosc-text-scale, 1));
 }
 
 .rosc-task-heading__flags {
@@ -2309,7 +2273,7 @@
 
 .rosc-task-panel__top h3 {
   margin: 0;
-  font-size: 14px;
+  font-size: calc(14px * var(--rosc-text-scale, 1));
 }
 
 .rosc-task-panel__scroll {
@@ -2329,7 +2293,7 @@
   border-top: 1px solid #ebeff2;
   background: #fafbfd;
   color: var(--rosc-secondary);
-  font-size: 10px;
+  font-size: calc(10px * var(--rosc-text-scale, 1));
 }
 
 .rosc-task-panel__foot-actions {
@@ -2342,7 +2306,7 @@
   border: 0;
   background: none;
   color: #286f9e;
-  font-size: 10px;
+  font-size: calc(10px * var(--rosc-text-scale, 1));
   font-weight: 700;
 }
 
@@ -2366,13 +2330,13 @@
 .rosc-task-spec__body h4,
 .rosc-task-actions h4 {
   margin: 0 0 6px;
-  font-size: 11px;
+  font-size: calc(11px * var(--rosc-text-scale, 1));
   font-weight: 750;
 }
 
 .rosc-task-text {
   margin: 0;
-  font-size: 12px;
+  font-size: calc(12px * var(--rosc-text-scale, 1));
   white-space: pre-wrap;
   overflow-wrap: anywhere;
 }
@@ -2396,7 +2360,7 @@
   justify-content: space-between;
   margin-bottom: 5px;
   color: var(--rosc-secondary);
-  font-size: 11px;
+  font-size: calc(11px * var(--rosc-text-scale, 1));
 }
 
 .rosc-task-plan__track {
@@ -2405,37 +2369,57 @@
   background: #e8eef2;
 }
 
-.rosc-task-facts {
-  display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 7px;
-  margin: 0 0 10px;
+/* Context & Actions control panel: primary action first, then Architect/Worker, then compact facts, then documents. */
+.rosc-task-primary {
+  margin: 2px 0 10px;
+  padding: 12px 14px;
+  border: 1px solid var(--rosc-line);
+  border-radius: 9px;
+  background: #f8fafb;
 }
 
-.rosc-task-facts > div {
-  min-width: 0;
-  padding: 7px 9px;
-  border: 1px solid #ebeff2;
-  border-radius: 8px;
+.rosc-task-primary h4 {
+  margin: 0 0 4px;
+  font-size: calc(14px * var(--rosc-text-scale, 1));
 }
 
-.rosc-task-facts dt {
+.rosc-task-primary .rosc-hint {
+  margin: 0 0 9px;
+  font-size: calc(11px * var(--rosc-text-scale, 1));
+}
+
+.rosc-task-primary--positive {
+  border-color: #bfe0cd;
+  background: #f1faf5;
+}
+
+.rosc-task-primary--positive h4 {
+  color: #1f6b47;
+}
+
+.rosc-task-primary--positive .rosc-btn--primary {
+  border-color: #277550;
+  background: #277550;
+}
+
+.rosc-task-primary--warning {
+  border-color: #ecd6a6;
+  background: #fff8ec;
+}
+
+.rosc-task-primary--warning h4 {
+  color: #8a5d12;
+}
+
+.rosc-task-primary--neutral h4 {
   color: var(--rosc-secondary);
-  font-size: 10px;
-}
-
-.rosc-task-facts dd {
-  margin: 0;
-  font-size: 12px;
-  font-weight: 700;
-  overflow-wrap: anywhere;
 }
 
 .rosc-task-agents {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 9px;
-  margin-top: 10px;
+  margin: 0 0 10px;
 }
 
 .rosc-task-agents > div {
@@ -2450,13 +2434,58 @@
   align-items: center;
   justify-content: space-between;
   gap: 8px;
-  font-size: 11px;
+  font-size: calc(12px * var(--rosc-text-scale, 1));
 }
 
 .rosc-task-agents p {
   margin: 6px 0 8px;
-  font-size: 11px;
+  font-size: calc(11px * var(--rosc-text-scale, 1));
   color: var(--rosc-secondary);
+}
+
+.rosc-task-agents__ok {
+  color: #1f6b47 !important;
+}
+
+.rosc-task-agents__err {
+  color: var(--rosc-red) !important;
+}
+
+.rosc-task-agents__actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.rosc-task-facts {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 0 18px;
+  margin: 0 0 10px;
+}
+
+.rosc-task-facts > div {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 10px;
+  min-width: 0;
+  padding: 5px 0;
+  border-bottom: 1px solid #ebeff2;
+}
+
+.rosc-task-facts dt {
+  flex: none;
+  color: var(--rosc-secondary);
+  font-size: calc(11px * var(--rosc-text-scale, 1));
+}
+
+.rosc-task-facts dd {
+  margin: 0;
+  font-size: calc(12px * var(--rosc-text-scale, 1));
+  font-weight: 700;
+  text-align: right;
+  overflow-wrap: anywhere;
 }
 
 .rosc-task-actions {
@@ -2470,7 +2499,6 @@
 }
 
 .rosc-task-panel .rosc-btn:disabled,
-.rosc-task-notice .rosc-btn:disabled,
 .rosc-drawer__footer .rosc-btn:disabled {
   opacity: 0.5;
   cursor: not-allowed;
@@ -2478,7 +2506,7 @@
 
 .rosc-task-foot__note {
   color: var(--rosc-secondary);
-  font-size: 11px;
+  font-size: calc(11px * var(--rosc-text-scale, 1));
 }
 
 .rosc-task-foot__actions {
@@ -2623,7 +2651,7 @@
 }
 
 .rosc-rich {
-  font-size: 12px;
+  font-size: calc(12px * var(--rosc-text-scale, 1));
   line-height: 1.5;
   overflow-wrap: anywhere;
 }
@@ -2669,7 +2697,7 @@
   border-radius: 6px;
   background: transparent;
   color: var(--rosc-ink);
-  font-size: 12px;
+  font-size: calc(12px * var(--rosc-text-scale, 1));
 }
 
 .rosc-rich-toolbar button:hover:not(:disabled) {
@@ -2692,7 +2720,7 @@
 .rosc-task-spec__note,
 .rosc-task-spec__error {
   margin: 0 16px 8px;
-  font-size: 11px;
+  font-size: calc(11px * var(--rosc-text-scale, 1));
 }
 
 .rosc-task-spec__error {
@@ -2711,71 +2739,66 @@
 
 .rosc-task-scope {
   margin: 6px 0 0;
-  font-size: 11px;
+  font-size: calc(11px * var(--rosc-text-scale, 1));
 }
 
-.rosc-task-primary {
-  margin: 10px 0 0;
-  padding: 10px 12px;
-  border: 1px solid var(--rosc-blue-line);
-  border-radius: 8px;
-  background: var(--rosc-soft-blue);
-}
-
-.rosc-task-primary h4 {
-  margin: 0 0 4px;
-  font-size: 12px;
-}
-
-.rosc-task-primary .rosc-hint {
-  margin: 0 0 8px;
-}
-
+/* Prompt Draft side drawer: geometry, summary card and footer follow the approved prototype's .draft-* rules. */
 .rosc-draft-overlay {
   position: fixed;
   inset: 0;
   z-index: 60;
   display: flex;
   justify-content: flex-end;
-  background: rgba(31, 39, 48, 0.28);
+  background: rgba(18, 35, 48, 0.36);
 }
 
 .rosc-draft-drawer {
   display: flex;
   flex-direction: column;
-  width: min(560px, 100%);
+  min-width: 0;
+  width: min(690px, 96vw);
   height: 100%;
-  background: var(--rosc-panel);
-  box-shadow: -8px 0 28px rgba(31, 39, 48, 0.18);
+  background: #fff;
+  color: var(--rosc-ink);
+  font-size: calc(13px * var(--rosc-text-scale, 1));
+  line-height: 1.46;
+  box-shadow: -10px 0 35px rgba(18, 35, 48, 0.22);
+  transition: width 0.18s ease;
 }
 
 .rosc-draft-drawer--wide {
-  width: min(980px, 100%);
+  width: min(1260px, calc(100vw - 24px));
+}
+
+.rosc-draft-drawer--wide .rosc-draft-full textarea {
+  min-height: 55vh;
 }
 
 .rosc-draft-head {
   display: flex;
-  align-items: flex-start;
+  flex-wrap: wrap;
+  align-items: center;
   justify-content: space-between;
   gap: 10px;
   flex: none;
-  padding: 14px 16px 10px;
+  padding: 16px 20px;
   border-bottom: 1px solid var(--rosc-line);
 }
 
 .rosc-draft-head h2 {
   margin: 0;
-  font-size: 16px;
+  font-size: calc(18px * var(--rosc-text-scale, 1));
 }
 
 .rosc-draft-head p {
   margin: 3px 0 0;
   color: var(--rosc-secondary);
-  font-size: 11px;
+  font-size: calc(11px * var(--rosc-text-scale, 1));
 }
 
 .rosc-draft-head__actions {
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
   gap: 6px;
 }
@@ -2783,45 +2806,124 @@
 .rosc-draft-body {
   flex: 1;
   min-height: 0;
-  padding: 12px 16px;
-  overflow: auto;
+  padding: 18px 20px;
+  overflow-y: auto;
 }
 
-.rosc-draft-body h3 {
-  margin: 0 0 4px;
-  font-size: 13px;
+.rosc-draft-summary {
+  margin-bottom: 18px;
+  padding: 13px;
+  border: 1px solid #d6e7f2;
+  border-radius: 9px;
+  background: #f5fafd;
 }
 
-.rosc-draft-body section > p {
-  margin: 0 0 6px;
+.rosc-draft-summary h3 {
+  margin: 0 0 7px;
+  font-size: calc(13px * var(--rosc-text-scale, 1));
+}
+
+.rosc-draft-summary p {
+  margin: 0 0 8px;
   color: var(--rosc-secondary);
-  font-size: 11px;
+  font-size: calc(13px * var(--rosc-text-scale, 1));
 }
 
 .rosc-draft-body textarea {
   display: block;
+  box-sizing: border-box;
   width: 100%;
-  min-height: 120px;
-  padding: 8px 10px;
-  border: 1px solid var(--rosc-line);
-  border-radius: 8px;
+  padding: 10px;
+  border: 1px solid #cadbe7;
+  border-radius: 7px;
+  background: #fff;
+  color: var(--rosc-ink);
   font: inherit;
-  font-size: 12px;
+  font-size: calc(13px * var(--rosc-text-scale, 1));
+  line-height: 1.55;
   resize: vertical;
 }
 
-.rosc-draft-full {
-  margin-top: 12px;
+.rosc-draft-body textarea:read-only {
+  background: #f8fafb;
+}
+
+.rosc-draft-summary textarea {
+  min-height: 90px;
 }
 
 .rosc-draft-full textarea {
-  min-height: 300px;
-  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  min-height: 310px;
+}
+
+.rosc-draft-full h3 {
+  margin: 0 0 8px;
+  font-size: calc(13px * var(--rosc-text-scale, 1));
+}
+
+.rosc-draft-history {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  margin: 0 0 14px;
+  font-size: calc(11px * var(--rosc-text-scale, 1));
+}
+
+.rosc-draft-history > strong {
+  margin-right: 4px;
+}
+
+.rosc-draft-history button {
+  padding: 4px 9px;
+  border: 1px solid #cadbe7;
+  border-radius: 7px;
+  background: #fff;
+  color: #286f9e;
+  font: inherit;
+  font-weight: 700;
+  font-size: calc(11px * var(--rosc-text-scale, 1));
+}
+
+.rosc-draft-history button[aria-current="true"] {
+  border-color: #286f9e;
+  background: #286f9e;
+  color: #fff;
+}
+
+.rosc-draft-history button:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.rosc-draft-history__meta {
+  flex-basis: 100%;
+  margin: 0;
+  color: var(--rosc-secondary);
+}
+
+.rosc-draft-past {
+  margin: 0 0 14px;
+  padding: 9px 12px;
+  border: 1px solid #ecd6a6;
+  border-radius: 8px;
+  background: #fff8ec;
+  font-size: calc(12px * var(--rosc-text-scale, 1));
+}
+
+.rosc-draft-past button {
+  margin-left: 8px;
+  border: 0;
+  background: none;
+  color: #286f9e;
+  font: inherit;
+  font-weight: 700;
+  text-decoration: underline;
 }
 
 .rosc-draft-note {
-  margin: 10px 0 0;
-  font-size: 11px;
+  margin: 8px 0 0;
+  font-size: calc(10px * var(--rosc-text-scale, 1));
   color: var(--rosc-secondary);
 }
 
@@ -2836,12 +2938,16 @@
 .rosc-draft-foot {
   display: flex;
   flex-wrap: wrap;
+  align-items: center;
   justify-content: flex-end;
-  gap: 8px;
+  gap: 10px;
   flex: none;
-  padding: 10px 16px;
+  padding: 16px 20px;
   border-top: 1px solid var(--rosc-line);
-  background: var(--rosc-soft);
+}
+
+.rosc-draft-foot .rosc-btn {
+  white-space: nowrap;
 }
 
 @media (max-width: 700px) {
@@ -2849,6 +2955,96 @@
   .rosc-draft-drawer--wide {
     width: 100%;
   }
+
+  .rosc-draft-head,
+  .rosc-draft-foot {
+    padding: 12px 14px;
+  }
+
+  .rosc-draft-body {
+    padding: 14px;
+  }
+
+  .rosc-draft-foot .rosc-btn {
+    flex: 1 1 auto;
+    white-space: normal;
+  }
+}
+
+/* Spec title / scope editor fields. */
+.rosc-task-spec__fields {
+  display: grid;
+  gap: 8px;
+  margin: 0 0 4px;
+}
+
+.rosc-task-spec__fields label {
+  display: grid;
+  gap: 3px;
+  font-size: calc(11px * var(--rosc-text-scale, 1));
+  font-weight: 750;
+}
+
+.rosc-task-spec__fields input,
+.rosc-task-spec__fields textarea {
+  box-sizing: border-box;
+  width: 100%;
+  padding: 7px 9px;
+  border: 1px solid var(--rosc-line);
+  border-radius: 8px;
+  background: var(--rosc-panel);
+  font: inherit;
+  font-size: calc(12px * var(--rosc-text-scale, 1));
+  font-weight: 400;
+}
+
+.rosc-task-spec__fields textarea {
+  min-height: 52px;
+  resize: vertical;
+}
+
+/* Send button of the Task Conversation: larger hit area, scoped to this button only. */
+.rosc-conversation--task .rosc-conversation__actions .rosc-btn--primary {
+  min-height: 42px;
+  padding: 10px 35px;
+}
+
+/* Task-wide text scale for the shared controls, set by the Task root only (Project and Dashboard never get this). */
+.rosc-drawer--task .rosc-btn {
+  font-size: calc(12px * var(--rosc-text-scale, 1));
+}
+
+.rosc-drawer--task .rosc-btn--small {
+  font-size: calc(11px * var(--rosc-text-scale, 1));
+}
+
+.rosc-drawer--task .rosc-chip,
+.rosc-drawer--task .rosc-tag {
+  font-size: calc(11px * var(--rosc-text-scale, 1));
+}
+
+.rosc-drawer--task .rosc-hint,
+.rosc-drawer--task .rosc-drawer-eyebrow {
+  font-size: calc(11px * var(--rosc-text-scale, 1));
+}
+
+.rosc-drawer--task .rosc-state,
+.rosc-drawer--task .rosc-state p {
+  font-size: calc(13px * var(--rosc-text-scale, 1));
+}
+
+.rosc-drawer--task .rosc-chat-tool,
+.rosc-drawer--task .rosc-chat-icon,
+.rosc-drawer--task .rosc-conversation__search input,
+.rosc-drawer--task .rosc-conversation__search span {
+  font-size: calc(11px * var(--rosc-text-scale, 1));
+}
+
+.rosc-conversation__scope {
+  margin: 0;
+  padding: 4px 14px;
+  color: var(--rosc-secondary);
+  font-size: calc(10px * var(--rosc-text-scale, 1));
 }
 
 .rosc-task-spec__body[hidden] {

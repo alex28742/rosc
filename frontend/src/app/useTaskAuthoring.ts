@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { ApiError, describeError, type CoreApi } from '../core/api';
-import type { SpecRevision, SpecRevisionSummary, TaskAuthoring } from '../core/models';
+import type { PromptRevision, SpecRevision, SpecRevisionSummary, TaskAuthoring } from '../core/models';
 import type { TaskAuthoringControls } from './presentation/contracts';
 
 /** Bounded refresh so a Draft the Architect saved through its scoped Tool shows up without a manual reload. */
@@ -73,13 +73,16 @@ export function useTaskAuthoring(api: CoreApi, projectId: string | null, taskId:
     status: visible.status, data: visible.data, specHistory: visible.history, error: visible.error, busy,
     onReload: () => { if (scope && projectId && taskId) void load(scope, projectId, taskId, false); },
     onSaveSpec: async input => {
-      const result = await run((pid, tid, data) => api.saveSpec(pid, tid, {
-        expected_revision: data.spec.revision, title: data.spec.title, ...input }));
+      const result = await run((pid, tid) => api.saveSpec(pid, tid, input));
       return result.ok ? { error: null, created: result.value.created } : { error: result.error, created: false };
     },
     onLoadSpecRevision: async (revision: number): Promise<SpecRevision | string> => {
       if (!projectId || !taskId) return 'Task не открыт.';
       try { return await api.getSpecRevision(projectId, taskId, revision); } catch (e) { return describeError(e); }
+    },
+    onLoadPromptRevision: async (revision: number): Promise<PromptRevision | string> => {
+      if (!projectId || !taskId) return 'Task не открыт.';
+      try { return await api.getPromptRevision(projectId, taskId, revision); } catch (e) { return describeError(e); }
     },
     onSavePrompt: async (body, summary) => {
       const result = await run((pid, tid, data) => api.savePrompt(pid, tid, {

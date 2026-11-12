@@ -20,6 +20,7 @@ const taskConversation = () => ({
   state: { status: 'ready' as const, conversationId: null, messages: [], hasMore: false, nextBefore: null,
     error: '', sending: false, olderLoading: false },
   architect: { status: 'ready' as const, info: null },
+  onActivateArchitect: vi.fn(async () => null), architectBusy: false, onRefreshArchitect: vi.fn(),
   onReload: vi.fn(), onLoadOlder: vi.fn(), onSend: vi.fn(async () => null), onSendToArchitect: vi.fn(async () => null),
   onReconcile: vi.fn(async () => null), onRetryDelivery: vi.fn(async () => null),
 });
@@ -132,13 +133,13 @@ describe('Work area presentation', () => {
     expect(Array.from(main.children).map(child => child.className.split(' ')[0])).toEqual(['rosc-task-left', 'rosc-conversation']);
     const lower = drawer.querySelector('.rosc-task-lower')!;
     expect(lower.children.length).toBe(2);
-    for (const name of ['Блокеры', 'Спецификация задачи', 'Рабочий план Worker', 'Контекст и действия', 'Task Conversation']) {
+    for (const name of ['Спецификация задачи', 'Рабочий план Worker', 'Контекст и действия', 'Task Conversation']) {
       expect(within(drawer).getByLabelText(name)).toBeTruthy();
     }
     expect(within(drawer).getByText('Рабочий план пока недоступен.')).toBeTruthy();
     expect(drawer.querySelector('.rosc-drawer__footer')).toBeTruthy();
     expect(main.contains(drawer.querySelector('.rosc-drawer__footer'))).toBe(false);
-    for (const label of ['Сохранить Spec', 'Ответить на блокер', 'Выбрать Worker', 'Prompt / контракт', 'Журнал выполнения', 'Ревизии плана']) {
+    for (const label of ['Сохранить Spec', 'Выбрать Worker', 'Prompt / контракт', 'Журнал выполнения', 'Ревизии плана']) {
       const button = within(drawer).getByRole('button', { name: new RegExp(label) }) as HTMLButtonElement;
       expect(button.disabled, label).toBe(true);
     }

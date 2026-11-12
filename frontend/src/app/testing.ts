@@ -85,6 +85,7 @@ export const taskAuthoring = (over: Partial<TaskAuthoring> = {}): TaskAuthoring 
 export const authoringControls = (over: Partial<TaskAuthoringControls> = {}): TaskAuthoringControls => ({
   status: 'ready', data: taskAuthoring(), specHistory: [], error: '', busy: false, onReload: vi.fn(),
   onSaveSpec: vi.fn(async () => ({ error: null, created: true })), onLoadSpecRevision: vi.fn(async () => taskAuthoring().spec),
+  onLoadPromptRevision: vi.fn(async () => ({ revision: 1, source_spec_revision: 1, summary: 's', body: 'b', digest: 'x'.repeat(64), rules_ref: null, state: 'superseded' as const, actor: { kind: 'owner', id: 'local-owner' }, created_at: '2026-10-31T00:00:00Z', approval: null })),
   onSavePrompt: vi.fn(async () => null), onApprove: vi.fn(async () => null), ...over,
 });
 

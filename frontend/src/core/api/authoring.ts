@@ -6,6 +6,7 @@ const base = (projectId: string, taskId: string) => `/projects/${projectId}/task
 export const getTaskAuthoring = (projectId: string, taskId: string) => request<TaskAuthoring>(`${base(projectId, taskId)}/authoring`);
 export const listSpecRevisions = (projectId: string, taskId: string) => request<SpecRevisionSummary[]>(`${base(projectId, taskId)}/spec/revisions`);
 export const getSpecRevision = (projectId: string, taskId: string, revision: number) => request<SpecRevision>(`${base(projectId, taskId)}/spec/revisions/${revision}`);
+export const getPromptRevision = (projectId: string, taskId: string, revision: number) => request<PromptRevision>(`${base(projectId, taskId)}/prompt/revisions/${revision}`);
 export const saveSpec = (projectId: string, taskId: string, input: SpecSaveInput) =>
   post<{ created: boolean; spec: SpecRevision }>(`${base(projectId, taskId)}/spec/revisions`, input);
 export const savePrompt = (projectId: string, taskId: string, input: PromptSaveInput) =>

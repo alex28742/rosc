@@ -31,14 +31,14 @@ describe('Task Conversation in the Task drawer', () => {
     const view = within(panel());
     const box = view.getByLabelText('Сообщение в Task Conversation');
     fireEvent.change(box, { target: { value: 'Без адресата' } });
-    fireEvent.click(view.getByRole('button', { name: 'Сохранить' }));
+    fireEvent.click(view.getByRole('button', { name: 'Отправить' }));
     await view.findByText('Сохранено');
     expect(api.sendTaskConversationMessage).toHaveBeenLastCalledWith('P0001', 'T0001',
       expect.objectContaining({ body: 'Без адресата', recipient: null }));
 
     fireEvent.change(view.getByLabelText('Адресат сообщения'), { target: { value: 'architect' } });
     fireEvent.change(box, { target: { value: 'Для Architect' } });
-    fireEvent.click(view.getByRole('button', { name: 'Сохранить' }));
+    fireEvent.click(view.getByRole('button', { name: 'Отправить' }));
     await view.findByText('Сохранено · не отправлено Architect');
     expect(api.sendTaskConversationMessage).toHaveBeenLastCalledWith('P0001', 'T0001',
       expect.objectContaining({ body: 'Для Architect', recipient: 'architect' }));
@@ -54,10 +54,10 @@ describe('Task Conversation in the Task drawer', () => {
     const view = within(panel());
     const box = view.getByLabelText('Сообщение в Task Conversation') as HTMLTextAreaElement;
     fireEvent.change(box, { target: { value: 'Повтор' } });
-    fireEvent.click(view.getByRole('button', { name: 'Сохранить' }));
+    fireEvent.click(view.getByRole('button', { name: 'Отправить' }));
     expect((await view.findByRole('alert')).textContent).toContain('Не удалось связаться');
     expect(box.value).toBe('Повтор');
-    fireEvent.click(view.getByRole('button', { name: 'Сохранить' }));
+    fireEvent.click(view.getByRole('button', { name: 'Отправить' }));
     await waitFor(() => expect(box.value).toBe(''));
     expect(send.mock.calls[0][2].client_key).toBe(send.mock.calls[1][2].client_key);
     expect(view.getAllByText('Повтор').length).toBe(1);
@@ -89,5 +89,55 @@ describe('Task Conversation in the Task drawer', () => {
     expect(await screen.findByText('Пережило обновление')).toBeTruthy();
     expect(screen.getByText('Сохранено · не отправлено Architect')).toBeTruthy();
     expect(api.getTaskConversation).toHaveBeenCalledTimes(2);
+  });
+});
+
+describe('Task Conversation chat behaviour (P040 r02)', () => {
+  const setup = async () => {
+    const api = open();
+    render(<App api={api} />);
+    await screen.findByText('Сообщений по этой задаче пока нет.');
+    const view = within(panel());
+    return { api, view, box: view.getByLabelText('Сообщение в Task Conversation') as HTMLTextAreaElement };
+  };
+
+  it('Enter sends, Shift+Enter does not, an empty text is never sent, IME confirmation does not send', async () => {
+    const { api, box } = await setup();
+    fireEvent.keyDown(box, { key: 'Enter' });
+    expect(api.sendTaskConversationMessage).not.toHaveBeenCalled();
+    fireEvent.change(box, { target: { value: 'строка' } });
+    fireEvent.keyDown(box, { key: 'Enter', shiftKey: true });
+    expect(api.sendTaskConversationMessage).not.toHaveBeenCalled();
+    fireEvent.compositionStart(box);
+    fireEvent.keyDown(box, { key: 'Enter' });
+    expect(api.sendTaskConversationMessage).not.toHaveBeenCalled();
+    fireEvent.compositionEnd(box);
+    fireEvent.keyDown(box, { key: 'Enter' });
+    fireEvent.keyDown(box, { key: 'Enter' }); // a double Enter never double-sends
+    await waitFor(() => expect(api.sendTaskConversationMessage).toHaveBeenCalledTimes(1));
+  });
+
+  it('Ctrl+Enter and Cmd+Enter still send', async () => {
+    const { api, box } = await setup();
+    fireEvent.change(box, { target: { value: 'ctrl' } });
+    fireEvent.keyDown(box, { key: 'Enter', ctrlKey: true });
+    await waitFor(() => expect(api.sendTaskConversationMessage).toHaveBeenCalledTimes(1));
+    fireEvent.change(box, { target: { value: 'cmd' } });
+    fireEvent.keyDown(box, { key: 'Enter', metaKey: true });
+    await waitFor(() => expect(api.sendTaskConversationMessage).toHaveBeenCalledTimes(2));
+  });
+
+  it('searches only the loaded messages of this Task and highlights matches without HTML', async () => {
+    const api = open({ getTaskConversation: vi.fn(async () => conversationPage({ task_id: 'T0001',
+      messages: [conversationMessage('alpha <b>x</b> beta'), conversationMessage('Alpha again')] })) });
+    render(<App api={api} />);
+    await screen.findByText(/alpha/);
+    const view = within(panel());
+    fireEvent.click(view.getByRole('button', { name: 'Поиск по сообщениям' }));
+    expect(view.getByText(/Поиск по загруженным сообщениям/)).toBeTruthy();
+    fireEvent.change(view.getByRole('searchbox'), { target: { value: 'alpha' } });
+    expect(view.getByText('1 / 2')).toBeTruthy();
+    expect(panel().querySelectorAll('mark').length).toBe(2);
+    expect(panel().querySelector('b')).toBeNull();
   });
 });

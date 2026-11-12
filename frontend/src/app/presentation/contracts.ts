@@ -1,7 +1,7 @@
 // The only surface a presentation package sees. Presentations render these typed view models and call these
 // callbacks; they never reach the API client, the router or Core persistence.
 import type { ComponentType, ReactNode } from 'react';
-import type { AgentDefinition, AgentFormValues, ArchitectStatus, ContextAccess, ConversationMessage, MessageRecipient, Project, ProjectFormValues, RepairConfirmation, RoleAssignment, SpecRevision, SpecRevisionSummary, Task, TaskAuthoring, TaskFormValues } from '../../core/models';
+import type { AgentDefinition, AgentFormValues, ArchitectStatus, ContextAccess, ConversationMessage, MessageRecipient, Project, PromptRevision, ProjectFormValues, RepairConfirmation, RoleAssignment, SpecRevision, SpecRevisionSummary, Task, TaskAuthoring, TaskFormValues } from '../../core/models';
 import type { ScrollRegions } from '../scroll';
 
 export type LoadStatus = 'loading' | 'ready' | 'failed';
@@ -257,6 +257,11 @@ export type TaskConversationControls = {
   state: ConversationState;
   /** P039: read-only Architect availability for this Project (never starts anything). */
   architect: { status: LoadStatus; info: ArchitectStatus | null };
+  /** Explicit activation of the one Project Architect (the existing Project action; never creates a Task conversation). */
+  onActivateArchitect: () => Promise<string | null>;
+  architectBusy: boolean;
+  /** Re-reads the Architect status from Core. */
+  onRefreshArchitect: () => void;
   onReload: () => void;
   onLoadOlder: () => void;
   /**
@@ -280,8 +285,10 @@ export type TaskAuthoringControls = {
   busy: boolean;
   onReload: () => void;
   /** Saves a new Spec revision from the edited rich text. Resolves to an error message or `null`; `created` is false when nothing changed. */
-  onSaveSpec: (input: { description: string; acceptance_criteria: string }) => Promise<{ error: string | null; created: boolean }>;
+  onSaveSpec: (input: { expected_revision: number; title: string; scope: string; description: string; acceptance_criteria: string }) => Promise<{ error: string | null; created: boolean }>;
   onLoadSpecRevision: (revision: number) => Promise<SpecRevision | string>;
+  /** Reads one stored Prompt revision with its body (read-only history view). Resolves to the revision or an error message. */
+  onLoadPromptRevision: (revision: number) => Promise<PromptRevision | string>;
   /** Saves a new Prompt Draft revision for the current Spec. Resolves to an error message or `null`. */
   onSavePrompt: (body: string, summary: string) => Promise<string | null>;
   /** Approves the exact saved head Prompt revision (Owner only). Resolves to an error message or `null`. */
@@ -303,6 +310,8 @@ export type TaskViewProps = {
   textScale: TextScaleControls;
   onClose: () => void;
   onRetry: () => void;
+  /** Opens the Project settings (agent assignments); offered when the Architect cannot be activated from the Task. */
+  onOpenProjectSettings?: () => void;
 };
 
 export type NewTaskViewProps = {

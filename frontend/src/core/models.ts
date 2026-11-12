@@ -258,5 +258,5 @@ export type TaskAuthoring = {
   task_id: string; editable: boolean; spec: SpecRevision; prompt: PromptRevision | null; prompt_history: PromptRevision[];
   run: { authorized: boolean; label: string; worker: string }; next: NextAction;
 };
-export type SpecSaveInput = { expected_revision: number; title: string; description: string; acceptance_criteria: string };
+export type SpecSaveInput = { expected_revision: number; title: string; scope?: string | null; description: string; acceptance_criteria: string };
 export type PromptSaveInput = { expected_revision: number | null; source_spec_revision: number; body: string; summary: string };

@@ -28,7 +28,7 @@ const merge = (known: ConversationMessage[], incoming: ConversationMessage[]): C
  * resets the cache synchronously, and every async result is dropped unless it still belongs to the active scope, so a
  * late response can never repaint another Task's chat. History is always re-read from Core.
  */
-export function useTaskConversation(api: CoreApi, projectId: string | null, taskId: string | null): TaskConversationControls {
+export function useTaskConversation(api: CoreApi, projectId: string | null, taskId: string | null): Omit<TaskConversationControls, 'onActivateArchitect' | 'architectBusy'> {
   const scope = projectId && taskId ? `${projectId}/${taskId}` : null;
   const [cache, setCache] = useState<Cache>(() => emptyFor(scope));
   const scopeRef = useRef(scope);
@@ -187,6 +187,10 @@ export function useTaskConversation(api: CoreApi, projectId: string | null, task
 
   const { scope: _scope, architect, ...state } = visible;
   void _scope;
-  return { state, architect, onReload, onLoadOlder: () => void onLoadOlder(), onSend, onSendToArchitect, onReconcile,
+  const onRefreshArchitect = useCallback(() => {
+    const current = scopeRef.current;
+    if (current && projectId) void loadArchitect(current, projectId);
+  }, [loadArchitect, projectId]);
+  return { state, architect, onRefreshArchitect, onReload, onLoadOlder: () => void onLoadOlder(), onSend, onSendToArchitect, onReconcile,
     onRetryDelivery };
 }

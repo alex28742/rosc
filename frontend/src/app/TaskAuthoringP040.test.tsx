@@ -133,9 +133,75 @@ describe('Context & actions and the Prompt Draft drawer (P040)', () => {
     expect(ctx.getByTestId('draft-fact').textContent).toContain('утверждён');
     expect(ctx.getByText('Run не авторизован')).toBeTruthy();
     expect(ctx.getByText('Worker не запускался')).toBeTruthy();
-    fireEvent.click(ctx.getByRole('button', { name: 'Просмотреть утверждённый Draft' }));
+    fireEvent.click(ctx.getByRole('button', { name: 'Prompt / контракт' }));
     const dialog = within(await screen.findByRole('dialog'));
     expect((dialog.getByRole('button', { name: 'Draft v1 утверждён' }) as HTMLButtonElement).disabled).toBe(true);
     expect(api.approvePrompt).not.toHaveBeenCalled();
+  });
+});
+
+describe('P040 r02 UX pass', () => {
+  it('saves a changed title and scope, passes them to Core and CAS-guards against the loaded revision', async () => {
+    const api = open(taskAuthoring());
+    render(<App api={api} />);
+    const spec = await specPanel();
+    fireEvent.change(await spec.findByLabelText('Название Task'), { target: { value: 'Новое название' } });
+    fireEvent.change(spec.getByLabelText('Границы (scope)'), { target: { value: 'Только API' } });
+    fireEvent.click(spec.getByRole('button', { name: 'Сохранить Spec' }));
+    await waitFor(() => expect(api.saveSpec).toHaveBeenCalledTimes(1));
+    expect(api.saveSpec.mock.calls[0][2]).toMatchObject({ expected_revision: 1, title: 'Новое название', scope: 'Только API' });
+  });
+
+  it('shows no blocker banner, no "Агенты не запущены" and no stale footer promise', async () => {
+    render(<App api={open(taskAuthoring())} />);
+    const drawer = await screen.findByLabelText('Task Work Area');
+    await within(drawer).findByLabelText('Контекст и действия');
+    expect(within(drawer).queryByText('Активных блокеров нет')).toBeNull();
+    expect(within(drawer).queryByText('Агенты не запущены')).toBeNull();
+    expect(within(drawer).queryByText(/появятся в следующих срезах$/)).toBeNull();
+    expect(drawer.querySelector('.rosc-task-notice')).toBeNull();
+  });
+
+  it('puts the primary action first, then Architect/Worker, then the facts, then documents', async () => {
+    render(<App api={open(taskAuthoring())} />);
+    const panel = (await screen.findByLabelText('Контекст и действия')) as HTMLElement;
+    await within(panel).findByRole('button', { name: 'Создать Prompt Draft' });
+    const order = ['.rosc-task-primary', '.rosc-task-agents', '.rosc-task-facts', '.rosc-task-actions'].map(sel => panel.querySelector(sel)!);
+    for (let i = 0; i < order.length - 1; i++) expect(order[i].compareDocumentPosition(order[i + 1]) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(within(panel).queryByText('Architect', { selector: 'dt' })).toBeNull();
+  });
+
+  it('offers the existing Project activation from the Task and shows the active state afterwards', async () => {
+    const { architectStatus } = await import('./testing');
+    let live = false;
+    const api = open(taskAuthoring(), {
+      getArchitect: vi.fn(async () => architectStatus(live ? { state: 'ready', can_activate: false, can_deactivate: true } : { state: 'stopped', can_activate: true })),
+      activateArchitect: vi.fn(async () => { live = true; return architectStatus({ state: 'ready', can_activate: false, can_deactivate: true }); }),
+    });
+    render(<App api={api} />);
+    const ctx = await context();
+    fireEvent.click(await ctx.findByRole('button', { name: 'Активировать Project Architect' }));
+    await waitFor(() => expect(api.activateArchitect).toHaveBeenCalledWith('P0001'));
+    expect(await ctx.findByText(/Architect активен — можно обратиться через @ Architect/)).toBeTruthy();
+    expect(api.sendTaskConversationMessage).not.toHaveBeenCalled();
+  });
+
+  it('keeps Prompt history selectable and shows a past revision read-only', async () => {
+    const v1 = prompt({ revision: 1, summary: 'старое резюме', body: 'старый текст', state: 'superseded' });
+    const v2 = prompt({ revision: 2, summary: 'новое резюме', body: 'новый текст', digest: 'q'.repeat(64) });
+    const head = taskAuthoring({ prompt: v2, prompt_history: [{ ...v1, body: undefined, current: false }, { ...v2, body: undefined, current: true }],
+      next: { action: 'review_prompt', label: 'Просмотреть и утвердить Prompt', enabled: true, next_actor: 'Owner', hint: 'h' } });
+    const api = open(head, { getPromptRevision: vi.fn(async () => v1) });
+    render(<App api={api} />);
+    fireEvent.click(await (await context()).findByRole('button', { name: 'Prompt / контракт' }));
+    const dialog = within(await screen.findByRole('dialog'));
+    fireEvent.click(dialog.getByRole('button', { name: /^v1/ }));
+    expect(await dialog.findByText(/Просмотр Prompt v1; текущая v2/)).toBeTruthy();
+    const body = dialog.getByLabelText('Полный текст Prompt Draft') as HTMLTextAreaElement;
+    expect(body.value).toBe('старый текст');
+    expect(body.readOnly).toBe(true);
+    expect((dialog.getByRole('button', { name: 'Утвердить Draft v2' }) as HTMLButtonElement).disabled).toBe(true);
+    fireEvent.click(dialog.getByRole('button', { name: 'К текущей версии' }));
+    expect((dialog.getByLabelText('Полный текст Prompt Draft') as HTMLTextAreaElement).value).toBe('новый текст');
   });
 });
