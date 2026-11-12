@@ -3050,3 +3050,7 @@
 .rosc-task-spec__body[hidden] {
   display: none;
 }
+
+.rosc-task-agents__actions .rosc-btn {
+  flex: 1 1 auto;
+}

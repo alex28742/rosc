@@ -1,6 +1,6 @@
 import { cleanup, fireEvent, render, screen, within } from '@testing-library/react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { authoringControls, architectStatus, agentDefinition, contextAccess, project, roleAssignment, task } from '../../app/testing';
+import { authoringControls, architectStatus, taskArchitectStatus, agentDefinition, contextAccess, project, roleAssignment, task } from '../../app/testing';
 import { DashboardView } from './views/DashboardView';
 import { ProjectView } from './views/ProjectView';
 import { TaskView } from './views/TaskView';
@@ -20,7 +20,8 @@ const taskConversation = () => ({
   state: { status: 'ready' as const, conversationId: null, messages: [], hasMore: false, nextBefore: null,
     error: '', sending: false, olderLoading: false },
   architect: { status: 'ready' as const, info: null },
-  onActivateArchitect: vi.fn(async () => null), architectBusy: false, onRefreshArchitect: vi.fn(),
+  taskArchitect: { status: 'ready' as const, info: taskArchitectStatus(), busy: false },
+  onActivateTaskArchitect: vi.fn(async () => null), onRefreshArchitect: vi.fn(),
   onReload: vi.fn(), onLoadOlder: vi.fn(), onSend: vi.fn(async () => null), onSendToArchitect: vi.fn(async () => null),
   onReconcile: vi.fn(async () => null), onRetryDelivery: vi.fn(async () => null),
 });
@@ -139,10 +140,12 @@ describe('Work area presentation', () => {
     expect(within(drawer).getByText('Рабочий план пока недоступен.')).toBeTruthy();
     expect(drawer.querySelector('.rosc-drawer__footer')).toBeTruthy();
     expect(main.contains(drawer.querySelector('.rosc-drawer__footer'))).toBe(false);
-    for (const label of ['Сохранить Spec', 'Выбрать Worker', 'Prompt / контракт', 'Журнал выполнения', 'Ревизии плана']) {
+    for (const label of ['Сохранить Spec', 'Prompt / контракт', 'Журнал выполнения', 'Ревизии плана']) {
       const button = within(drawer).getByRole('button', { name: new RegExp(label) }) as HTMLButtonElement;
       expect(button.disabled, label).toBe(true);
     }
+    const worker = within(within(drawer).getByLabelText('Worker этой Task'));
+    expect((worker.getByRole('button', { name: 'Активировать' }) as HTMLButtonElement).disabled).toBe(true);
     expect(within(drawer).queryByText(/B-014|S0\d|R5002/)).toBeNull();
     fireEvent.click(within(drawer).getByLabelText('Свернуть Task Conversation'));
     expect(main.className).toContain('rosc-task-workspace--collapsed');

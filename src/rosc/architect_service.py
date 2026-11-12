@@ -39,7 +39,7 @@ from .authorization import (ARCHITECT_ACTIVATE, ARCHITECT_CONTEXT_READ,
                             CONVERSATION_DELIVERY_RECONCILE, CONVERSATION_MESSAGE_CREATE, ActorContext, AuthorizationPolicy, ResourceScope,
                             evaluate)
 from .project_context import ACCESS_MATRIX, ProjectContextBroker, project_label
-from .conversation import (SAFE_RETRY_CODES, ConversationConflict, ConversationDenied, ConversationNotFound, ConversationStoreError, InvalidConversationInput, UnsafeProjectIdentity, _architect_body, _utc_iso, delivery_state_view, recoverable_failure)
+from .conversation import (SAFE_RETRY_CODES, ConversationConflict, ConversationDenied, ConversationNotFound, ConversationStoreError, InvalidConversationInput, UnsafeProjectIdentity, _architect_body, ensure_task_conversation, _utc_iso, delivery_state_view, recoverable_failure)
 from .models import (ASSIGNMENT_ACTIVE, ASSURANCE_ADAPTER_VERIFIED, CONVERSATION_KIND_PROJECT, CONVERSATION_KIND_TASK, DELIVERY_DELIVERED,
                      DELIVERY_FAILED, DELIVERY_PENDING, DELIVERY_UNKNOWN, PARTICIPANT_ARCHITECT, PARTICIPANT_OWNER,
                      ONBOARDING_BLOCKED, ONBOARDING_INITIALIZING, ONBOARDING_READY, ONBOARDING_UNKNOWN,
@@ -674,7 +674,8 @@ class ArchitectService:
             self._ensure_tools_connected(live, project_id)
             if conversation.kind == CONVERSATION_KIND_TASK:
                 # P039: a Task Conversation has its OWN native session on the same host; the reply can only come from it.
-                bound = self._task_native(session, live, pair[1], conversation, handle)
+                with self._lock(project_id, "native"):  # r03: one native session per Task even beside a button activation
+                    bound = self._task_native(session, live, pair[1], conversation, handle)
                 if isinstance(bound, str):
                     self._set(message_id, DELIVERY_FAILED, bound)
                     return
@@ -835,6 +836,96 @@ class ArchitectService:
             view = delivery_view(session.get(ConversationDelivery, message_id))
         self._enqueue(actor, pid, message_id)
         return view
+
+    # -- Task Architect (TCA) status and explicit activation (P040 r03) ------------------------------------------------
+    @staticmethod
+    def _task_scope(session: Session, project_id: int, task_id: object) -> Task:
+        task = session.get(Task, task_id) if isinstance(task_id, int) and not isinstance(task_id, bool) else None
+        if task is None or task.project_id != project_id:
+            raise ArchitectNotFound("Task not found")  # the same answer for an unknown Task and another Project's Task
+        return task
+
+    def _task_state(self, session: Session, project_id: int, task_id: int, *, host_detail: str | None = None) -> dict:
+        """Verified state of THIS Task's native session.  Read-only: nothing is created, started, prompted or written.
+
+        ``active`` only when the current ready host owns this Task's binding and the runtime itself finds that native
+        session; a database row alone is never proof.  ``inactive``: this Task never had a native session.  ``error``:
+        it had one that is now unreachable (or the check itself could not be completed)."""
+        problem = self._configuration(self._assignment(session, project_id))
+        live = self._live(session, project_id)
+        conversation = session.scalars(select(Conversation).where(
+            Conversation.task_id == task_id, Conversation.kind == CONVERSATION_KIND_TASK)).first()
+        rows = [] if conversation is None else list(session.scalars(select(ConversationNativeSession).where(
+            ConversationNativeSession.conversation_id == conversation.conversation_id)))
+        state, detail = "inactive", host_detail
+        if live is not None and live.state == SESSION_READY:
+            mine = next((row for row in rows if row.architect_session_id == live.session_id), None)
+            handle = self._handle(live)
+            if mine is not None:
+                if handle is None:
+                    state, detail = "error", "host_identity_missing"
+                elif self._probe_owned(live, replace(handle, runtime_session_id=mine.runtime_session_id)):
+                    state, detail = "active", None
+                elif self._probe_owned(live, handle):
+                    state, detail = "error", "native_session_lost"
+                else:
+                    state, detail = "error", "host_not_alive"
+            elif rows:
+                state, detail = "error", "native_session_lost"  # it lived on an earlier host incarnation
+        elif live is not None:
+            state, detail = "error", "host_not_ready"
+        elif rows:
+            state, detail = "error", "host_not_running"
+        elif host_detail is not None:
+            state = "error"
+        return {"project_id": f"P{project_id:04d}", "task_id": f"T{task_id:04d}", "state": state, "detail": detail,
+                "can_activate": state != "active" and (problem is None or (live is not None and live.state == SESSION_READY))}
+
+    def task_status(self, actor: ActorContext, project_id: object, task_id: object) -> dict:
+        self._authorize(actor, ARCHITECT_STATUS, project_id)
+        pid: int = project_id  # type: ignore[assignment]
+        with self._sessions() as session:
+            self._project(session, pid)
+            task = self._task_scope(session, pid, task_id)
+            return self._task_state(session, pid, task.id)
+
+    def activate_task(self, actor: ActorContext, project_id: object, task_id: object) -> dict:
+        """Explicit Owner activation of ONE Task's native Architect session on the Project's single host.
+
+        Starts the Project host through the existing ``activate`` only when it is not ready, then creates (or, if it
+        already answers, keeps) this Task's native session.  Sends no prompt and no message, replays nothing and never
+        starts a Worker; ``primed`` stays false, so the first real send still carries the short Task context."""
+        self._authorize(actor, ARCHITECT_ACTIVATE, project_id)
+        pid: int = project_id  # type: ignore[assignment]
+        with self._sessions() as session:
+            self._project(session, pid)
+            tid = self._task_scope(session, pid, task_id).id
+            live = self._live(session, pid)
+            host_ready = live is not None and live.state == SESSION_READY
+        if not host_ready:
+            host = self.activate(actor, pid)
+            if host["state"] != SESSION_READY:
+                with self._sessions() as session:
+                    return self._task_state(session, pid, tid, host_detail=host.get("detail") or host["state"])
+        with self._sessions() as session:
+            live = self._live(session, pid)
+            if live is not None and live.state == SESSION_READY:
+                self._ensure_tools_connected(live, pid)
+        conversation_id = ensure_task_conversation(self._sessions, actor, pid, tid)
+        with self._lock(pid, "native"):  # two quick clicks, or a click beside a first send, create exactly one session
+            with self._sessions() as session:
+                live = self._live(session, pid)
+                pair = self._assignment(session, pid)
+                handle = self._handle(live) if live is not None else None
+                if (live is None or live.state != SESSION_READY or pair is None
+                        or pair[0].assignment_id != live.assignment_id or handle is None
+                        or not self._timed_probe(live, handle)):
+                    return self._task_state(session, pid, tid, host_detail="host_not_ready")
+                bound = self._task_native(session, live, pair[1], session.get(Conversation, conversation_id), handle)
+                if isinstance(bound, str):
+                    return self._task_state(session, pid, tid, host_detail=bound)
+        with self._sessions() as session:
+            return self._task_state(session, pid, tid)
 
     def _timed_probe(self, live: ArchitectSession, handle: RuntimeHandle) -> bool:
         started = time.monotonic()

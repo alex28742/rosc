@@ -606,7 +606,10 @@ class AuthorizationSlotTests(ArchitectStoreCase):
         activation = {"/api/projects/{project_id}/architect", "/api/projects/{project_id}/architect/activate",
                       "/api/projects/{project_id}/architect/deactivate",
                       # P019: Owner-only effective access summary; it reads no document.
-                      "/api/projects/{project_id}/architect/context-access"}
+                      "/api/projects/{project_id}/architect/context-access",
+                      # P040 r03: per-Task Architect status (read-only) and explicit Task activation; no document access.
+                      "/api/projects/{project_id}/tasks/{task_id}/architect",
+                      "/api/projects/{project_id}/tasks/{task_id}/architect/activate"}
         self.assertFalse([p for p in paths - activation if "architect" in p.lower() or "document" in p.lower()], paths)
 
     def test_requires_a_ready_project_workspace(self) -> None:

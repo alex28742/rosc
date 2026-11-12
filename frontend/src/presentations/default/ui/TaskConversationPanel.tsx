@@ -1,7 +1,7 @@
 import { useEffect, useId, useMemo, useRef, useState, type FormEvent } from 'react';
 import type { MessageRecipient } from '../../../core/models';
 import type { TaskConversationControls } from '../../../app/presentation/contracts';
-import { architectReason, describeArchitect } from './architectView';
+import { architectReason, describeArchitect, describeTaskArchitect } from './architectView';
 import { findMatches, renderBody } from './chatSearch';
 
 /** Delivery wording is about the stored Owner message, never proof that the Architect answered. */
@@ -40,6 +40,8 @@ export function TaskConversationPanel({ taskId, conversation, collapsed, onColla
   const [locked, setLocked] = useState(false);
   const [deliveryFailure, setDeliveryFailure] = useState('');
   const view = describeArchitect(conversation.architect.info, conversation.architect.status === 'ready', false);
+  const tca = conversation.taskArchitect;
+  const taskView = describeTaskArchitect(tca.status, tca.info, tca.busy);
   const live = view.live && conversation.architect.info?.state === 'ready';
   const pending = useRef<{ body: string; recipient: MessageRecipient; key: string } | null>(null);
   const inFlight = useRef(false);
@@ -121,7 +123,7 @@ export function TaskConversationPanel({ taskId, conversation, collapsed, onColla
         <h3>Task Conversation</h3>
         <p>{live ? 'История задачи в ROSC · сообщения для Architect передаются ему, ответ придёт сюда'
           : 'История задачи сохраняется в ROSC · Architect не активен — сообщения только сохраняются'}</p>
-        <p className={`rosc-conversation__architect rosc-conversation__architect--${view.tone}`}>{view.label}</p>
+        <p className={`rosc-conversation__architect rosc-conversation__architect--${taskView.tone}`}>Architect: {taskView.chip.toLowerCase()}</p>
       </div>
       <div className="rosc-conversation__head-actions">
         <button type="button" className={searchOpen ? 'rosc-chat-icon rosc-chat-icon--on' : 'rosc-chat-icon'}

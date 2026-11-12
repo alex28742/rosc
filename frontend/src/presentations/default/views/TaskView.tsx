@@ -1,6 +1,6 @@
 import { useCallback, useRef, useState } from 'react';
 import type { SpecRevision } from '../../../core/models';
-import { describeArchitect } from '../ui/architectView';
+import { describeTaskArchitect } from '../ui/architectView';
 import { PromptDraftDrawer } from '../ui/PromptDraftDrawer';
 import { RichEditor, RichToolbar, RichView, type RichEditorHandle } from '../ui/RichText';
 import type { TaskViewProps } from '../../../app/presentation/contracts';
@@ -23,7 +23,7 @@ function Later({ children, label }: { children: string; label?: string }) {
  * Working Plan | Context & Actions, full-height Task Conversation, full-width head/footer). Core data fills the
  * regions it has; the rest are honest empty states with disabled controls, never simulated state.
  */
-export function TaskView({ projectName, taskId, task, tasksStatus, feedback, inert, scroll, workspace, conversation, authoring, textScale, onClose, onRetry, onOpenProjectSettings }: TaskViewProps) {
+export function TaskView({ projectName, taskId, task, tasksStatus, feedback, inert, scroll, workspace, conversation, authoring, textScale, onClose, onRetry }: TaskViewProps) {
   const scaleRef = useApplyTextScale(textScale.scale);
   const [chatCollapsed, setChatCollapsed] = useState(false);
   const [specCollapsed, setSpecCollapsed] = useState(false);
@@ -73,12 +73,8 @@ export function TaskView({ projectName, taskId, task, tasksStatus, feedback, ine
   const primaryEnabled = next !== null && next.enabled && !authoring.busy;
   const primaryTone = specDirty ? 'positive' : next === null ? 'neutral'
     : next.action === 'update_prompt' ? 'warning' : next.enabled && (next.action === 'create_prompt' || next.action === 'review_prompt') ? 'positive' : 'neutral';
-  const architectStatus = conversation.architect;
-  const architectView = architectStatus.status === 'failed'
-    ? { state: 'статус не проверен', label: 'Architect: статус не проверен', live: false, tone: 'error' as const, hint: '' }
-    : describeArchitect(architectStatus.info, architectStatus.status === 'ready', conversation.architectBusy);
-  const architectLive = architectView.live && architectStatus.info?.state === 'ready';
-  const architectCanActivate = architectStatus.info?.can_activate === true && !conversation.architectBusy;
+  const tca = conversation.taskArchitect;
+  const architectView = describeTaskArchitect(tca.status, tca.info, tca.busy);
   const head = <>
     <div className="rosc-drawer__heading">
       <p className="rosc-drawer-eyebrow">TASK / WORK AREA</p>
@@ -203,26 +199,26 @@ export function TaskView({ projectName, taskId, task, tasksStatus, feedback, ine
                   </div>
                 </div>
                 <div className="rosc-task-agents">
-                  <div aria-label="Project Architect">
-                    <div className="rosc-task-agents__head"><strong>Project Architect</strong>
-                      <span className={`rosc-tag ${architectLive ? 'rosc-tag--success' : architectView.tone === 'error' ? 'rosc-tag--warning' : 'rosc-tag--info'}`} aria-live="polite">{architectView.state}</span></div>
-                    {architectLive && <p className="rosc-task-agents__ok">Architect активен — можно обратиться через @ Architect в Task Conversation. Его Task-диалог создаётся при первом отправленном сообщении.</p>}
-                    {!architectLive && <p>{architectView.hint || 'Один Architect проекта; открытие Task его не запускает.'}</p>}
+                  <div aria-label="Architect этой Task">
+                    <div className="rosc-task-agents__head"><strong>Architect</strong>
+                      <span className={`rosc-tag ${architectView.active ? 'rosc-tag--success' : architectView.tone === 'error' ? 'rosc-tag--warning' : 'rosc-tag--info'}`} aria-live="polite">{architectView.chip}</span></div>
                     <div className="rosc-task-agents__actions">
-                      {architectCanActivate && <button type="button" className="rosc-btn rosc-btn--small rosc-btn--primary"
-                        onClick={async () => setActivateFailure(await conversation.onActivateArchitect() ?? '')}>
-                        {conversation.architect.info?.state === 'error' ? 'Повторить активацию Project Architect' : 'Активировать Project Architect'}</button>}
-                      {conversation.architectBusy && <span className="rosc-hint">Идёт активация…</span>}
-                      {conversation.architect.status === 'failed' && <button type="button" className="rosc-btn rosc-btn--small" onClick={conversation.onRefreshArchitect}>Проверить статус</button>}
-                      {!architectLive && !architectCanActivate && !conversation.architectBusy && conversation.architect.status === 'ready' && onOpenProjectSettings
-                        && <button type="button" className="rosc-btn rosc-btn--small" onClick={onOpenProjectSettings}>Настройки агентов проекта</button>}
+                      {architectView.active
+                        ? <button type="button" className="rosc-btn rosc-btn--small" disabled title={LATER}>Завершить сессию</button>
+                        : tca.status === 'failed'
+                          ? <button type="button" className="rosc-btn rosc-btn--small" onClick={conversation.onRefreshArchitect}>Проверить статус</button>
+                          : <button type="button" className="rosc-btn rosc-btn--small rosc-btn--primary" disabled={!architectView.canActivate || tca.busy}
+                            onClick={async () => setActivateFailure(await conversation.onActivateTaskArchitect() ?? '')}>
+                            {tca.info?.state === 'error' ? 'Повторить активацию' : 'Активировать'}</button>}
                     </div>
-                    {activateFailure && <p className="rosc-task-agents__err" role="alert">{activateFailure}</p>}
+                    {(architectView.reason || activateFailure) && !architectView.active
+                      && <p className="rosc-task-agents__err" role="alert">{activateFailure || architectView.reason}</p>}
                   </div>
                   <div aria-label="Worker этой Task">
-                    <div className="rosc-task-agents__head"><strong>Worker этой Task</strong><span className="rosc-chip">Не запущен</span></div>
-                    <p>{data?.run.worker ?? 'Назначение Worker и Run ещё не подключены.'}</p>
-                    <Later>Выбрать Worker</Later>
+                    <div className="rosc-task-agents__head"><strong>Worker</strong><span className="rosc-tag rosc-tag--info">Не активен</span></div>
+                    <div className="rosc-task-agents__actions">
+                      <button type="button" className="rosc-btn rosc-btn--small" disabled title={LATER}>Активировать</button>
+                    </div>
                   </div>
                 </div>
                 <dl className="rosc-task-facts">

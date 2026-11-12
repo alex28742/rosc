@@ -2,7 +2,7 @@ import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-li
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { App } from './App';
 import type { PromptRevision, TaskAuthoring } from '../core/models';
-import { project, stubApi, task, taskAuthoring } from './testing';
+import { deferred, project, stubApi, task, taskAuthoring } from './testing';
 import { RichView } from '../presentations/default/ui/RichText';
 
 const at = (path: string) => history.replaceState(null, '', path);
@@ -132,7 +132,9 @@ describe('Context & actions and the Prompt Draft drawer (P040)', () => {
     expect(cta.title).toContain('P041');
     expect(ctx.getByTestId('draft-fact').textContent).toContain('утверждён');
     expect(ctx.getByText('Run не авторизован')).toBeTruthy();
-    expect(ctx.getByText('Worker не запускался')).toBeTruthy();
+    const worker = within(ctx.getByLabelText('Worker этой Task'));
+    expect(worker.getByText('Не активен')).toBeTruthy();
+    expect((worker.getByRole('button', { name: 'Активировать' }) as HTMLButtonElement).disabled).toBe(true);
     fireEvent.click(ctx.getByRole('button', { name: 'Prompt / контракт' }));
     const dialog = within(await screen.findByRole('dialog'));
     expect((dialog.getByRole('button', { name: 'Draft v1 утверждён' }) as HTMLButtonElement).disabled).toBe(true);
@@ -171,19 +173,65 @@ describe('P040 r02 UX pass', () => {
     expect(within(panel).queryByText('Architect', { selector: 'dt' })).toBeNull();
   });
 
-  it('offers the existing Project activation from the Task and shows the active state afterwards', async () => {
-    const { architectStatus } = await import('./testing');
-    let live = false;
+  it('shows THIS Task\'s Architect state, not the Project host, and activates only this Task by the button', async () => {
+    const { architectStatus, taskArchitectStatus } = await import('./testing');
+    const live = architectStatus({ state: 'ready', can_activate: false, can_deactivate: true });
+    let state: 'inactive' | 'active' = 'inactive';
     const api = open(taskAuthoring(), {
-      getArchitect: vi.fn(async () => architectStatus(live ? { state: 'ready', can_activate: false, can_deactivate: true } : { state: 'stopped', can_activate: true })),
-      activateArchitect: vi.fn(async () => { live = true; return architectStatus({ state: 'ready', can_activate: false, can_deactivate: true }); }),
+      getArchitect: vi.fn(async () => live),  // Project host is ready the whole time
+      getTaskArchitect: vi.fn(async () => taskArchitectStatus({ state, can_activate: state !== 'active' })),
+      activateTaskArchitect: vi.fn(async () => { state = 'active'; return taskArchitectStatus({ state, can_activate: false }); }),
     });
     render(<App api={api} />);
     const ctx = await context();
-    fireEvent.click(await ctx.findByRole('button', { name: 'Активировать Project Architect' }));
-    await waitFor(() => expect(api.activateArchitect).toHaveBeenCalledWith('P0001'));
-    expect(await ctx.findByText(/Architect активен — можно обратиться через @ Architect/)).toBeTruthy();
-    expect(api.sendTaskConversationMessage).not.toHaveBeenCalled();
+    const card = within(await ctx.findByLabelText('Architect этой Task'));
+    expect(await card.findByText('Не активен')).toBeTruthy();  // host ready is NOT Task Architect active
+    expect(ctx.queryByText(/Project Architect/)).toBeNull();
+    expect(card.queryByText(/сессии|Task-диалог/)).toBeNull();  // no long explanation in the normal state
+    const press = card.getByRole('button', { name: 'Активировать' });
+    fireEvent.click(press); fireEvent.click(press);  // a second quick click does nothing more
+    await waitFor(() => expect(api.activateTaskArchitect).toHaveBeenCalledWith('P0001', 'T0001'));
+    expect(await card.findByText('Активен')).toBeTruthy();
+    expect((card.getByRole('button', { name: 'Завершить сессию' }) as HTMLButtonElement).disabled).toBe(true);
+    expect(api.activateTaskArchitect).toHaveBeenCalledTimes(1);
+    expect(api.activateArchitect).not.toHaveBeenCalled();  // the Project action is not used by the Task button
+    expect(api.sendTaskConversationMessage).not.toHaveBeenCalled();  // no message, no model turn
+    expect(api.sendTaskMessageToArchitect).not.toHaveBeenCalled();
+  });
+
+  it('shows only a short factual reason in the error state and offers an explicit retry', async () => {
+    const { taskArchitectStatus } = await import('./testing');
+    let state: 'error' | 'active' = 'error';
+    const api = open(taskAuthoring(), {
+      getTaskArchitect: vi.fn(async () => taskArchitectStatus(state === 'error' ? { state: 'error', detail: 'host_not_running' } : { state: 'active', can_activate: false })),
+      activateTaskArchitect: vi.fn(async () => { state = 'active'; return taskArchitectStatus({ state: 'active', can_activate: false }); }),
+    });
+    render(<App api={api} />);
+    const card = within(await (await context()).findByLabelText('Architect этой Task'));
+    expect(await card.findByText('Ошибка')).toBeTruthy();
+    expect(card.getByRole('alert').textContent).toBe('Сессия потеряна: host Architect остановлен.');
+    fireEvent.click(card.getByRole('button', { name: 'Повторить активацию' }));
+    expect(await card.findByText('Активен')).toBeTruthy();
+    expect(card.queryByRole('alert')).toBeNull();
+  });
+
+  it('keeps each Task\'s Architect status separate when switching Tasks and drops a late result', async () => {
+    const { taskArchitectStatus } = await import('./testing');
+    const late = deferred<ReturnType<typeof taskArchitectStatus>>();
+    const api = open(taskAuthoring(), {
+      listTasks: vi.fn(async () => [T1, task('T0002', 'P0001')]),
+      getTaskArchitect: vi.fn((_p: string, taskId: string) => taskId === 'T0001' ? late.promise
+        : Promise.resolve(taskArchitectStatus({ task_id: taskId, state: 'inactive' }))),
+    });
+    render(<App api={api} />);
+    await context();
+    history.pushState(null, '', '/projects/P0001/tasks/T0002'); window.dispatchEvent(new PopStateEvent('popstate'));
+    await screen.findByText(/^T0002 ·/);
+    const card = within(await (await context()).findByLabelText('Architect этой Task'));
+    expect(await card.findByText('Не активен')).toBeTruthy();
+    late.resolve(taskArchitectStatus({ task_id: 'T0001', state: 'active', can_activate: false }));
+    await new Promise(resolve => setTimeout(resolve, 30));
+    expect(card.queryByText('Активен')).toBeNull();  // T0001's late answer never repaints T0002
   });
 
   it('keeps Prompt history selectable and shows a past revision read-only', async () => {

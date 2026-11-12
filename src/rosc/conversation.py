@@ -216,6 +216,36 @@ def _empty_page(project_id: int, limit: int, task_id: int | None = None) -> dict
     }
 
 
+def ensure_task_conversation(sessions: sessionmaker[Session], actor: ActorContext, project_id: int, task_id: int) -> str:
+    """P040 r03: the durable Task Conversation (and its Owner participant) for an explicit Task Architect activation.
+
+    Creates NO message.  Idempotent: the unique Task index plus the single-writer transaction mean two concurrent callers
+    (or a concurrent first Owner message) end up with one conversation.  Returns its id."""
+    with sessions() as session:
+        try:
+            session.connection().exec_driver_sql("BEGIN IMMEDIATE")
+            existing = session.scalars(select(Conversation).where(
+                Conversation.task_id == task_id, Conversation.kind == CONVERSATION_KIND_TASK)).first()
+            if existing is not None:
+                session.rollback()
+                return existing.conversation_id
+            conversation = Conversation(conversation_id=str(uuid.uuid4()), project_id=project_id, task_id=task_id,
+                                        kind=CONVERSATION_KIND_TASK, created_at=_now())
+            session.add(conversation)
+            session.flush()
+            session.add(ConversationParticipant(
+                participant_id=str(uuid.uuid4()), conversation_id=conversation.conversation_id, kind=PARTICIPANT_OWNER,
+                actor_id=actor.actor_id, actor_assurance=actor.assurance, agent_id=None, created_at=conversation.created_at))
+            session.commit()
+            return conversation.conversation_id
+        except OperationalError:
+            session.rollback()
+            raise ConversationStoreError("Another conversation change is in progress; retry shortly") from None
+        except IntegrityError:
+            session.rollback()
+            raise ConversationStoreError("The Task conversation could not be created") from None
+
+
 class ProjectConversationService:
     """Canonical business boundary for the durable Project Conversation.
 

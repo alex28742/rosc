@@ -244,7 +244,7 @@ class TaskConversationMessageInput(ConversationMessageInput):
     recipient: Literal["architect"] | None = None
 
 
-CONVERSATION_PATH = re.compile(r"^/api/projects/[^/]+/(tasks/[^/]+/conversation(/messages(/[^/]+/send)?)?|conversation(/messages(/[^/]+/(reconcile|retry))?)?|architect/(activate|deactivate)|architect(/context-access)?)$")
+CONVERSATION_PATH = re.compile(r"^/api/projects/[^/]+/(tasks/[^/]+/conversation(/messages(/[^/]+/send)?)?|conversation(/messages(/[^/]+/(reconcile|retry))?)?|architect/(activate|deactivate)|architect(/context-access)?|tasks/[^/]+/architect(/activate)?)$")
 DEFAULT_GLOBAL_LIBRARY = global_library_dir()  # <checkout>/global (Git-tracked); None for a non-editable install
 
 
@@ -766,6 +766,16 @@ def create_app(db_path: Path | None = None, workspace_root: Path | None = None, 
         Architect's native session for this Task; saving a message (above) still delivers nothing."""
         pid, tid = numeric_id(project_id, "P"), numeric_id(task_id, "T")
         return {"delivery": conversation_call(architect.send_task_message, current_actor(), pid, tid, message_id)}
+
+    @app.get("/api/projects/{project_id}/tasks/{task_id}/architect")
+    def task_architect_status(project_id: str, task_id: str) -> dict:
+        """P040 r03: verified status of THIS Task's native Architect session.  Read-only; starts nothing."""
+        return conversation_call(architect.task_status, current_actor(), numeric_id(project_id, "P"), numeric_id(task_id, "T"))
+
+    @app.post("/api/projects/{project_id}/tasks/{task_id}/architect/activate")
+    def task_architect_activate(project_id: str, task_id: str) -> dict:
+        """P040 r03: explicit Owner activation of this Task's native session (no prompt, no message, no Worker)."""
+        return conversation_call(architect.activate_task, current_actor(), numeric_id(project_id, "P"), numeric_id(task_id, "T"))
 
     @app.post("/api/projects/{project_id}/architect/activate")
     def architect_activate(project_id: str) -> dict:

@@ -1,5 +1,5 @@
 import type { LoadStatus } from '../../../app/presentation/contracts';
-import type { ArchitectStatus } from '../../../core/models';
+import type { ArchitectStatus, TaskArchitectStatus } from '../../../core/models';
 
 /** Human wording for a non-secret Core reason code; unknown codes are shown as-is rather than guessed at. */
 export const ARCHITECT_REASONS: Record<string, string> = {
@@ -72,4 +72,31 @@ export function architectHeadline(status: LoadStatus, info: ArchitectStatus | nu
     case 'not_configured': return 'не настроен';
     default: return 'не активирован';
   }
+}
+
+/** Short, factual reasons for the Task Architect error state (Core codes only; never shown in the normal state). */
+const TASK_ARCHITECT_REASONS: Record<string, string> = {
+  host_not_running: 'Сессия потеряна: host Architect остановлен.',
+  host_not_alive: 'Host Architect не отвечает.',
+  host_not_ready: 'Host Architect не готов.',
+  host_identity_missing: 'Host Architect не удалось проверить.',
+  native_session_lost: 'Сессия этой Task потеряна.',
+  session_not_ready: 'Не удалось создать сессию Task.',
+  native_sessions_unsupported: 'Runtime не поддерживает сессии Task.',
+  starting: 'Host Architect не запустился.',
+  stopped: 'Host Architect не запустился.',
+  not_configured: 'Architect не настроен.',
+};
+export const taskArchitectReason = (code: string | null) => (code ? TASK_ARCHITECT_REASONS[code] ?? architectReason(code) : '');
+
+export type TaskArchitectView = { chip: string; tone: 'on' | 'off' | 'error'; reason: string; canActivate: boolean; active: boolean };
+
+/** The Task's own Architect card: `Не активен` / `Активен` / `Ошибка`. Active only when Core verified THIS Task's session. */
+export function describeTaskArchitect(status: LoadStatus, info: TaskArchitectStatus | null, busy: boolean): TaskArchitectView {
+  if (busy) return { chip: 'Активация…', tone: 'off', reason: '', canActivate: false, active: false };
+  if (status === 'failed') return { chip: 'Ошибка', tone: 'error', reason: 'Статус не получен.', canActivate: false, active: false };
+  if (status !== 'ready' || info === null) return { chip: 'Проверка…', tone: 'off', reason: '', canActivate: false, active: false };
+  if (info.state === 'active') return { chip: 'Активен', tone: 'on', reason: '', canActivate: false, active: true };
+  if (info.state === 'error') return { chip: 'Ошибка', tone: 'error', reason: taskArchitectReason(info.detail) || 'Сессия недоступна.', canActivate: info.can_activate, active: false };
+  return { chip: 'Не активен', tone: 'off', reason: '', canActivate: info.can_activate, active: false };
 }

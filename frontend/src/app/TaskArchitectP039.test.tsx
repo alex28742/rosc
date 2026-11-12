@@ -33,7 +33,7 @@ describe('Task Conversation with a live Project Architect (P039)', () => {
       sendTaskConversationMessage: vi.fn(async () => ({ message: owner, replayed: false })), sendTaskMessageToArchitect: send });
     render(<App api={api} />);
     const view = within(await screen.findByLabelText('Task Conversation'));
-    await view.findByText('Architect: активен (проверен)');
+    await view.findByText('Architect: не активен');
     fireEvent.change(view.getByLabelText('Адресат сообщения'), { target: { value: 'architect' } });
     fireEvent.change(view.getByLabelText('Сообщение в Task Conversation'), { target: { value: 'Что делаем в T1?' } });
     fireEvent.click(view.getByRole('button', { name: 'Отправить' }));
@@ -55,7 +55,7 @@ describe('Task Conversation with a live Project Architect (P039)', () => {
     render(<App api={api} />);
     const view = within(await screen.findByLabelText('Task Conversation'));
     await view.findByText('Сохранено · не отправлено Architect');
-    expect(view.getByText('Architect: не активирован')).toBeTruthy();
+    expect(view.getByText('Architect: не активен')).toBeTruthy();
     const button = view.getByRole('button', { name: 'Отправить Architect' }) as HTMLButtonElement;
     expect(button.disabled).toBe(true);
     expect(send).not.toHaveBeenCalled(); // opening the Task or an old saved message never sends anything
@@ -73,7 +73,7 @@ describe('Task Conversation with a live Project Architect (P039)', () => {
       getTaskConversation: vi.fn(async () => conversationPage({ task_id: 'T0001', messages: [saved] })) });
     render(<App api={api} />);
     const view = within(await screen.findByLabelText('Task Conversation'));
-    await view.findByText('Architect: активен (проверен)');
+    await view.findByText('Architect: не активен');
     fireEvent.click(view.getByRole('button', { name: 'Отправить Architect' }));
     expect((await view.findByRole('alert')).textContent).toContain('Activate the Architect');
     expect(view.getByText('Сохранено · не отправлено Architect')).toBeTruthy();

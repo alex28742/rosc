@@ -102,6 +102,15 @@ export type ArchitectStatus = {
   /** P029: one-time model onboarding of a NEW native session. `legacy_unverified` = created before P029. */
   onboarding: { state: OnboardingState | null; detail: string | null };
 };
+/** P040 r03: verified state of ONE Task's native Architect session. `active` only after Core's runtime probe; the Project host being ready is a different fact. */
+export type TaskArchitectState = 'inactive' | 'active' | 'error';
+export type TaskArchitectStatus = {
+  project_id: string;
+  task_id: string;
+  state: TaskArchitectState;
+  detail: string | null;
+  can_activate: boolean;
+};
 export type OnboardingState = 'legacy_unverified' | 'initializing' | 'ready' | 'blocked' | 'unknown';
 
 /** Effective Architect access to context (P019). The matrix is Core's statement of what the ROSC Tools allow. */

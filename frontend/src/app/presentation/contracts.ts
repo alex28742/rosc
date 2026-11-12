@@ -1,7 +1,7 @@
 // The only surface a presentation package sees. Presentations render these typed view models and call these
 // callbacks; they never reach the API client, the router or Core persistence.
 import type { ComponentType, ReactNode } from 'react';
-import type { AgentDefinition, AgentFormValues, ArchitectStatus, ContextAccess, ConversationMessage, MessageRecipient, Project, PromptRevision, ProjectFormValues, RepairConfirmation, RoleAssignment, SpecRevision, SpecRevisionSummary, Task, TaskAuthoring, TaskFormValues } from '../../core/models';
+import type { AgentDefinition, AgentFormValues, ArchitectStatus, ContextAccess, ConversationMessage, MessageRecipient, Project, PromptRevision, ProjectFormValues, RepairConfirmation, RoleAssignment, SpecRevision, SpecRevisionSummary, Task, TaskArchitectStatus, TaskAuthoring, TaskFormValues } from '../../core/models';
 import type { ScrollRegions } from '../scroll';
 
 export type LoadStatus = 'loading' | 'ready' | 'failed';
@@ -257,10 +257,11 @@ export type TaskConversationControls = {
   state: ConversationState;
   /** P039: read-only Architect availability for this Project (never starts anything). */
   architect: { status: LoadStatus; info: ArchitectStatus | null };
-  /** Explicit activation of the one Project Architect (the existing Project action; never creates a Task conversation). */
-  onActivateArchitect: () => Promise<string | null>;
-  architectBusy: boolean;
-  /** Re-reads the Architect status from Core. */
+  /** P040 r03: verified state of THIS Task's own native Architect session (read-only GET; never the Project host state). */
+  taskArchitect: { status: LoadStatus; info: TaskArchitectStatus | null; busy: boolean };
+  /** Explicit activation of this Task's native session; resolves to a failure message or null. Sends no message. */
+  onActivateTaskArchitect: () => Promise<string | null>;
+  /** Re-reads this Task's Architect status (and the Project host's, internally) from Core. */
   onRefreshArchitect: () => void;
   onReload: () => void;
   onLoadOlder: () => void;
@@ -310,8 +311,6 @@ export type TaskViewProps = {
   textScale: TextScaleControls;
   onClose: () => void;
   onRetry: () => void;
-  /** Opens the Project settings (agent assignments); offered when the Architect cannot be activated from the Task. */
-  onOpenProjectSettings?: () => void;
 };
 
 export type NewTaskViewProps = {

@@ -2,7 +2,7 @@
 import { vi } from 'vitest';
 import type { TaskAuthoringControls } from './presentation/contracts';
 import type { CoreApi } from '../core/api';
-import type { TaskAuthoring, AgentDefinition, ArchitectStatus, ContextAccess, ConversationMessage, ConversationPage, ConversationParticipant, ConversationMessageInput, Project, RoleAssignment, Task } from '../core/models';
+import type { TaskAuthoring, AgentDefinition, ArchitectStatus, ContextAccess, ConversationMessage, ConversationPage, ConversationParticipant, TaskArchitectStatus, ConversationMessageInput, Project, RoleAssignment, Task } from '../core/models';
 
 export const project = (id: string, over: Partial<Project> = {}): Project => ({
   id, name: `Project ${id}`, description: `About ${id}`, root_path: `/tmp/${id}`, mode: 'existing', docs_entrypoint: null,
@@ -38,6 +38,10 @@ export const architectStatus = (over: Partial<ArchitectStatus> = {}): ArchitectS
   project_id: 'P0001', state: 'stopped', detail: null, can_activate: true, can_deactivate: false,
   agent: { agent_id: 'agent-1', display_name: 'Architect One', provider_id: 'prov', model_id: 'model-a' },
   session: null, tools: { state: 'not_running', detail: null }, onboarding: { state: null, detail: null }, ...over,
+});
+
+export const taskArchitectStatus = (over: Partial<TaskArchitectStatus> = {}): TaskArchitectStatus => ({
+  project_id: 'P0001', task_id: 'T0001', state: 'inactive', detail: null, can_activate: true, ...over,
 });
 
 export const contextAccess = (over: Partial<ContextAccess> = {}): ContextAccess => ({
@@ -112,6 +116,8 @@ export function stubApi(over: Partial<{ [K in keyof CoreApi]: ReturnType<typeof 
     createAssignment: vi.fn(async () => roleAssignment('assignment-1')),
     revokeAssignment: vi.fn(async () => roleAssignment('assignment-1', { state: 'revoked', version: 2 })),
     getArchitect: vi.fn(async () => architectStatus()),
+    getTaskArchitect: vi.fn(async (_projectId: string, taskId: string) => taskArchitectStatus({ task_id: taskId })),
+    activateTaskArchitect: vi.fn(async (_projectId: string, taskId: string) => taskArchitectStatus({ task_id: taskId, state: 'active', can_activate: false })),
     sendTaskMessageToArchitect: vi.fn(async () => ({ delivery: { state: 'pending', error_code: null, reply_message_id: null, can_retry: false, can_reconcile: true } })),
     activateArchitect: vi.fn(async () => architectStatus({ state: 'ready', can_activate: false, can_deactivate: true })),
     deactivateArchitect: vi.fn(async () => architectStatus()),

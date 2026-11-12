@@ -1,4 +1,4 @@
-import type { ArchitectStatus, ContextAccess, ConversationMessageInput, ConversationMessageResult, ConversationPage, DeliveryResult } from '../models';
+import type { ArchitectStatus, TaskArchitectStatus, ContextAccess, ConversationMessageInput, ConversationMessageResult, ConversationPage, DeliveryResult } from '../models';
 import { post, request } from './http';
 
 /** One bounded page of the durable Project Conversation; `before` asks for messages older than that ordinal. */
@@ -37,3 +37,10 @@ export const retryDelivery = (projectId: string, messageId: string) =>
 
 /** Read-only effective access summary (access matrix, tool transport state, selected provider/model). */
 export const getContextAccess = (projectId: string) => request<ContextAccess>(`/projects/${projectId}/architect/context-access`);
+
+/** P040 r03: verified status of ONE Task's native Architect session. Read-only: starts and creates nothing. */
+export const getTaskArchitect = (projectId: string, taskId: string) =>
+  request<TaskArchitectStatus>(`/projects/${projectId}/tasks/${taskId}/architect`);
+/** P040 r03: explicit Owner activation of this Task's native session (starts the Project host only if it is not ready). Sends no message. */
+export const activateTaskArchitect = (projectId: string, taskId: string) =>
+  post<TaskArchitectStatus>(`/projects/${projectId}/tasks/${taskId}/architect/activate`);
