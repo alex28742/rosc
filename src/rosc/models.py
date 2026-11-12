@@ -776,3 +776,9 @@ class WorkerSession(Base):
     # Last observation, for diagnostics only; never trusted as current state.
     last_observed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     last_state: Mapped[str | None] = mapped_column(String(16), nullable=True)
+    # P042A r02 bootstrap evidence for the CURRENT incarnation only (reset on every new incarnation). The token proves
+    # correlation, the digest ties the claim to the Root Binding + entry-point file contents it was requested for.
+    bootstrap_token: Mapped[str | None] = mapped_column(String(36), nullable=True)
+    bootstrap_digest: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    bootstrap_sources: Mapped[str | None] = mapped_column(Text, nullable=True)  # JSON list of project-relative paths
+    bootstrap_sent_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)

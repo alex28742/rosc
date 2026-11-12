@@ -1,4 +1,4 @@
-import type { ProjectWorker, WorkerSession } from '../../../core/models';
+import type { ProjectWorker, WorkerBootstrap, WorkerSession } from '../../../core/models';
 
 /** Human wording for a non-secret Core reason code; unknown codes are shown as-is rather than guessed at. */
 export const WORKER_REASONS: Record<string, string> = {
@@ -21,29 +21,45 @@ export const WORKER_REASONS: Record<string, string> = {
 };
 
 export type WorkerTone = 'ok' | 'warn' | 'neutral' | 'error';
-export type WorkerView = { chip: string; tone: WorkerTone; note: string; button: 'activate' | 'retry' | 'check' | 'none'; activating: boolean };
+export type WorkerView = { chip: string; tone: WorkerTone; note: string; button: 'activate' | 'check' | 'none'; activating: boolean };
 
 export const workerReason = (code: string) => WORKER_REASONS[code] ?? `Код: ${code}`;
 
 /** Never shows «активна» unless Core verified a live process incarnation AND its CLI-side acknowledgement. */
-export function describeWorker(worker: ProjectWorker | null, busy: boolean): WorkerView {
-  if (!worker) return { chip: 'Не выбран', tone: 'neutral', note: 'Выберите исполнителя выше', button: 'none', activating: false };
+export function describeWorker(worker: ProjectWorker, busy: 'check' | 'activate' | 'bootstrap' | undefined): WorkerView {
   const s: WorkerSession = worker.session;
   const note = workerReason(s.reason);
   switch (s.state) {
     case 'active': return { chip: 'CLI-сессия активна', tone: 'ok', note, button: 'check', activating: false };
     case 'connecting': return { chip: 'Подключение…', tone: 'neutral', note, button: 'none', activating: true };
-    case 'not_connected': return { chip: s.reason === 'vanished' ? 'Не на связи' : 'Нет сессии', tone: 'neutral', note, button: 'activate', activating: busy };
+    case 'not_connected': return { chip: s.reason === 'vanished' ? 'Не на связи' : 'Нет сессии', tone: 'neutral', note, button: 'activate', activating: busy === 'activate' };
     case 'unknown': return { chip: 'Неизвестно', tone: 'warn', note, button: s.can_check ? 'check' : 'none', activating: false };
     case 'unavailable': return { chip: 'Недоступен', tone: 'error', note, button: 'none', activating: false };
     default: return { chip: 'Не назначен', tone: 'neutral', note, button: 'none', activating: false };
   }
 }
 
-export function workerOptionLabel(worker: ProjectWorker): string {
-  const s = worker.session;
-  const tail = s.state === 'active' ? 'CLI-сессия активна' : s.state === 'connecting' ? 'подключение…'
-    : s.state === 'not_connected' ? (s.reason === 'vanished' ? 'нет связи' : 'нет сессии')
-    : s.state === 'unknown' ? 'неизвестно' : s.state === 'unavailable' ? 'недоступен' : 'не назначен';
-  return `${worker.agent.display_name} · ${tail}`;
+export type BootstrapView = { line: string; tone: 'ok' | 'warn' | 'neutral'; button: string | null };
+
+/** Separate, honest wording for the project-context step. «Подготовлен» is never «готов к диалогу» or «готов к Run». */
+export function describeBootstrap(session: WorkerSession): BootstrapView {
+  const b: WorkerBootstrap = session.bootstrap;
+  const files = b.sources.join(', ');
+  if (session.state !== 'active') return { line: 'Контекст проекта готовится после подтверждения CLI-сессии.', tone: 'neutral', button: null };
+  switch (b.state) {
+    case 'confirmed': return { line: `✓ Контекст проекта подготовлен: Worker прочитал ${files} (подтверждено hook-ом CLI).`, tone: 'ok', button: null };
+    case 'pending': return { line: 'Ожидаем подтверждение Worker: он читает entry point проекта…', tone: 'neutral', button: null };
+    case 'failed': return { line: b.reason === 'reads_missing'
+      ? 'Контекст не подготовлен: hook CLI не зафиксировал чтение всех файлов.'
+      : 'Контекст не подготовлен: Worker сообщил, что не смог прочитать файлы.', tone: 'warn', button: 'Повторить подготовку' };
+    case 'unknown': return { line: 'Подтверждение не получено. Повторно не отправляем: проверьте терминал Worker.', tone: 'warn', button: null };
+    case 'stale': return { line: 'Файлы проекта изменились после подготовки: контекст нужно подготовить заново.', tone: 'warn', button: 'Подготовить контекст' };
+    default:
+      if (b.reason === 'no_sources') return { line: 'В проекте не найден entry point (AGENTS.md, CLAUDE.md или docs entrypoint): читать нечего.', tone: 'neutral', button: null };
+      return { line: 'Контекст проекта не подготовлен. Отдельный набор правил Worker в ROSC не определён.', tone: 'neutral', button: b.can_bootstrap ? 'Подготовить контекст' : null };
+  }
 }
+
+/** The terminal help is only worth showing where Owner may need the CLI (trust prompt, unclear state) and a session exists. */
+export const showsTerminalHelp = (session: WorkerSession) =>
+  session.terminal !== null || session.state === 'unknown';

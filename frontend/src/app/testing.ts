@@ -95,7 +95,8 @@ export const authoringControls = (over: Partial<TaskAuthoringControls> = {}): Ta
 
 export const workerSession = (over: Partial<WorkerSession> = {}): WorkerSession => ({
   project_id: 'P0001', agent_id: 'w-1', state: 'not_connected', reason: 'never_activated', can_activate: true, can_check: true,
-  reused: false, initialised_at: null, checked_at: '2026-11-12T00:00:00Z',
+  reused: false, initialised_at: null, checked_at: '2026-11-12T00:00:00Z', terminal: null,
+  bootstrap: { state: 'none', reason: 'cli_not_active', can_bootstrap: false, sources: [], confirmed_at: null },
   evidence: { tmux_alive: null, cli_observable: null, cli_session_initialised: false }, ...over,
 });
 export const projectWorker = (id = 'w-1', session: Partial<WorkerSession> = {}, name = 'Claude Code'): ProjectWorker => ({
@@ -103,7 +104,8 @@ export const projectWorker = (id = 'w-1', session: Partial<WorkerSession> = {}, 
   session: workerSession({ agent_id: id, ...session }),
 });
 export const workerControls = (over: Partial<TaskWorkerControls> = {}): TaskWorkerControls => ({
-  status: 'ready', workers: [], selectedId: '', busy: false, onSelect: vi.fn(), onCheck: vi.fn(async () => null), onActivate: vi.fn(async () => null), ...over,
+  status: 'ready', workers: [], busy: {}, errors: {}, onCheck: vi.fn(async () => undefined), onActivate: vi.fn(async () => undefined),
+  onBootstrap: vi.fn(async () => undefined), ...over,
 });
 
 export function stubApi(over: Partial<{ [K in keyof CoreApi]: ReturnType<typeof vi.fn> }> = {}) {
@@ -130,6 +132,7 @@ export function stubApi(over: Partial<{ [K in keyof CoreApi]: ReturnType<typeof 
     revokeAssignment: vi.fn(async () => roleAssignment('assignment-1', { state: 'revoked', version: 2 })),
     listProjectWorkers: vi.fn(async () => [] as ProjectWorker[]),
     getWorkerSession: vi.fn(async (_projectId: string, agentId: string) => workerSession({ agent_id: agentId })),
+    bootstrapWorkerSession: vi.fn(async (_projectId: string, agentId: string) => workerSession({ agent_id: agentId, state: 'active', reason: 'initialised' })),
     activateWorkerSession: vi.fn(async (_projectId: string, agentId: string) => workerSession({ agent_id: agentId, state: 'connecting', reason: 'awaiting_ack', can_activate: false })),
     getArchitect: vi.fn(async () => architectStatus()),
     getTaskArchitect: vi.fn(async (_projectId: string, taskId: string) => taskArchitectStatus({ task_id: taskId })),

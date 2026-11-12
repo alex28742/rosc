@@ -272,6 +272,16 @@ export type PromptSaveInput = { expected_revision: number | null; source_spec_re
 
 /** P042A: observed state of one Project+Worker external CLI session. `active` means the CLI initialised a session (verified live); it is NOT "task accepted". */
 export type WorkerSessionState = 'not_assigned' | 'not_connected' | 'connecting' | 'active' | 'unavailable' | 'unknown';
+/** Project-context bootstrap: evidence recorded by the CLI's own hooks. `confirmed` is NOT "chat-ready" or "run-ready". */
+export type WorkerBootstrapState = 'none' | 'pending' | 'confirmed' | 'failed' | 'unknown' | 'stale';
+export type WorkerBootstrap = {
+  state: WorkerBootstrapState;
+  reason: string;
+  can_bootstrap: boolean;
+  /** Project-relative entry-point files that were (or would be) read. */
+  sources: string[];
+  confirmed_at: string | null;
+};
 export type WorkerSession = {
   project_id: string;
   agent_id: string;
@@ -283,6 +293,9 @@ export type WorkerSession = {
   reused: boolean;
   initialised_at: string | null;
   checked_at: string;
+  bootstrap: WorkerBootstrap;
+  /** Server-verified attach command for this ROSC-owned session (never built in the browser); null when unverifiable. */
+  terminal: { attach_command: string } | null;
   evidence: { tmux_alive: boolean | null; cli_observable: boolean | null; cli_session_initialised: boolean };
 };
 export type ProjectWorker = {

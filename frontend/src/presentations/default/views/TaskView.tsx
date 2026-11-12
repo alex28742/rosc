@@ -1,7 +1,7 @@
 import { useCallback, useRef, useState } from 'react';
 import type { SpecRevision } from '../../../core/models';
 import { describeTaskArchitect } from '../ui/architectView';
-import { describeWorker, workerOptionLabel } from '../ui/workerView';
+import { WorkerRows } from '../ui/WorkerRows';
 import { PromptDraftDrawer } from '../ui/PromptDraftDrawer';
 import { RichEditor, RichToolbar, RichView, type RichEditorHandle } from '../ui/RichText';
 import type { TaskViewProps } from '../../../app/presentation/contracts';
@@ -37,7 +37,6 @@ export function TaskView({ projectName, taskId, task, tasksStatus, feedback, ine
   const [title, setTitle] = useState('');
   const [scope, setScope] = useState('');
   const [activateFailure, setActivateFailure] = useState('');
-  const [workerFailure, setWorkerFailure] = useState('');
   const descriptionEditor = useRef<RichEditorHandle | null>(null);
   const criteriaEditor = useRef<RichEditorHandle | null>(null);
   const markDirty = useCallback(() => { setRichDirty(true); setSpecNote(''); }, []);
@@ -77,8 +76,6 @@ export function TaskView({ projectName, taskId, task, tasksStatus, feedback, ine
     : next.action === 'update_prompt' ? 'warning' : next.enabled && (next.action === 'create_prompt' || next.action === 'review_prompt') ? 'positive' : 'neutral';
   const tca = conversation.taskArchitect;
   const architectView = describeTaskArchitect(tca.status, tca.info, tca.busy);
-  const selectedWorker = workers.workers.find(item => item.agent.agent_id === workers.selectedId) ?? null;
-  const workerView = describeWorker(selectedWorker, workers.busy);
   const head = <>
     <div className="rosc-drawer__heading">
       <p className="rosc-drawer-eyebrow">TASK / WORK AREA</p>
@@ -201,17 +198,6 @@ export function TaskView({ projectName, taskId, task, tasksStatus, feedback, ine
                       : <button type="button" className="rosc-btn rosc-btn--primary" disabled={!primaryEnabled}
                         title={next && !next.enabled ? next.hint : undefined} onClick={() => setDraftOpen(true)}>{next?.label ?? 'Загрузка…'}</button>}
                   </div>
-                  {prompt?.state === 'approved' && <div className="rosc-task-picker">
-                    <label>Worker для {task.id}
-                      <select value={workers.selectedId} aria-label={`Worker для ${task.id}`}
-                        onChange={event => { setWorkerFailure(''); workers.onSelect(event.target.value); }}>
-                        <option value="">Выберите Worker…</option>
-                        {workers.workers.map(item => <option key={item.agent.agent_id} value={item.agent.agent_id}>{workerOptionLabel(item)}</option>)}
-                      </select>
-                    </label>
-                    {workers.status === 'failed' && <p className="rosc-task-agents__err" role="alert">Не удалось загрузить список Workers.</p>}
-                    {workers.status === 'ready' && workers.workers.length === 0 && <p className="rosc-hint">В проекте нет назначенных Workers. Назначьте Worker в настройках проекта.</p>}
-                  </div>}
                 </div>
                 <div className="rosc-task-agents">
                   <div aria-label="Architect этой Task">
@@ -229,25 +215,8 @@ export function TaskView({ projectName, taskId, task, tasksStatus, feedback, ine
                     {(architectView.reason || activateFailure) && !architectView.active
                       && <p className="rosc-task-agents__err" role="alert">{activateFailure || architectView.reason}</p>}
                   </div>
-                  <div aria-label="Worker этой Task">
-                    <div className="rosc-task-agents__head"><strong>Worker этой Task</strong>
-                      <span className={`rosc-tag ${workerView.tone === 'ok' ? 'rosc-tag--success' : workerView.tone === 'neutral' ? 'rosc-tag--info' : 'rosc-tag--warning'}`} aria-live="polite">{workerView.chip}</span></div>
-                    {selectedWorker && <p className="rosc-task-agents__sub" title={`${selectedWorker.agent.display_name} · ${selectedWorker.agent.runtime_adapter}`}>
-                      {selectedWorker.agent.display_name} · {selectedWorker.agent.runtime_adapter}</p>}
-                    <div className="rosc-task-agents__actions">
-                      {workerView.activating
-                        ? <button type="button" className="rosc-btn rosc-btn--small" disabled>{workers.busy ? 'Активация…' : 'Подключение…'}</button>
-                        : workerView.button === 'activate'
-                          ? <button type="button" className="rosc-btn rosc-btn--small rosc-btn--primary"
-                            onClick={async () => setWorkerFailure(await workers.onActivate() ?? '')}>Активировать сессию</button>
-                          : workerView.button === 'check'
-                            ? <button type="button" className="rosc-btn rosc-btn--small"
-                              onClick={async () => setWorkerFailure(await workers.onCheck() ?? '')}>Проверить сессию</button>
-                            : <button type="button" className="rosc-btn rosc-btn--small" disabled title={selectedWorker ? undefined : 'Сначала выберите Worker'}>Активировать сессию</button>}
-                    </div>
-                    <p className={workerView.tone === 'error' || workerFailure ? 'rosc-task-agents__err' : undefined} role={workerFailure ? 'alert' : undefined}>{workerFailure || workerView.note}</p>
-                  </div>
                 </div>
+                <WorkerRows controls={workers} />
                 <dl className="rosc-task-facts">
                   <div><dt>Проект</dt><dd>{projectName}</dd></div>
                   <div><dt>Task</dt><dd>{task.status}</dd></div>

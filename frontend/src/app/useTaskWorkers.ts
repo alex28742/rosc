@@ -1,18 +1,22 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { describeError, type CoreApi } from '../core/api';
 import type { ProjectWorker, WorkerSession } from '../core/models';
-import type { LoadStatus, TaskWorkerControls } from './presentation/contracts';
+import type { LoadStatus, TaskWorkerControls, WorkerBusy } from './presentation/contracts';
 
-/** A session that is still starting is re-read this often; every other state is read only on open/focus/explicit check. */
-const CONNECTING_POLL_MS = 3000;
+/** A session that is still starting, or a bootstrap awaiting its acknowledgement, is re-read this often; nothing else polls. */
+const POLL_MS = 3000;
 
-type Cache = { scope: string | null; status: LoadStatus; workers: ProjectWorker[]; selectedId: string; busy: boolean };
-const empty = (scope: string | null): Cache => ({ scope, status: 'loading', workers: [], selectedId: '', busy: false });
+type Cache = { scope: string | null; status: LoadStatus; workers: ProjectWorker[]; busy: Record<string, WorkerBusy>; errors: Record<string, string> };
+const empty = (scope: string | null): Cache => ({ scope, status: 'loading', workers: [], busy: {}, errors: {} });
+
+const inFlight = (item: ProjectWorker) =>
+  item.session.state === 'connecting' || (item.session.state === 'active' && item.session.bootstrap.state === 'pending');
 
 /**
- * P042A: Project Workers and the selected Worker's external CLI-session state for one open Task.
- * Opening, selecting, focusing and checking only READ. The single request that may start a CLI is `onActivate`,
- * reachable only from the explicit «Активировать сессию» button.
+ * P042A r02: all active Project Workers, each independently observable and activatable.
+ * Opening, focusing, polling and «Проверить» only READ. Two requests can start something and each is reachable only from
+ * its own explicit button: `onActivate` (may create a CLI) and `onBootstrap` (asks an active CLI to read entry points).
+ * Busy state, errors and in-flight guards are keyed by agent_id, so one Worker never blocks or relabels another.
  */
 export function useTaskWorkers(api: CoreApi, projectId: string | null, taskId: string | null): TaskWorkerControls {
   const scope = projectId && taskId ? `${projectId}/${taskId}` : null;
@@ -20,7 +24,7 @@ export function useTaskWorkers(api: CoreApi, projectId: string | null, taskId: s
   const scopeRef = useRef(scope);
   scopeRef.current = scope;
   const seq = useRef(0);
-  const activating = useRef(false);
+  const running = useRef<Set<string>>(new Set());
   if (cache.scope !== scope) setCache(empty(scope));
   const visible = cache.scope === scope ? cache : empty(scope);
 
@@ -45,48 +49,56 @@ export function useTaskWorkers(api: CoreApi, projectId: string | null, taskId: s
     return () => { window.removeEventListener('focus', again); document.removeEventListener('visibilitychange', again); };
   }, [scope, projectId, load]);
 
-  const selected = visible.workers.find(item => item.agent.agent_id === visible.selectedId) ?? null;
-  const connecting = selected?.session.state === 'connecting';
+  const polling = visible.workers.some(inFlight);
   useEffect(() => {
-    if (!scope || !projectId || !connecting) return;
-    const timer = setInterval(() => void load(scope, projectId), CONNECTING_POLL_MS);
+    if (!scope || !projectId || !polling) return;
+    const timer = setInterval(() => void load(scope, projectId), POLL_MS);
     return () => clearInterval(timer);
-  }, [scope, projectId, connecting, load]);
+  }, [scope, projectId, polling, load]);
 
-  const merge = (forScope: string, session: WorkerSession) =>
+  const setBusy = (forScope: string, agentId: string, value: WorkerBusy | null) =>
+    setCache(prev => {
+      if (prev.scope !== forScope) return prev;
+      const busy = { ...prev.busy };
+      if (value) busy[agentId] = value; else delete busy[agentId];
+      return { ...prev, busy };
+    });
+  const setError = (forScope: string, agentId: string, text: string | null) =>
+    setCache(prev => {
+      if (prev.scope !== forScope) return prev;
+      const errors = { ...prev.errors };
+      if (text) errors[agentId] = text; else delete errors[agentId];
+      return { ...prev, errors };
+    });
+  const merge = (forScope: string, session: WorkerSession) => {
+    seq.current += 1; // a list read that started earlier must not overwrite this newer, per-agent answer
     setCache(prev => prev.scope !== forScope ? prev : {
       ...prev, workers: prev.workers.map(item => item.agent.agent_id === session.agent_id ? { ...item, session } : item) });
+  };
 
-  const onSelect = useCallback((agentId: string) => {
-    setCache(prev => prev.scope !== scopeRef.current ? prev : { ...prev, selectedId: agentId });
-    if (scope && projectId) void load(scope, projectId);
-  }, [scope, projectId, load]);
+  const act = useCallback((kind: WorkerBusy, call: (pid: string, agentId: string) => Promise<WorkerSession>) =>
+    async (agentId: string): Promise<void> => {
+      const current = scopeRef.current;
+      if (!current || !projectId) return;
+      const key = `${current}/${agentId}`;
+      if (running.current.has(key)) return; // a second click on the SAME Worker while its request runs does nothing
+      running.current.add(key);
+      setError(current, agentId, null);
+      setBusy(current, agentId, kind);
+      try {
+        const session = await call(projectId, agentId);
+        if (scopeRef.current === current) merge(current, session);
+      } catch (e) {
+        if (scopeRef.current === current) { setError(current, agentId, describeError(e)); void load(current, projectId); }
+      } finally {
+        running.current.delete(key);
+        if (scopeRef.current === current) setBusy(current, agentId, null);
+      }
+    }, [projectId, load]);
 
-  const onCheck = useCallback(async (): Promise<string | null> => {
-    const current = scopeRef.current;
-    if (!current || !projectId || !selected) return 'Worker не выбран.';
-    try {
-      const session = await api.getWorkerSession(projectId, selected.agent.agent_id);
-      if (scopeRef.current === current) merge(current, session);
-      return null;
-    } catch (e) { return describeError(e); }
-  }, [api, projectId, selected?.agent.agent_id]);
+  const onCheck = useCallback((agentId: string) => act('check', api.getWorkerSession)(agentId), [act, api]);
+  const onActivate = useCallback((agentId: string) => act('activate', api.activateWorkerSession)(agentId), [act, api]);
+  const onBootstrap = useCallback((agentId: string) => act('bootstrap', api.bootstrapWorkerSession)(agentId), [act, api]);
 
-  const onActivate = useCallback(async (): Promise<string | null> => {
-    const current = scopeRef.current;
-    if (!current || !projectId || !selected) return 'Worker не выбран.';
-    if (activating.current) return null; // a second click while one request is running does nothing
-    activating.current = true;
-    setCache(prev => prev.scope !== current ? prev : { ...prev, busy: true });
-    try {
-      const session = await api.activateWorkerSession(projectId, selected.agent.agent_id);
-      if (scopeRef.current === current) { merge(current, session); setCache(prev => prev.scope !== current ? prev : { ...prev, busy: false }); }
-      return null;
-    } catch (e) {
-      if (scopeRef.current === current) { setCache(prev => prev.scope !== current ? prev : { ...prev, busy: false }); void load(current, projectId); }
-      return describeError(e);
-    } finally { activating.current = false; }
-  }, [api, projectId, selected?.agent.agent_id, load]);
-
-  return { status: visible.status, workers: visible.workers, selectedId: visible.selectedId, busy: visible.busy, onSelect, onCheck, onActivate };
+  return { status: visible.status, workers: visible.workers, busy: visible.busy, errors: visible.errors, onCheck, onActivate, onBootstrap };
 }

@@ -84,7 +84,7 @@ class FreshRegistrationTests(IdentityCase):
 
     def test_single_migration_head(self) -> None:
         from alembic.script import ScriptDirectory
-        self.assertEqual(ScriptDirectory.from_config(self.alembic).get_heads(), ["0014_worker_sessions"])
+        self.assertEqual(ScriptDirectory.from_config(self.alembic).get_heads(), ["0015_worker_bootstrap"])
 
     def test_read_model_adds_identity_and_keeps_legacy_root_path(self) -> None:
         root = self.new_root()
@@ -104,7 +104,8 @@ class FreshRegistrationTests(IdentityCase):
         # execution route (no RuntimeBinding, session, Run or Worker launch surface).
         # P042A deliberately adds exactly these Owner-only Worker CLI-session routes (read, read, explicit activation).
         p042a = {"/api/projects/{project_id}/workers", "/api/projects/{project_id}/workers/{agent_id}/session",
-                 "/api/projects/{project_id}/workers/{agent_id}/session/activate"}
+                 "/api/projects/{project_id}/workers/{agent_id}/session/activate",
+                 "/api/projects/{project_id}/workers/{agent_id}/session/bootstrap"}
         self.assertLessEqual(p042a, paths)
         for forbidden in ("binding", "rebind", "unlink", "archive", "run", "worker", "session", "runtime"):
             self.assertFalse([path for path in paths - p042a if forbidden in path], (forbidden, sorted(paths)))

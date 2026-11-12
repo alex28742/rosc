@@ -144,8 +144,9 @@ describe('Work area presentation', () => {
       const button = within(drawer).getByRole('button', { name: new RegExp(label) }) as HTMLButtonElement;
       expect(button.disabled, label).toBe(true);
     }
-    const worker = within(within(drawer).getByLabelText('Worker этой Task'));
-    expect((worker.getByRole('button', { name: 'Активировать сессию' }) as HTMLButtonElement).disabled).toBe(true);
+    const worker = within(within(drawer).getByLabelText('Workers проекта'));
+    expect(worker.getByText(/нет назначенных Workers/)).toBeTruthy();
+    expect(worker.queryByRole('button', { name: 'Активировать сессию' })).toBeNull();
     expect(within(drawer).queryByText(/B-014|S0\d|R5002/)).toBeNull();
     fireEvent.click(within(drawer).getByLabelText('Свернуть Task Conversation'));
     expect(main.className).toContain('rosc-task-workspace--collapsed');

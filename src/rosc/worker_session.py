@@ -18,8 +18,10 @@ written to or replaced.
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import os
+import re
 import shlex
 import shutil
 import subprocess
@@ -55,6 +57,14 @@ TMUX_SOCKET = "rosc"             # dedicated tmux server: Owner's own tmux sessi
 ACK_GRACE_SECONDS = 90.0
 ACK_WAIT_SECONDS = 15.0
 MAX_ACK_BYTES = 8192
+SUBMIT_WAIT_SECONDS = 4.0        # how long to wait for the CLI's own "prompt submitted" report before pressing Enter again
+SUBMIT_RETRIES = 2
+BOOTSTRAP_WAIT_SECONDS = 300.0   # a bootstrap turn without a correlated acknowledgement after this is "unknown"
+MAX_BOOTSTRAP_SOURCES = 4
+SAFE_TMUX_NAME = re.compile(r"^[A-Za-z0-9._-]{1,96}$")
+# Bootstrap (project context preparation) states. "confirmed" means: the CLI's own hooks recorded that it read the
+# requested files with its native Read tool and the Worker's last message carried the correlated marker.
+B_NONE, B_PENDING, B_CONFIRMED, B_FAILED, B_UNKNOWN, B_STALE = "none", "pending", "confirmed", "failed", "unknown", "stale"
 NONCE_ENV = "ROSC_WORKER_INCARNATION"
 FILE_ENV = "ROSC_WORKER_ACK_FILE"
 ACK_SCRIPT = Path(__file__).with_name("worker_ack.py")
@@ -134,6 +144,21 @@ class TmuxClient:
         if result.returncode != 0:
             raise TmuxError("new-session failed")
 
+    def send_text(self, pane_id: str, text: str) -> None:
+        """Type one line into an exactly-identified pane of the ROSC server (literal text, then Enter)."""
+        if not re.fullmatch(r"%\d+", pane_id) or "\n" in text or "\r" in text:
+            raise TmuxError("refused to send")
+        if self._run("send-keys", "-t", pane_id, "-l", text).returncode != 0:
+            raise TmuxError("send-keys failed")
+        time.sleep(0.3)
+        if self._run("send-keys", "-t", pane_id, "Enter").returncode != 0:
+            raise TmuxError("send-keys failed")
+
+    def send_enter(self, pane_id: str) -> None:
+        """Press Enter once in an exactly-identified pane (only used while the CLI has not yet reported a submission)."""
+        if not re.fullmatch(r"%\d+", pane_id) or self._run("send-keys", "-t", pane_id, "Enter").returncode != 0:
+            raise TmuxError("send-keys failed")
+
     def kill_session(self, name: str) -> None:
         self._run("kill-session", "-t", f"={name}")
 
@@ -177,6 +202,12 @@ class Observation:
     acked_at: datetime | None = None
     can_activate: bool = False
     reused: bool = False
+    attach: str | None = None           # verified ROSC-owned attach command, only for an observed live incarnation
+    bootstrap: dict | None = None
+
+
+def _aware(value: datetime) -> datetime:
+    return value if value.tzinfo else value.replace(tzinfo=timezone.utc)
 
 
 def _safe_name(project_id: int, agent_id: str) -> str:
@@ -187,7 +218,7 @@ class WorkerSessionService:
     def __init__(self, session_factory: sessionmaker[Session], policy: AuthorizationPolicy, state_dir: Path, *,
                  tmux: TmuxClient | None = None, proc: ProcInspector | None = None, cli_resolver=default_cli_resolver,
                  ack_grace: float = ACK_GRACE_SECONDS, ack_wait: float = ACK_WAIT_SECONDS,
-                 python: str | None = None, clock=time.time) -> None:
+                 python: str | None = None, clock=time.time, submit_wait: float = SUBMIT_WAIT_SECONDS) -> None:
         self._sessions = session_factory
         self._policy = policy
         self._dir = Path(state_dir)
@@ -195,6 +226,7 @@ class WorkerSessionService:
         self._proc = proc or ProcInspector()
         self._resolve_cli = cli_resolver
         self._grace, self._wait = ack_grace, ack_wait
+        self._submit_wait = submit_wait
         self._python = python or sys.executable
         self._clock = clock
         self._locks: dict[tuple[int, str], threading.Lock] = {}
@@ -273,7 +305,9 @@ class WorkerSessionService:
             if problem:
                 return Observation(STATE_UNAVAILABLE, problem), None
             return Observation(STATE_NOT_CONNECTED, "never_activated", can_activate=True), None
-        return self._observe_bound(row), row
+        obs = self._observe_bound(row)
+        obs.bootstrap = self._observe_bootstrap(row, project, obs)
+        return obs, row
 
     def _observe_bound(self, row: WorkerSession) -> Observation:
         try:
@@ -297,18 +331,115 @@ class WorkerSessionService:
             return Observation(STATE_NOT_CONNECTED, "vanished", tmux_alive=False, cli_observable=False, can_activate=True)
         if not same_process or self._proc.env_value(row.pane_pid, NONCE_ENV) != row.incarnation:
             return Observation(STATE_UNKNOWN, "process_mismatch", tmux_alive=True, cli_observable=False)
+        attach = (f"tmux -L {row.tmux_socket} attach-session -t '={row.tmux_session}'"
+                  if SAFE_TMUX_NAME.match(row.tmux_session) and SAFE_TMUX_NAME.match(row.tmux_socket) else None)
         acked, when = self._read_ack(row)
         if acked:
-            return Observation(STATE_ACTIVE, "initialised", tmux_alive=True, cli_observable=True, acked=True, acked_at=when)
-        created = row.created_at if row.created_at.tzinfo else row.created_at.replace(tzinfo=timezone.utc)
+            return Observation(STATE_ACTIVE, "initialised", tmux_alive=True, cli_observable=True, acked=True,
+                               acked_at=when, attach=attach)
+        created = _aware(row.created_at)
         if self._clock() - created.timestamp() <= self._grace:
-            return Observation(STATE_CONNECTING, "awaiting_ack", tmux_alive=True, cli_observable=True)
-        return Observation(STATE_UNKNOWN, "no_ack", tmux_alive=True, cli_observable=True)
+            return Observation(STATE_CONNECTING, "awaiting_ack", tmux_alive=True, cli_observable=True, attach=attach)
+        return Observation(STATE_UNKNOWN, "no_ack", tmux_alive=True, cli_observable=True, attach=attach)
+
+    # -- project-context bootstrap (Owner-requested; evidence recorded by the CLI's own hooks) -----------------------
+    def _bootstrap_sources(self, project: Project) -> tuple[list[tuple[str, str]], str]:
+        """Existing project entry points inside the current Root Binding with their content digests.
+
+        Only what really exists is listed: the configured ``docs_entrypoint`` and the project-native ``AGENTS.md`` /
+        ``CLAUDE.md``.  ROSC defines no separate Worker ruleset, so none is invented.  The digest also covers the root
+        and binding version, so a changed binding or edited entry point makes an earlier claim stale."""
+        binding = validate_project_identity(project)
+        root = Path(binding.root_path).resolve()
+        names: list[str] = []
+        for name in (binding.docs_entrypoint, "AGENTS.md", "CLAUDE.md"):
+            if name and name not in names:
+                names.append(name)
+        found: list[tuple[str, str]] = []
+        for name in names:
+            try:
+                path = (root / name).resolve()
+                if not path.is_file() or not path.is_relative_to(root):
+                    continue
+                found.append((name, hashlib.sha256(path.read_bytes()).hexdigest()))
+            except OSError:
+                continue
+            if len(found) >= MAX_BOOTSTRAP_SOURCES:
+                break
+        digest = hashlib.sha256(json.dumps({"root": str(root), "binding": binding.version, "files": found},
+                                           sort_keys=True).encode()).hexdigest()
+        return found, digest
+
+    def _read_bootstrap(self, row: WorkerSession) -> tuple[str, str, datetime] | None:
+        path = self._dir / f"{row.incarnation}.bootstrap.json"
+        try:
+            if path.stat().st_size > MAX_ACK_BYTES * 4:
+                return None
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return None
+        if (not isinstance(data, dict) or data.get("incarnation") != row.incarnation
+                or data.get("token") != row.bootstrap_token or not row.bootstrap_token):
+            return None
+        ancestors = data.get("ancestors")
+        stamp = data.get("acked_at")
+        if (not isinstance(ancestors, list) or row.pane_pid not in ancestors or isinstance(stamp, bool)
+                or not isinstance(stamp, (int, float)) or row.bootstrap_sent_at is None
+                or stamp < _aware(row.bootstrap_sent_at).timestamp() - 5):
+            return None
+        when = datetime.fromtimestamp(stamp, timezone.utc)
+        reads = data.get("observed_reads")
+        try:
+            required = {os.path.realpath(os.path.join(row.workdir, rel)) for rel in json.loads(row.bootstrap_sources or "[]")}
+        except ValueError:
+            return None
+        seen = {os.path.realpath(item) for item in reads if isinstance(item, str)} if isinstance(reads, list) else set()
+        if data.get("claimed") != "OK":
+            return B_FAILED, "worker_reported_failure", when
+        if not required or not required <= seen:
+            return B_FAILED, "reads_missing", when
+        return B_CONFIRMED, "context_read", when
+
+    def _submitted(self, row: WorkerSession, token: str) -> bool:
+        try:
+            data = json.loads((self._dir / f"{row.incarnation}.submitted.json").read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return False
+        return isinstance(data, dict) and data.get("incarnation") == row.incarnation and data.get("token") == token
+
+    def _observe_bootstrap(self, row: WorkerSession, project: Project, obs: Observation) -> dict:
+        def out(state: str, reason: str, *, sources=(), can=False, when=None) -> dict:
+            return {"state": state, "reason": reason, "can_bootstrap": can, "sources": list(sources),
+                    "confirmed_at": _iso(when)}
+        if obs.state != STATE_ACTIVE:
+            return out(B_NONE, "cli_not_active")
+        try:
+            found, digest = self._bootstrap_sources(project)
+        except ProjectIdentityError:
+            return out(B_NONE, "project_identity")
+        names = [name for name, _ in found]
+        if not row.bootstrap_token:
+            return out(B_NONE, "not_requested" if found else "no_sources", sources=names, can=bool(found))
+        requested = json.loads(row.bootstrap_sources or "[]")
+        if row.bootstrap_digest != digest:
+            return out(B_STALE, "binding_changed", sources=requested, can=bool(found))
+        result = self._read_bootstrap(row)
+        if result is not None:
+            state, reason, when = result
+            return out(state, reason, sources=requested, can=state == B_FAILED and bool(found),
+                       when=when if state == B_CONFIRMED else None)
+        sent = _aware(row.bootstrap_sent_at) if row.bootstrap_sent_at else None
+        if sent is not None and self._clock() - sent.timestamp() <= BOOTSTRAP_WAIT_SECONDS:
+            return out(B_PENDING, "awaiting_worker", sources=requested)
+        return out(B_UNKNOWN, "no_confirmation", sources=requested)
 
     def _view(self, project_id: int, agent_id: str, obs: Observation) -> dict:
         """Public read model. No tmux names, pane/process ids, nonces or filesystem paths."""
+        bootstrap = obs.bootstrap or {"state": B_NONE, "reason": "cli_not_active", "can_bootstrap": False,
+                                      "sources": [], "confirmed_at": None}
         return {
             "project_id": f"P{project_id:04d}", "agent_id": agent_id, "state": obs.state, "reason": obs.reason,
+            "bootstrap": bootstrap, "terminal": {"attach_command": obs.attach} if obs.attach else None,
             "can_activate": obs.can_activate, "can_check": obs.state != STATE_NOT_ASSIGNED,
             "reused": obs.reused, "initialised_at": _iso(obs.acked_at), "checked_at": _iso(_now()),
             "evidence": {"tmux_alive": obs.tmux_alive, "cli_observable": obs.cli_observable,
@@ -359,7 +490,7 @@ class WorkerSessionService:
                 obs, row = self._observe(session, project, agent, assignment)
                 if obs.state in (STATE_ACTIVE, STATE_CONNECTING):
                     obs.reused = True  # reconnect/reuse: never a second CLI
-                    return self._view(project_id, agent_key, obs)
+                    return self._view(project_id, agent_key, self._maybe_bootstrap(session, row, project, obs))
                 if not obs.can_activate:
                     return self._view(project_id, agent_key, obs)  # not assigned / unavailable / unknown: fail closed
                 name = _safe_name(project_id, agent_key)
@@ -386,7 +517,15 @@ class WorkerSessionService:
                 self._dir.mkdir(parents=True, exist_ok=True)
                 ack_file = self._ack_path(incarnation)
                 hook = f"{shlex.quote(self._python)} {shlex.quote(str(ACK_SCRIPT))}"
-                settings = json.dumps({"hooks": {"SessionStart": [{"hooks": [{"type": "command", "command": hook}]}]}},
+
+                def entry(mode: str, matcher: str | None = None) -> dict:
+                    item: dict = {"hooks": [{"type": "command", "command": f"{hook} {mode}"}]}
+                    if matcher:
+                        item["matcher"] = matcher
+                    return item
+                settings = json.dumps({"hooks": {"SessionStart": [entry("session")],
+                                                 "UserPromptSubmit": [entry("submit")],
+                                                 "PostToolUse": [entry("read", "Read")], "Stop": [entry("stop")]}},
                                       separators=(",", ":"))
                 created = False
                 try:
@@ -413,19 +552,87 @@ class WorkerSessionService:
                     row.pane_id, row.pane_pid, row.workdir = pane.pane_id, pane.pane_pid, root
                     row.proc_start = self._proc.start_time(pane.pane_pid)
                     row.created_at, row.last_observed_at, row.last_state = now, now, STATE_CONNECTING
+                    # a new incarnation never inherits a bootstrap claim of the previous one
+                    row.bootstrap_token = row.bootstrap_digest = row.bootstrap_sources = row.bootstrap_sent_at = None
                     session.commit()
                 except (OperationalError, IntegrityError):
                     session.rollback()
                     self._cleanup(name)  # we just created it: ROSC-owned, safe to remove; nothing was recorded
                     raise RegistryStoreError("Worker session could not be recorded; retry shortly") from None
                 if old_ack is not None:
-                    old_ack.unlink(missing_ok=True)
+                    for suffix in (".ack.json", ".request.json", ".reads.jsonl", ".bootstrap.json", ".submitted.json"):
+                        old_ack.with_name(old_ack.name[:-len(".ack.json")] + suffix).unlink(missing_ok=True)
                 deadline = self._clock() + self._wait
                 obs = self._observe_bound(row)
                 while obs.state == STATE_CONNECTING and self._clock() < deadline:
                     time.sleep(0.25)
                     obs = self._observe_bound(row)
-                return self._view(project_id, agent_key, obs)
+                obs.bootstrap = self._observe_bootstrap(row, project, obs)
+                return self._view(project_id, agent_key, self._maybe_bootstrap(session, row, project, obs))
+
+    def bootstrap(self, actor: ActorContext, project_id: int, agent_id: object) -> dict:
+        """Separate explicit Owner action (e.g. after the folder-trust prompt was accepted in the terminal): ask an
+        already active CLI to read the project entry points.  Never spawns a CLI; never resends to an ambiguous turn."""
+        agent_key = canonical_agent_id(agent_id)
+        self._authorize(actor, WORKER_SESSION_ACTIVATE, project_id, agent_key)
+        with self._lock((project_id, agent_key)):
+            with self._sessions() as session:
+                project, agent, assignment = self._context(session, project_id, agent_key)
+                obs, row = self._observe(session, project, agent, assignment)
+                if row is None:
+                    return self._view(project_id, agent_key, obs)
+                return self._view(project_id, agent_key, self._maybe_bootstrap(session, row, project, obs))
+
+    def _maybe_bootstrap(self, session: Session, row: WorkerSession | None, project: Project, obs: Observation) -> Observation:
+        """Send the bootstrap request only for a verified active CLI whose context is not already prepared/in flight.
+        pending/unknown/confirmed are never resent (no blind retry, no tokens spent twice)."""
+        if row is None or obs.state != STATE_ACTIVE or not obs.bootstrap or not obs.bootstrap["can_bootstrap"]:
+            return obs
+        if obs.bootstrap["state"] not in (B_NONE, B_FAILED, B_STALE):
+            return obs
+        try:
+            found, digest = self._bootstrap_sources(project)
+        except ProjectIdentityError:
+            return obs
+        if not found:
+            return obs
+        token = str(uuid.uuid4())
+        names = [name for name, _ in found]
+        root = os.path.realpath(row.workdir)
+        paths = [os.path.join(root, name) for name in names]
+        base = self._dir / row.incarnation
+        for suffix in (".reads.jsonl", ".bootstrap.json", ".submitted.json"):
+            Path(str(base) + suffix).unlink(missing_ok=True)
+        request = Path(str(base) + ".request.json")
+        temp = request.with_name(request.name + ".tmp")
+        temp.write_text(json.dumps({"incarnation": row.incarnation, "token": token, "sources": names}), encoding="utf-8")
+        os.replace(temp, request)
+        try:  # recorded BEFORE typing: if anything below is interrupted the outcome is "unknown", never a blind resend
+            session.connection().exec_driver_sql("BEGIN IMMEDIATE")
+            row.bootstrap_token, row.bootstrap_digest = token, digest
+            row.bootstrap_sources, row.bootstrap_sent_at = json.dumps(names), _now()
+            session.commit()
+        except (OperationalError, IntegrityError):
+            session.rollback()
+            raise RegistryStoreError("Worker bootstrap could not be recorded; retry shortly") from None
+        text = (f"[ROSC bootstrap {token}] Подготовка контекста проекта, это не задача. Прочитай инструментом Read "
+                f"только эти файлы: {', '.join(paths)}. Ничего не изменяй и не запускай команд. Затем ответь одной "
+                f"последней строкой ровно в формате: ROSC-BOOTSTRAP {token} OK (или FAILED, если какой-то файл не прочитан).")
+        try:
+            self._tmux.send_text(row.pane_id, text)
+            # Typing keys proves nothing: a TUI that is still starting can swallow the Enter. The CLI's own
+            # UserPromptSubmit hook reports a real submission; only the Enter key (never the text) is repeated.
+            for attempt in range(SUBMIT_RETRIES + 1):
+                deadline = self._clock() + self._submit_wait
+                while not self._submitted(row, token) and self._clock() < deadline:
+                    time.sleep(0.25)
+                if self._submitted(row, token) or attempt == SUBMIT_RETRIES:
+                    break
+                self._tmux.send_enter(row.pane_id)
+        except TmuxError:
+            pass  # delivery is uncertain: the state stays pending and then becomes unknown; never resent blindly
+        obs.bootstrap = self._observe_bootstrap(row, project, obs)
+        return obs
 
     def _cleanup(self, name: str) -> None:
         try:

@@ -2417,7 +2417,7 @@
 
 .rosc-task-agents {
   display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
+  grid-template-columns: minmax(0, 1fr);
   gap: 9px;
   margin: 0 0 10px;
 }
@@ -3055,27 +3055,104 @@
   flex: 1 1 auto;
 }
 
-.rosc-task-picker {
-  margin-top: 8px;
-}
-
-.rosc-task-picker label {
-  display: block;
-  max-width: 340px;
-  font-size: calc(11px * var(--rosc-text-scale, 1));
-  color: var(--rosc-secondary);
-}
-
-.rosc-task-picker select {
-  display: block;
-  width: 100%;
-  margin-top: 3px;
-}
-
 .rosc-task-agents p.rosc-task-agents__sub {
   margin: 4px 0 6px;
   overflow: hidden;
   font-size: calc(10px * var(--rosc-text-scale, 1));
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.rosc-task-workers {
+  margin: 0 0 10px;
+  padding: 10px;
+  border: 1px solid var(--rosc-line);
+  border-radius: 8px;
+}
+
+.rosc-task-workers__note {
+  margin: 6px 0 8px;
+  font-size: calc(10px * var(--rosc-text-scale, 1));
+  color: var(--rosc-secondary);
+}
+
+.rosc-worker-list {
+  display: grid;
+  gap: 8px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.rosc-worker-row {
+  min-width: 0;
+  padding: 9px 10px;
+  border: 1px solid var(--rosc-line);
+  border-radius: 8px;
+}
+
+.rosc-worker-row--active {
+  border-color: #c4e4d1;
+}
+
+.rosc-worker-row--unknown {
+  border-color: #ead2bc;
+}
+
+.rosc-worker-row__top {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.rosc-worker-row__name {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  min-width: 0;
+  font-size: calc(13px * var(--rosc-text-scale, 1));
+}
+
+.rosc-worker-row__name input {
+  margin: 0;
+}
+
+.rosc-worker-row__meta,
+.rosc-worker-row__line {
+  margin: 4px 0 0 !important;
+  font-size: calc(10px * var(--rosc-text-scale, 1)) !important;
+  line-height: 1.5;
+  color: var(--rosc-secondary);
+}
+
+.rosc-worker-row__actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  margin-top: 7px;
+}
+
+.rosc-worker-row__help {
+  margin-top: 8px;
+  padding: 8px;
+  border-radius: 6px;
+  background: #f4f8fa;
+  font-size: calc(11px * var(--rosc-text-scale, 1));
+}
+
+.rosc-worker-row__help p {
+  margin: 0 0 6px;
+}
+
+.rosc-worker-row__help code {
+  display: block;
+  padding: 6px 8px;
+  overflow-wrap: anywhere;
+  border-radius: 6px;
+  background: #fff;
+  border: 1px solid var(--rosc-line);
+  font-size: calc(11px * var(--rosc-text-scale, 1));
+  user-select: all;
 }

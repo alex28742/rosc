@@ -14,6 +14,7 @@ import sqlite3
 import stat
 import subprocess
 import sys
+import tempfile
 import time
 import unittest
 import uuid
@@ -41,6 +42,8 @@ class FakeTmux:
         self.sessions: dict[str, PaneInfo] = {}
         self.new_calls: list[tuple] = []
         self.killed: list[str] = []
+        self.sent: list[tuple[str, str]] = []
+        self.enters: list[str] = []
         self.installed = True
         self.broken = False
         self.next_pid = 5000
@@ -61,6 +64,15 @@ class FakeTmux:
         self.on_new(self.next_pid, env)
 
     on_new = staticmethod(lambda pid, env: None)
+
+    on_send = staticmethod(lambda pane_id, text: None)
+
+    def send_text(self, pane_id, text):
+        self.sent.append((pane_id, text))
+        self.on_send(pane_id, text)
+
+    def send_enter(self, pane_id):
+        self.enters.append(pane_id)
 
     def kill_session(self, name):
         self.killed.append(name)
@@ -104,7 +116,8 @@ class SessionCase(base.StageCase):
     def build(self, **kwargs) -> WorkerSessionService:
         self.service = WorkerSessionService(self.sessions, LocalOwnerPolicy(), self.state_dir, tmux=self.tmux,
                                             proc=self.proc, cli_resolver=lambda adapter: "/fake/claude",
-                                            ack_wait=self.ack_wait, clock=lambda: self.clock_now[0], **kwargs)
+                                            ack_wait=self.ack_wait, clock=lambda: self.clock_now[0],
+                                            **{"submit_wait": 0.0, **kwargs})
         self.client.close()
         self.client = TestClient(create_app(self.data / "rosc.db", self.data / "workspace",
                                             worker_session_service=self.service), base_url="http://localhost")
@@ -213,8 +226,11 @@ class ReadPathTests(SessionCase):
     def test_public_view_leaks_no_internal_identifiers(self) -> None:
         self.activate()
         incarnation, pid, name = self.current()
-        text = json.dumps([self.status(), self.client.get("/api/projects/P0001/workers").json(), self.activate().json()])
-        for secret in (incarnation, str(pid), name, "%", str(self.state_dir), str(self.root), "rosc-p0001"):
+        views = [self.status(), self.client.get("/api/projects/P0001/workers").json(), self.activate().json()]
+        # the one deliberate disclosure: the verified ROSC-owned attach command (exact-match session target)
+        self.assertEqual(views[0]["terminal"], {"attach_command": f"tmux -L fake attach-session -t '={name}'"})
+        text = json.dumps(views).replace(name, "<attach>")
+        for secret in (incarnation, str(pid), "%", str(self.state_dir), str(self.root), "rosc-p0001"):
             self.assertNotIn(secret, text)
 
 
@@ -391,6 +407,262 @@ time.sleep(120)
 
 
 @unittest.skipUnless(HAVE_TMUX, "tmux is not installed")
+class BootstrapTests(SessionCase):
+    """P042A r02: Owner-requested project-context bootstrap. Evidence comes from the CLI's own hooks."""
+
+    def setUp(self) -> None:
+        super().setUp()
+        (self.root / "AGENTS.md").write_text("# entry point\n")
+        self.tables_before = self.rows("select count(*) from run_records") + self.rows("select count(*) from execution_packages")
+
+    def make_active(self) -> tuple[str, int]:
+        self.activate()
+        incarnation, pid, _ = self.current()
+        self.write_ack(incarnation, [pid, 1])
+        return incarnation, pid
+
+    def token(self) -> str:
+        return self.rows("select bootstrap_token from worker_sessions")[0][0]
+
+    def finish(self, incarnation: str, pid: int, *, claimed="OK", reads=None, token=None, when=None, ancestors=None) -> None:
+        reads = [str(self.root / "AGENTS.md")] if reads is None else reads
+        payload = {"incarnation": incarnation, "token": token or self.token(), "claimed": claimed,
+                   "observed_reads": reads, "ancestors": ancestors or [pid, 1], "acked_at": when or time.time()}
+        (self.state_dir / f"{incarnation}.bootstrap.json").write_text(json.dumps(payload))
+
+    def bootstrap_state(self) -> dict:
+        return self.status()["bootstrap"]
+
+    def test_reads_and_checks_never_send_anything(self) -> None:
+        self.make_active()
+        for _ in range(3):
+            self.status()
+            self.client.get("/api/projects/P0001/workers")
+        self.assertEqual(self.tmux.sent, [])
+        self.assertEqual(self.bootstrap_state()["state"], "none")
+        self.assertTrue(self.bootstrap_state()["can_bootstrap"])
+        self.assertEqual(self.bootstrap_state()["sources"], ["AGENTS.md"])
+
+    def test_explicit_bootstrap_sends_one_correlated_line_and_is_pending_until_acknowledged(self) -> None:
+        incarnation, pid = self.make_active()
+        view = self.client.post(self.url("session/bootstrap")).json()
+        self.assertEqual(view["bootstrap"]["state"], "pending")
+        self.assertEqual(len(self.tmux.sent), 1)
+        pane, text = self.tmux.sent[0]
+        self.assertEqual(pane, f"%{pid}")
+        self.assertNotIn("\n", text)
+        self.assertIn(self.token(), text)
+        self.assertIn(str(self.root / "AGENTS.md"), text)
+        self.assertEqual(self.rows("select count(*) from worker_sessions"), [(1,)])
+        # no blind resend: repeating the action, re-activating or reading all keep one delivery
+        self.client.post(self.url("session/bootstrap"))
+        self.activate()
+        self.status()
+        self.assertEqual(len(self.tmux.sent), 1)
+
+    def test_enter_is_repeated_but_the_text_never_while_the_cli_reports_no_submission(self) -> None:
+        incarnation, pid = self.make_active()
+        self.client.post(self.url("session/bootstrap"))
+        self.assertEqual(len(self.tmux.sent), 1)
+        self.assertEqual(self.tmux.enters, [f"%{pid}", f"%{pid}"])   # SUBMIT_RETRIES extra Enters, nothing else
+        self.assertEqual(self.bootstrap_state()["state"], "pending")
+
+    def test_no_extra_enter_once_the_cli_itself_reports_the_submission(self) -> None:
+        incarnation, pid = self.make_active()
+
+        def submitted(pane_id, text):
+            token = self.token()
+            (self.state_dir / f"{incarnation}.submitted.json").write_text(json.dumps({"incarnation": incarnation, "token": token}))
+        self.tmux.on_send = submitted
+        self.client.post(self.url("session/bootstrap"))
+        self.assertEqual((len(self.tmux.sent), self.tmux.enters), (1, []))
+
+    def test_confirmed_needs_matching_token_reads_and_process_ancestry(self) -> None:
+        incarnation, pid = self.make_active()
+        self.client.post(self.url("session/bootstrap"))
+        self.finish(incarnation, pid, token=str(uuid.uuid4()))          # stale/other token
+        self.assertEqual(self.bootstrap_state()["state"], "pending")
+        self.finish(incarnation, pid, ancestors=[999, 1])               # not our pane process
+        self.assertEqual(self.bootstrap_state()["state"], "pending")
+        self.finish(incarnation, pid, when=time.time() - 3600)          # predates the request
+        self.assertEqual(self.bootstrap_state()["state"], "pending")
+        self.finish(incarnation, pid, reads=[])                         # claimed OK but no observed Read
+        self.assertEqual((self.bootstrap_state()["state"], self.bootstrap_state()["reason"]), ("failed", "reads_missing"))
+        self.finish(incarnation, pid, claimed="FAILED")
+        self.assertEqual(self.bootstrap_state()["reason"], "worker_reported_failure")
+        self.finish(incarnation, pid)
+        state = self.bootstrap_state()
+        self.assertEqual((state["state"], state["reason"]), ("confirmed", "context_read"))
+        self.assertIsNotNone(state["confirmed_at"])
+        self.assertEqual(self.status()["state"], "active")
+
+    def test_confirmed_is_not_resent_and_survives_engine_restart(self) -> None:
+        incarnation, pid = self.make_active()
+        self.client.post(self.url("session/bootstrap"))
+        self.finish(incarnation, pid)
+        self.build()  # new service object = Engine restart; same DB, tmux and files
+        self.assertEqual(self.bootstrap_state()["state"], "confirmed")
+        self.activate()
+        self.client.post(self.url("session/bootstrap"))
+        self.assertEqual(len(self.tmux.sent), 1)
+
+    def test_lost_confirmation_becomes_unknown_and_is_not_blindly_resent(self) -> None:
+        self.make_active()
+        self.client.post(self.url("session/bootstrap"))
+        self.clock_now[0] += 400
+        self.assertEqual(self.bootstrap_state()["state"], "unknown")
+        self.client.post(self.url("session/bootstrap"))
+        self.activate()
+        self.assertEqual(len(self.tmux.sent), 1)
+        self.assertFalse(self.bootstrap_state()["can_bootstrap"])
+
+    def test_changed_entry_point_makes_confirmation_stale_and_allows_a_new_explicit_bootstrap(self) -> None:
+        incarnation, pid = self.make_active()
+        self.client.post(self.url("session/bootstrap"))
+        self.finish(incarnation, pid)
+        (self.root / "AGENTS.md").write_text("# changed rules\n")
+        state = self.bootstrap_state()
+        self.assertEqual((state["state"], state["can_bootstrap"]), ("stale", True))
+        self.assertIsNone(state["confirmed_at"])
+        self.client.post(self.url("session/bootstrap"))
+        self.assertEqual(len(self.tmux.sent), 2)
+
+    def test_failed_bootstrap_can_be_requested_again_explicitly_only(self) -> None:
+        incarnation, pid = self.make_active()
+        self.client.post(self.url("session/bootstrap"))
+        self.finish(incarnation, pid, claimed="FAILED")
+        self.status()
+        self.assertEqual(len(self.tmux.sent), 1)
+        self.client.post(self.url("session/bootstrap"))
+        self.assertEqual(len(self.tmux.sent), 2)
+        self.assertEqual(self.bootstrap_state()["state"], "pending")  # new token; the old failure is not reused
+
+    def test_activation_of_an_active_cli_bootstraps_but_a_connecting_one_never_does(self) -> None:
+        self.activate()                                               # no ack yet: connecting
+        self.client.post(self.url("session/bootstrap"))
+        self.activate()
+        self.assertEqual(self.tmux.sent, [])
+        incarnation, pid, _ = self.current()
+        self.write_ack(incarnation, [pid])
+        self.activate()                                               # explicit action on an acknowledged CLI
+        self.assertEqual(len(self.tmux.sent), 1)
+
+    def test_no_entry_point_means_nothing_is_sent_and_nothing_is_claimed(self) -> None:
+        (self.root / "AGENTS.md").unlink()
+        self.make_active()
+        self.client.post(self.url("session/bootstrap"))
+        self.assertEqual(self.tmux.sent, [])
+        state = self.bootstrap_state()
+        self.assertEqual((state["state"], state["reason"], state["can_bootstrap"]), ("none", "no_sources", False))
+
+    def test_new_incarnation_does_not_inherit_a_bootstrap_claim(self) -> None:
+        incarnation, pid = self.make_active()
+        self.client.post(self.url("session/bootstrap"))
+        self.finish(incarnation, pid)
+        self.tmux.sessions.clear()                                    # CLI gone
+        self.proc.table.clear()
+        self.assertEqual(self.status()["state"], "not_connected")
+        self.activate()
+        new, new_pid, _ = self.current()
+        self.assertNotEqual(new, incarnation)
+        self.assertEqual(self.rows("select bootstrap_token from worker_sessions"), [(None,)])
+        self.write_ack(new, [new_pid])
+        self.assertEqual(self.bootstrap_state()["state"], "none")
+        self.assertFalse((self.state_dir / f"{incarnation}.bootstrap.json").exists())
+
+    def test_unassigned_worker_and_other_project_never_receive_text(self) -> None:
+        self.make_active()
+        other = self.registry.register_agent(OWNER, display_name="Codex", runtime_adapter="claude-code",
+                                             provider_id="x", model_id="m", capabilities=WORKER_CAPS)
+        response = self.client.post(self.url("session/bootstrap", agent=other["agent_id"]))
+        self.assertEqual(response.json()["state"], "not_assigned")
+        self.assertEqual(self.client.post(self.url("session/bootstrap", project="P0002")).json()["state"], "not_assigned")
+        self.assertEqual(self.tmux.sent, [])
+
+    def test_bootstrap_and_activation_create_no_run_package_or_report(self) -> None:
+        incarnation, pid = self.make_active()
+        self.client.post(self.url("session/bootstrap"))
+        self.finish(incarnation, pid)
+        self.status()
+        after = self.rows("select count(*) from run_records") + self.rows("select count(*) from execution_packages")
+        self.assertEqual(after, self.tables_before)
+        self.assertEqual(self.rows("select count(*) from report_records"), [(0,)])
+
+    def test_two_workers_in_one_project_are_independent(self) -> None:
+        self.make_active()
+        other = self.registry.register_agent(OWNER, display_name="Codex", runtime_adapter="claude-code",
+                                             provider_id="x", model_id="m", capabilities=WORKER_CAPS)
+        self.registry.create_assignment(OWNER, 1, agent_id=other["agent_id"], role="worker", capabilities=WORKER_CAPS)
+        self.assertEqual(self.activate(agent=other["agent_id"]).json()["state"], "connecting")
+        listed = {w["agent"]["display_name"]: w["session"]["state"] for w in self.client.get("/api/projects/P0001/workers").json()}
+        self.assertEqual(listed, {"Claude Code": "active", "Codex": "connecting"})
+        self.assertEqual(len(self.rows("select * from worker_sessions")), 2)
+
+
+class HookScriptTests(unittest.TestCase):
+    """The stdlib hook script itself: evidence only for a requested bootstrap, correlated by token."""
+
+    def setUp(self) -> None:
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.dir = Path(self.tmp.name)
+        self.nonce = str(uuid.uuid4())
+        self.target = str(self.dir / f"{self.nonce}.ack.json")
+
+    def run_hook(self, mode: str, event: dict, env: bool = True) -> None:
+        environ = {**os.environ, NONCE_ENV: self.nonce, FILE_ENV: self.target} if env else {
+            k: v for k, v in os.environ.items() if k not in (NONCE_ENV, FILE_ENV)}
+        done = subprocess.run([sys.executable, str(ACK_SCRIPT), mode], input=json.dumps(event), text=True, env=environ,
+                              capture_output=True, timeout=20)
+        self.assertEqual((done.returncode, done.stdout), (0, ""))
+
+    def request(self, token: str = "tok-1") -> None:
+        (self.dir / f"{self.nonce}.request.json").write_text(json.dumps({"incarnation": self.nonce, "token": token}))
+
+    def files(self) -> list[str]:
+        return sorted(p.name for p in self.dir.iterdir())
+
+    def test_read_is_recorded_only_while_a_request_exists_and_only_for_the_read_tool(self) -> None:
+        read = {"tool_name": "Read", "tool_input": {"file_path": "/p/AGENTS.md"}}
+        self.run_hook("read", read)
+        self.assertEqual(self.files(), [])
+        self.request()
+        self.run_hook("read", {"tool_name": "Bash", "tool_input": {"file_path": "/p/x"}})
+        self.assertEqual(self.files(), [f"{self.nonce}.request.json"])
+        self.run_hook("read", read)
+        self.assertIn(f"{self.nonce}.reads.jsonl", self.files())
+
+    def test_stop_acknowledges_only_the_correlated_marker_once(self) -> None:
+        self.request()
+        self.run_hook("read", {"tool_name": "Read", "tool_input": {"file_path": "/p/AGENTS.md"}})
+        done = self.dir / f"{self.nonce}.bootstrap.json"
+        self.run_hook("stop", {"last_assistant_message": "ROSC-BOOTSTRAP other-token OK"})
+        self.run_hook("stop", {"last_assistant_message": "I read it, all good"})
+        self.run_hook("stop", {})
+        self.assertFalse(done.exists())
+        self.run_hook("stop", {"last_assistant_message": "прочитал\nROSC-BOOTSTRAP tok-1 OK"})
+        data = json.loads(done.read_text())
+        self.assertEqual((data["token"], data["claimed"], data["observed_reads"]), ("tok-1", "OK", ["/p/AGENTS.md"]))
+        self.assertEqual(data["incarnation"], self.nonce)
+        first = done.read_text()
+        self.run_hook("stop", {"last_assistant_message": "ROSC-BOOTSTRAP tok-1 FAILED"})
+        self.assertEqual(done.read_text(), first)  # an acknowledgement is never overwritten
+
+    def test_submit_hook_reports_only_the_requested_token(self) -> None:
+        self.request()
+        done = self.dir / f"{self.nonce}.submitted.json"
+        self.run_hook("submit", {"prompt": "something else entirely"})
+        self.assertFalse(done.exists())
+        self.run_hook("submit", {"prompt": "[ROSC bootstrap tok-1] читай"})
+        self.assertEqual(json.loads(done.read_text())["token"], "tok-1")
+
+    def test_no_op_outside_a_rosc_managed_session(self) -> None:
+        self.request()
+        self.run_hook("session", {"hook_event_name": "SessionStart"}, env=False)
+        self.run_hook("stop", {"last_assistant_message": "ROSC-BOOTSTRAP tok-1 OK"}, env=False)
+        self.assertEqual(self.files(), [f"{self.nonce}.request.json"])
+
+
 class RealTmuxTests(SessionCase):
     """Real tmux + real hook script + fake CLI.  Own socket and always torn down; Owner's tmux is never addressed."""
     ack_wait = 10.0

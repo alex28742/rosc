@@ -296,18 +296,22 @@ export type TaskAuthoringControls = {
   onApprove: () => Promise<string | null>;
 };
 
-/** P042A: Worker selection and external CLI-session controls for ONE open Task. Reads never start anything. */
+/** What one Worker row is doing right now. Per agent: a request for one Worker never blocks or labels another. */
+export type WorkerBusy = 'check' | 'activate' | 'bootstrap';
+/**
+ * P042A: every active Project Worker is its own row with its own independent actions. Reads never start anything;
+ * only `onActivate` (may start a CLI) and `onBootstrap` (asks an active CLI to read the entry points) are explicit.
+ */
 export type TaskWorkerControls = {
   status: LoadStatus;
   workers: ProjectWorker[];
-  /** Selected Worker (agent_id) for this Task; '' when none. Local UI choice only. */
-  selectedId: string;
-  busy: boolean;
-  onSelect: (agentId: string) => void;
-  /** «Проверить сессию»: read-only re-observation. */
-  onCheck: () => Promise<string | null>;
-  /** «Активировать сессию»: the explicit action. Resolves to an error text or null. */
-  onActivate: () => Promise<string | null>;
+  /** In-flight action per agent_id (absent = idle). */
+  busy: Record<string, WorkerBusy>;
+  /** Last failure per agent_id; cleared by that agent's next action. */
+  errors: Record<string, string>;
+  onCheck: (agentId: string) => Promise<void>;
+  onActivate: (agentId: string) => Promise<void>;
+  onBootstrap: (agentId: string) => Promise<void>;
 };
 
 export type TaskViewProps = {

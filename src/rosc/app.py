@@ -753,6 +753,10 @@ def create_app(db_path: Path | None = None, workspace_root: Path | None = None, 
     def worker_session_activate(project_id: str, agent_id: str) -> dict:
         return registry_call(worker_sessions.activate, current_actor(), numeric_id(project_id, "P"), agent_path_id(agent_id))
 
+    @app.post("/api/projects/{project_id}/workers/{agent_id}/session/bootstrap")
+    def worker_session_bootstrap(project_id: str, agent_id: str) -> dict:
+        return registry_call(worker_sessions.bootstrap, current_actor(), numeric_id(project_id, "P"), agent_path_id(agent_id))
+
     # -- M3-B explicit Project Architect activation, liveness and delivery recovery ----------------------------
     @app.get("/api/projects/{project_id}/architect")
     def architect_status(project_id: str) -> dict:
