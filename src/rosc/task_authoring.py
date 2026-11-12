@@ -506,7 +506,7 @@ class TaskAuthoringService:
         return {
             "task_id": f"T{task_id:04d}", "editable": editable,
             "spec": spec_view(spec_head, head=True), "prompt": prompt, "prompt_history": prompt_history,
-            "run": {"authorized": False, "label": "Run не авторизован", "worker": "Worker не запускался"},
+            "run": {"authorized": False, "label": "Run не запускался", "worker": "Worker не запускался"},
             "next": self._next(state, head, editable),
         }
 
@@ -523,6 +523,6 @@ class TaskAuthoringService:
                     "hint": "Spec изменилась после этого Draft. Пересмотрите текст и резюме под текущую Spec."}
         if state == "unapproved":
             return {"action": "review_prompt", "label": "Просмотреть и утвердить Prompt", "enabled": True,
-                    "next_actor": "Owner", "hint": "Утверждение Draft не даёт разрешения на запуск."}
+                    "next_actor": "Owner", "hint": "Утверждение Draft не запускает Worker: Run запускает Owner одной командой."}
         return {"action": "authorize_run", "label": "Запустить Run", "enabled": False, "next_actor": "Owner",
                 "hint": "Запуск Run станет доступен после подключения Worker и передачи задания (P042)", "secondary": "Просмотреть утверждённый Draft"}

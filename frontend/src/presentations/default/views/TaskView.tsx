@@ -108,7 +108,7 @@ export function TaskView({ projectName, taskId, task, tasksStatus, feedback, ine
           <div className="rosc-task-heading">
             <div>
               <h3>{spec?.title ?? task.title}</h3>
-              <p>Task {task.id} · {spec ? `Spec v${spec.revision}` : 'Spec'} · {data?.run.label ?? 'Run не авторизован'} · Исполнитель: не назначен</p>
+              <p>Task {task.id} · {spec ? `Spec v${spec.revision}` : 'Spec'} · {data?.run.label ?? 'Run не запускался'} · Исполнитель: не назначен</p>
             </div>
             <div className="rosc-task-heading__flags">
               <span className="rosc-chip">Проект: {projectName}</span>
@@ -121,7 +121,7 @@ export function TaskView({ projectName, taskId, task, tasksStatus, feedback, ine
                 {shown && <span className="rosc-chip" data-testid="spec-version">Spec v{shown.revision}</span>}
                 {shown && <span className="rosc-chip">Автор: {shown.provenance === 'architect' ? 'Architect' : shown.provenance === 'legacy_import' ? 'импорт' : 'Owner'}</span>}
                 {data?.prompt?.state === 'stale' && <span className="rosc-tag rosc-tag--warning">Prompt устарел</span>}
-                <span className="rosc-chip">{data?.editable ? 'Редактируется до разрешения Run' : 'Зафиксирована'}</span>
+                <span className="rosc-chip">{data?.editable ? 'Редактируется до запуска Run' : 'Зафиксирована'}</span>
               </span>
             </div>
             {authoring.status === 'failed' && <p className="rosc-task-spec__error" role="alert">Не удалось загрузить Spec. {authoring.error} <button type="button" className="rosc-task-link" onClick={authoring.onReload}>Повторить</button></p>}
@@ -240,7 +240,7 @@ export function TaskView({ projectName, taskId, task, tasksStatus, feedback, ine
                   </div>
                 </div>
               </div>
-              <div className="rosc-task-panel__foot"><span>Утверждение Draft не разрешает запуск: разрешение Run — отдельная операция Core.</span></div>
+              <div className="rosc-task-panel__foot"><span>Утверждение Draft не запускает Worker: Owner запускает Run одной командой после выбора доступного Worker.</span></div>
             </section>
           </div>
         </div>

@@ -81,7 +81,7 @@ export const taskAuthoring = (over: Partial<TaskAuthoring> = {}): TaskAuthoring 
   spec: { revision: 1, title: 'Task T0001', scope: '', description_html: '<p>Do T0001</p>', criteria_html: '<p>Done T0001</p>',
     description_text: 'Do T0001', acceptance_criteria_text: 'Done T0001', digest: 'd'.repeat(64), provenance: 'owner',
     actor: { kind: 'owner', id: 'local-owner' }, created_at: '2026-10-31T00:00:00Z', current: true },
-  prompt: null, prompt_history: [], run: { authorized: false, label: 'Run не авторизован', worker: 'Worker не запускался' },
+  prompt: null, prompt_history: [], run: { authorized: false, label: 'Run не запускался', worker: 'Worker не запускался' },
   next: { action: 'create_prompt', label: 'Создать Prompt Draft', enabled: true, next_actor: 'Owner', hint: 'Создание Draft не запускает Worker.' },
   ...over,
 });

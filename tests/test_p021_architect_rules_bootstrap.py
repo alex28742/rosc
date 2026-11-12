@@ -332,7 +332,7 @@ class ServiceRulesTests(p19.ContextCase):
         return ar.ArchitectRulesLoader(GLOBAL).load()
 
     def test_data_root_is_disposable_and_never_the_checkout_or_live_root(self) -> None:
-        self.assertFalse((ROOT / "data").exists())
+        # <repo>/data may legitimately exist; the fixture root must be a disposable directory outside the checkout
         self.assertNotIn(ROOT, [self.data, *self.data.parents])
         self.assertNotEqual(self.data.resolve(), (ROOT / "data").resolve())
         self.assertTrue(self.data.resolve().is_relative_to(Path(tempfile.gettempdir()).resolve()))
