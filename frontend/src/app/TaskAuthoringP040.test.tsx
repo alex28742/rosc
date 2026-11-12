@@ -133,8 +133,8 @@ describe('Context & actions and the Prompt Draft drawer (P040)', () => {
     expect(ctx.getByTestId('draft-fact').textContent).toContain('утверждён');
     expect(ctx.getByText('Run не запускался')).toBeTruthy();
     const worker = within(ctx.getByLabelText('Worker этой Task'));
-    expect(worker.getByText('Не активен')).toBeTruthy();
-    expect((worker.getByRole('button', { name: 'Активировать' }) as HTMLButtonElement).disabled).toBe(true);
+    expect(worker.getByText('Не выбран')).toBeTruthy();
+    expect((worker.getByRole('button', { name: 'Активировать сессию' }) as HTMLButtonElement).disabled).toBe(true);
     fireEvent.click(ctx.getByRole('button', { name: 'Prompt / контракт' }));
     const dialog = within(await screen.findByRole('dialog'));
     expect((dialog.getByRole('button', { name: 'Draft v1 утверждён' }) as HTMLButtonElement).disabled).toBe(true);

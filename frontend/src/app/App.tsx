@@ -5,6 +5,7 @@ import { resolvePresentation } from './presentation/registry';
 import { useScrollRegions } from './scroll';
 import { useTaskAuthoring } from './useTaskAuthoring';
 import { useTaskConversation } from './useTaskConversation';
+import { useTaskWorkers } from './useTaskWorkers';
 import { useTextScale } from './useTextScale';
 import { useWorkspaceController } from './useWorkspaceController';
 
@@ -32,6 +33,8 @@ export function App({ api = coreApi }: { api?: CoreApi }) {
   const taskConversation = useTaskConversation(api, route.kind === 'task' ? route.projectId : null,
     route.kind === 'task' ? route.taskId : null);
   const taskAuthoring = useTaskAuthoring(api, route.kind === 'task' ? route.projectId : null,
+    route.kind === 'task' ? route.taskId : null);
+  const taskWorkers = useTaskWorkers(api, route.kind === 'task' ? route.projectId : null,
     route.kind === 'task' ? route.taskId : null);
   const taskLayerOpen = (route.kind === 'task' || route.kind === 'new-task') && project !== null;
   const modalOpen = core.registrationOpen;
@@ -92,6 +95,7 @@ export function App({ api = coreApi }: { api?: CoreApi }) {
       workspace={workspace('task')}
       conversation={taskConversation}
       authoring={taskAuthoring}
+      workers={taskWorkers}
       textScale={taskTextScale}
       onClose={close}
       onRetry={() => void actions.retry()}

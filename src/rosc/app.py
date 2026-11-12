@@ -30,6 +30,7 @@ from .architect_service import ArchitectService, runtime_message_id
 from .architect_tools import ToolHost
 from .project_context import ProjectContextBroker
 from .task_authoring import (AuthoringError, TaskAuthoringService)
+from .worker_session import WorkerSessionService
 from .config import data_dir, global_library_dir, repo_private_paths
 from .conversation import (DEFAULT_PAGE_SIZE, ConversationConflict, ConversationDenied, ConversationError,
                            ConversationNotFound, ConversationStoreError, InvalidConversationInput,
@@ -369,7 +370,8 @@ def create_app(db_path: Path | None = None, workspace_root: Path | None = None, 
                architect_runtime: ArchitectRuntime | None = None,
                global_library_root: Path | None = None,
                latency_trace: LatencyTrace | None = None,
-               architect_rules: ArchitectRulesLoader | None = None) -> FastAPI:
+               architect_rules: ArchitectRulesLoader | None = None,
+               worker_session_service: WorkerSessionService | None = None) -> FastAPI:
     """``auth_provider``/``authorization_policy`` and the ``extra_allowed_*`` sets are Python-level composition and
     test seams only. Nothing in a request (body, query, header, cookie) can select an actor, a role or these values,
     and there is deliberately no environment knob.
@@ -387,6 +389,7 @@ def create_app(db_path: Path | None = None, workspace_root: Path | None = None, 
     sessions = make_session_factory(db_path, busy_timeout_ms)
     registry = AgentRegistryService(sessions, policy)
     conversation = ProjectConversationService(sessions, policy)
+    worker_sessions = worker_session_service or WorkerSessionService(sessions, policy, db_path.parent / "worker-sessions")
     # The runtime is a Python-level composition seam like the policy: no request can select or configure it.
     library_root = global_library_root or DEFAULT_GLOBAL_LIBRARY
     authoring = TaskAuthoringService(sessions, policy, workspace_root)
@@ -736,6 +739,19 @@ def create_app(db_path: Path | None = None, workspace_root: Path | None = None, 
         # Only a NEW message may be delivered, and only to a live verified session; history is never replayed.
         result["message"]["delivery"] = architect.submit(current_actor(), pid, result["message"]["message_id"])
         return result
+
+    # -- P042A external Worker CLI session (Project + Worker). GET never starts anything; POST is the explicit action.
+    @app.get("/api/projects/{project_id}/workers")
+    def list_project_workers(project_id: str) -> list[dict]:
+        return registry_call(worker_sessions.list_workers, current_actor(), numeric_id(project_id, "P"))
+
+    @app.get("/api/projects/{project_id}/workers/{agent_id}/session")
+    def worker_session_status(project_id: str, agent_id: str) -> dict:
+        return registry_call(worker_sessions.status, current_actor(), numeric_id(project_id, "P"), agent_path_id(agent_id))
+
+    @app.post("/api/projects/{project_id}/workers/{agent_id}/session/activate")
+    def worker_session_activate(project_id: str, agent_id: str) -> dict:
+        return registry_call(worker_sessions.activate, current_actor(), numeric_id(project_id, "P"), agent_path_id(agent_id))
 
     # -- M3-B explicit Project Architect activation, liveness and delivery recovery ----------------------------
     @app.get("/api/projects/{project_id}/architect")

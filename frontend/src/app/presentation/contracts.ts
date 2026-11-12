@@ -1,7 +1,7 @@
 // The only surface a presentation package sees. Presentations render these typed view models and call these
 // callbacks; they never reach the API client, the router or Core persistence.
 import type { ComponentType, ReactNode } from 'react';
-import type { AgentDefinition, AgentFormValues, ArchitectStatus, ContextAccess, ConversationMessage, MessageRecipient, Project, PromptRevision, ProjectFormValues, RepairConfirmation, RoleAssignment, SpecRevision, SpecRevisionSummary, Task, TaskArchitectStatus, TaskAuthoring, TaskFormValues } from '../../core/models';
+import type { AgentDefinition, AgentFormValues, ArchitectStatus, ContextAccess, ConversationMessage, MessageRecipient, Project, PromptRevision, ProjectFormValues, RepairConfirmation, RoleAssignment, SpecRevision, SpecRevisionSummary, Task, TaskArchitectStatus, TaskAuthoring, TaskFormValues, ProjectWorker } from '../../core/models';
 import type { ScrollRegions } from '../scroll';
 
 export type LoadStatus = 'loading' | 'ready' | 'failed';
@@ -296,6 +296,20 @@ export type TaskAuthoringControls = {
   onApprove: () => Promise<string | null>;
 };
 
+/** P042A: Worker selection and external CLI-session controls for ONE open Task. Reads never start anything. */
+export type TaskWorkerControls = {
+  status: LoadStatus;
+  workers: ProjectWorker[];
+  /** Selected Worker (agent_id) for this Task; '' when none. Local UI choice only. */
+  selectedId: string;
+  busy: boolean;
+  onSelect: (agentId: string) => void;
+  /** «Проверить сессию»: read-only re-observation. */
+  onCheck: () => Promise<string | null>;
+  /** «Активировать сессию»: the explicit action. Resolves to an error text or null. */
+  onActivate: () => Promise<string | null>;
+};
+
 export type TaskViewProps = {
   projectName: string;
   taskId: string;
@@ -307,6 +321,7 @@ export type TaskViewProps = {
   workspace: WorkspaceControls;
   conversation: TaskConversationControls;
   authoring: TaskAuthoringControls;
+  workers: TaskWorkerControls;
   /** Independent Task Work Area text scale; never shared with Project or Dashboard. */
   textScale: TextScaleControls;
   onClose: () => void;

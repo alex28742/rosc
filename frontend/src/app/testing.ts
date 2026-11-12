@@ -1,8 +1,8 @@
 // Test fixtures shared by the application tests. Not imported by production code.
 import { vi } from 'vitest';
-import type { TaskAuthoringControls } from './presentation/contracts';
+import type { TaskAuthoringControls, TaskWorkerControls } from './presentation/contracts';
 import type { CoreApi } from '../core/api';
-import type { TaskAuthoring, AgentDefinition, ArchitectStatus, ContextAccess, ConversationMessage, ConversationPage, ConversationParticipant, TaskArchitectStatus, ConversationMessageInput, Project, RoleAssignment, Task } from '../core/models';
+import type { ProjectWorker, WorkerSession, TaskAuthoring, AgentDefinition, ArchitectStatus, ContextAccess, ConversationMessage, ConversationPage, ConversationParticipant, TaskArchitectStatus, ConversationMessageInput, Project, RoleAssignment, Task } from '../core/models';
 
 export const project = (id: string, over: Partial<Project> = {}): Project => ({
   id, name: `Project ${id}`, description: `About ${id}`, root_path: `/tmp/${id}`, mode: 'existing', docs_entrypoint: null,
@@ -93,6 +93,19 @@ export const authoringControls = (over: Partial<TaskAuthoringControls> = {}): Ta
   onSavePrompt: vi.fn(async () => null), onApprove: vi.fn(async () => null), ...over,
 });
 
+export const workerSession = (over: Partial<WorkerSession> = {}): WorkerSession => ({
+  project_id: 'P0001', agent_id: 'w-1', state: 'not_connected', reason: 'never_activated', can_activate: true, can_check: true,
+  reused: false, initialised_at: null, checked_at: '2026-11-12T00:00:00Z',
+  evidence: { tmux_alive: null, cli_observable: null, cli_session_initialised: false }, ...over,
+});
+export const projectWorker = (id = 'w-1', session: Partial<WorkerSession> = {}, name = 'Claude Code'): ProjectWorker => ({
+  agent: { agent_id: id, display_name: name, icon_label: null, runtime_adapter: 'claude-code', provider_id: 'anthropic', model_id: 'm' },
+  session: workerSession({ agent_id: id, ...session }),
+});
+export const workerControls = (over: Partial<TaskWorkerControls> = {}): TaskWorkerControls => ({
+  status: 'ready', workers: [], selectedId: '', busy: false, onSelect: vi.fn(), onCheck: vi.fn(async () => null), onActivate: vi.fn(async () => null), ...over,
+});
+
 export function stubApi(over: Partial<{ [K in keyof CoreApi]: ReturnType<typeof vi.fn> }> = {}) {
   const api = {
     listProjects: vi.fn(async () => [] as Project[]),
@@ -115,6 +128,9 @@ export function stubApi(over: Partial<{ [K in keyof CoreApi]: ReturnType<typeof 
     listAssignments: vi.fn(async () => [] as RoleAssignment[]),
     createAssignment: vi.fn(async () => roleAssignment('assignment-1')),
     revokeAssignment: vi.fn(async () => roleAssignment('assignment-1', { state: 'revoked', version: 2 })),
+    listProjectWorkers: vi.fn(async () => [] as ProjectWorker[]),
+    getWorkerSession: vi.fn(async (_projectId: string, agentId: string) => workerSession({ agent_id: agentId })),
+    activateWorkerSession: vi.fn(async (_projectId: string, agentId: string) => workerSession({ agent_id: agentId, state: 'connecting', reason: 'awaiting_ack', can_activate: false })),
     getArchitect: vi.fn(async () => architectStatus()),
     getTaskArchitect: vi.fn(async (_projectId: string, taskId: string) => taskArchitectStatus({ task_id: taskId })),
     activateTaskArchitect: vi.fn(async (_projectId: string, taskId: string) => taskArchitectStatus({ task_id: taskId, state: 'active', can_activate: false })),

@@ -85,6 +85,10 @@ TASK_SPEC_SAVE = "task.spec.save"
 PROMPT_DRAFT_READ = "task.prompt.read"
 PROMPT_DRAFT_SAVE = "task.prompt.save"
 PROMPT_APPROVE = "task.prompt.approve"
+# P042A external Worker CLI session (Project + Worker). Status is a read-only observation and never starts a process;
+# activation is the one explicit Owner action that may create/reconnect a ROSC-owned tmux session. Neither is a Run.
+WORKER_SESSION_STATUS = "worker.session.status"
+WORKER_SESSION_ACTIVATE = "worker.session.activate"
 
 # Resource shapes: which identifiers an action must carry and which it may carry.
 # (required fields, optional fields); every other field must be absent.
@@ -129,6 +133,8 @@ _SHAPES: dict[str, tuple[frozenset[str], frozenset[str]]] = {
     PROMPT_DRAFT_READ: (frozenset({"project_id", "task_id"}), frozenset()),
     PROMPT_DRAFT_SAVE: (frozenset({"project_id", "task_id"}), frozenset()),
     PROMPT_APPROVE: (frozenset({"project_id", "task_id"}), frozenset()),
+    WORKER_SESSION_STATUS: (frozenset({"project_id", "agent_id"}), frozenset()),
+    WORKER_SESSION_ACTIVATE: (frozenset({"project_id", "agent_id"}), frozenset()),
 }
 IMPLEMENTED_ACTIONS = frozenset(_SHAPES)
 

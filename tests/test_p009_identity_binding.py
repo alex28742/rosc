@@ -84,7 +84,7 @@ class FreshRegistrationTests(IdentityCase):
 
     def test_single_migration_head(self) -> None:
         from alembic.script import ScriptDirectory
-        self.assertEqual(ScriptDirectory.from_config(self.alembic).get_heads(), ["0013_execution_package_core"])
+        self.assertEqual(ScriptDirectory.from_config(self.alembic).get_heads(), ["0014_worker_sessions"])
 
     def test_read_model_adds_identity_and_keeps_legacy_root_path(self) -> None:
         root = self.new_root()
@@ -102,8 +102,12 @@ class FreshRegistrationTests(IdentityCase):
         paths = {route.path for route in app.routes if hasattr(route, "path")}
         # P011 adds Owner-only Agent registry/assignment administration; it must still add no activation, binding or
         # execution route (no RuntimeBinding, session, Run or Worker launch surface).
+        # P042A deliberately adds exactly these Owner-only Worker CLI-session routes (read, read, explicit activation).
+        p042a = {"/api/projects/{project_id}/workers", "/api/projects/{project_id}/workers/{agent_id}/session",
+                 "/api/projects/{project_id}/workers/{agent_id}/session/activate"}
+        self.assertLessEqual(p042a, paths)
         for forbidden in ("binding", "rebind", "unlink", "archive", "run", "worker", "session", "runtime"):
-            self.assertFalse([path for path in paths if forbidden in path], (forbidden, sorted(paths)))
+            self.assertFalse([path for path in paths - p042a if forbidden in path], (forbidden, sorted(paths)))
         self.assertIn("/api/projects/{project_id}/tasks", paths)
         self.assertIn("/api/agents", paths)
 

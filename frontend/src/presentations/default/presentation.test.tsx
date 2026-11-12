@@ -1,6 +1,6 @@
 import { cleanup, fireEvent, render, screen, within } from '@testing-library/react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { authoringControls, architectStatus, taskArchitectStatus, agentDefinition, contextAccess, project, roleAssignment, task } from '../../app/testing';
+import { workerControls, authoringControls, architectStatus, taskArchitectStatus, agentDefinition, contextAccess, project, roleAssignment, task } from '../../app/testing';
 import { DashboardView } from './views/DashboardView';
 import { ProjectView } from './views/ProjectView';
 import { TaskView } from './views/TaskView';
@@ -117,7 +117,7 @@ describe('Work area presentation', () => {
   });
 
   it('renders a nested Task layer that reads the Task without offering a Run', () => {
-    render(<TaskView projectName="ROSC Platform" taskId="T0001" task={T1} tasksStatus="ready" feedback={feedback} inert={false} scroll={scroll} workspace={workspace} conversation={taskConversation()} authoring={authoringControls()} textScale={textScale} onClose={vi.fn()} onRetry={vi.fn()} />);
+    render(<TaskView projectName="ROSC Platform" taskId="T0001" task={T1} tasksStatus="ready" feedback={feedback} inert={false} scroll={scroll} workspace={workspace} conversation={taskConversation()} authoring={authoringControls()} workers={workerControls()} textScale={textScale} onClose={vi.fn()} onRetry={vi.fn()} />);
     const drawer = screen.getByLabelText('Task Work Area');
     expect(within(drawer).getByLabelText('Закрыть задачу')).toBeTruthy();
     expect(within(drawer).getByLabelText('Спецификация задачи')).toBeTruthy();
@@ -128,7 +128,7 @@ describe('Work area presentation', () => {
   });
 
   it('assembles every Task Work Area region without backend data, with disabled future controls and a working rail', () => {
-    render(<TaskView projectName="ROSC Platform" taskId="T0001" task={T1} tasksStatus="ready" feedback={feedback} inert={false} scroll={scroll} workspace={workspace} conversation={taskConversation()} authoring={authoringControls()} textScale={textScale} onClose={vi.fn()} onRetry={vi.fn()} />);
+    render(<TaskView projectName="ROSC Platform" taskId="T0001" task={T1} tasksStatus="ready" feedback={feedback} inert={false} scroll={scroll} workspace={workspace} conversation={taskConversation()} authoring={authoringControls()} workers={workerControls()} textScale={textScale} onClose={vi.fn()} onRetry={vi.fn()} />);
     const drawer = screen.getByLabelText('Task Work Area');
     const main = drawer.querySelector('.rosc-task-workspace')!;
     expect(Array.from(main.children).map(child => child.className.split(' ')[0])).toEqual(['rosc-task-left', 'rosc-conversation']);
@@ -145,7 +145,7 @@ describe('Work area presentation', () => {
       expect(button.disabled, label).toBe(true);
     }
     const worker = within(within(drawer).getByLabelText('Worker этой Task'));
-    expect((worker.getByRole('button', { name: 'Активировать' }) as HTMLButtonElement).disabled).toBe(true);
+    expect((worker.getByRole('button', { name: 'Активировать сессию' }) as HTMLButtonElement).disabled).toBe(true);
     expect(within(drawer).queryByText(/B-014|S0\d|R5002/)).toBeNull();
     fireEvent.click(within(drawer).getByLabelText('Свернуть Task Conversation'));
     expect(main.className).toContain('rosc-task-workspace--collapsed');
@@ -183,7 +183,7 @@ describe('Workspace presentation', () => {
     expect(screen.getByText('Манифест Workspace соответствует записи в базе.')).toBeTruthy();
     unmount();
 
-    render(<TaskView projectName="ROSC Platform" taskId="T0001" task={task('T0001', 'P0001')} tasksStatus="ready" feedback={feedback} inert={false} scroll={scroll} workspace={workspace} conversation={taskConversation()} authoring={authoringControls()} textScale={textScale} onClose={vi.fn()} onRetry={vi.fn()} />);
+    render(<TaskView projectName="ROSC Platform" taskId="T0001" task={task('T0001', 'P0001')} tasksStatus="ready" feedback={feedback} inert={false} scroll={scroll} workspace={workspace} conversation={taskConversation()} authoring={authoringControls()} workers={workerControls()} textScale={textScale} onClose={vi.fn()} onRetry={vi.fn()} />);
     expect(screen.queryByRole('button', { name: 'Проверить Workspace' })).toBeNull();
     expect(screen.queryByRole('button', { name: 'Восстановить манифест' })).toBeNull();
     expect(workspace.onReconcile).not.toHaveBeenCalled();

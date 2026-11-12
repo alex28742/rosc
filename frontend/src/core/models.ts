@@ -269,3 +269,23 @@ export type TaskAuthoring = {
 };
 export type SpecSaveInput = { expected_revision: number; title: string; scope?: string | null; description: string; acceptance_criteria: string };
 export type PromptSaveInput = { expected_revision: number | null; source_spec_revision: number; body: string; summary: string };
+
+/** P042A: observed state of one Project+Worker external CLI session. `active` means the CLI initialised a session (verified live); it is NOT "task accepted". */
+export type WorkerSessionState = 'not_assigned' | 'not_connected' | 'connecting' | 'active' | 'unavailable' | 'unknown';
+export type WorkerSession = {
+  project_id: string;
+  agent_id: string;
+  state: WorkerSessionState;
+  /** Non-secret reason code (never a tmux/process identifier). */
+  reason: string;
+  can_activate: boolean;
+  can_check: boolean;
+  reused: boolean;
+  initialised_at: string | null;
+  checked_at: string;
+  evidence: { tmux_alive: boolean | null; cli_observable: boolean | null; cli_session_initialised: boolean };
+};
+export type ProjectWorker = {
+  agent: Pick<AgentDefinition, 'agent_id' | 'display_name' | 'icon_label' | 'runtime_adapter' | 'provider_id' | 'model_id'>;
+  session: WorkerSession;
+};

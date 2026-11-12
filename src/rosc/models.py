@@ -746,3 +746,33 @@ class ExecutionPackage(Base):
     prompt_approval_id: Mapped[int] = mapped_column(ForeignKey("prompt_approvals.id", ondelete="RESTRICT"))
     root_binding_version: Mapped[int] = mapped_column(Integer)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
+
+
+class WorkerSession(Base):
+    """P042A: durable *binding* of one Project + registered Worker to an independently running CLI session in a
+    ROSC-owned tmux server.  A row is evidence needed to re-check the session after an Engine restart; it is never
+    proof that the session is alive or ready (state is derived from live tmux/process/ack observation on each read).
+    Not a Run, not a Task context and not an AgentDefinition attribute."""
+
+    __tablename__ = "worker_sessions"
+    __table_args__ = (
+        UniqueConstraint("project_id", "agent_id", name="uq_worker_sessions_project_agent"),
+        UniqueConstraint("incarnation", name="uq_worker_sessions_incarnation"),
+    )
+
+    session_id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    project_id: Mapped[int] = mapped_column(ForeignKey("projects.id", ondelete="RESTRICT"))
+    agent_id: Mapped[str] = mapped_column(ForeignKey("agent_definitions.agent_id", ondelete="RESTRICT"))
+    # Random nonce of the CURRENT process incarnation; the CLI-side acknowledgement must echo it.
+    incarnation: Mapped[str] = mapped_column(String(36))
+    tmux_socket: Mapped[str] = mapped_column(String(64))
+    tmux_session: Mapped[str] = mapped_column(String(96))
+    pane_id: Mapped[str] = mapped_column(String(32))
+    pane_pid: Mapped[int] = mapped_column(Integer)
+    # /proc start time (clock ticks since boot): guards against PID reuse.
+    proc_start: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    workdir: Mapped[str] = mapped_column(Text)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
+    # Last observation, for diagnostics only; never trusted as current state.
+    last_observed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    last_state: Mapped[str | None] = mapped_column(String(16), nullable=True)

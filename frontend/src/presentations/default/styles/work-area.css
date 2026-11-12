@@ -3054,3 +3054,28 @@
 .rosc-task-agents__actions .rosc-btn {
   flex: 1 1 auto;
 }
+
+.rosc-task-picker {
+  margin-top: 8px;
+}
+
+.rosc-task-picker label {
+  display: block;
+  max-width: 340px;
+  font-size: calc(11px * var(--rosc-text-scale, 1));
+  color: var(--rosc-secondary);
+}
+
+.rosc-task-picker select {
+  display: block;
+  width: 100%;
+  margin-top: 3px;
+}
+
+.rosc-task-agents p.rosc-task-agents__sub {
+  margin: 4px 0 6px;
+  overflow: hidden;
+  font-size: calc(10px * var(--rosc-text-scale, 1));
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
