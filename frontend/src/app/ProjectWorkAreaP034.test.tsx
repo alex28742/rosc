@@ -1,4 +1,4 @@
-import { cleanup, fireEvent, render, screen, within } from '@testing-library/react';
+import { act, cleanup, fireEvent, render, screen, within } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { App } from './App';
 import { project, stubApi, task } from './testing';
@@ -180,5 +180,58 @@ describe('P034 Conversation footer and duplicate Architect chip', () => {
     expect(send.disabled).toBe(true);
     fireEvent.change(within(panel()).getByLabelText('Сообщение в Project Conversation'), { target: { value: 'текст' } });
     expect(send.disabled).toBe(false);
+  });
+});
+
+describe('Architect-created Tasks appear without a browser reload', () => {
+  it('quietly refreshes the visible Project Tasks list after Core gains an externally created Task', async () => {
+    vi.useFakeTimers({ toFake: ['setInterval', 'clearInterval'] });
+    try {
+      let coreTasks = [task('T0001', 'P0001')];
+      const listTasks = vi.fn(async () => coreTasks);
+      render(<App api={open({ listTasks })} />);
+      await screen.findByText('T0001 · Task T0001');
+      expect(screen.getByText('1 из 1')).toBeTruthy();
+
+      // Architect creates the Task through rosc_task_create, not through the frontend's New Task form.
+      coreTasks = [...coreTasks, task('T0002', 'P0001', { title: 'Created by Architect' })];
+      await act(async () => {
+        vi.advanceTimersByTime(4000);
+        await Promise.resolve();
+      });
+      expect(screen.getByText('T0002 · Created by Architect')).toBeTruthy();
+      expect(screen.getByText('2 из 2')).toBeTruthy();
+      expect(listTasks).toHaveBeenCalledTimes(2);
+
+      // Closing the Project stops the background requests.
+      fireEvent.click(screen.getByLabelText('Закрыть проект'));
+      const reads = listTasks.mock.calls.length;
+      await act(async () => {
+        vi.advanceTimersByTime(8000);
+        await Promise.resolve();
+      });
+      expect(listTasks).toHaveBeenCalledTimes(reads);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('keeps the already loaded list visible after a failed quiet refresh', async () => {
+    vi.useFakeTimers({ toFake: ['setInterval', 'clearInterval'] });
+    try {
+      const listTasks = vi.fn()
+        .mockResolvedValueOnce([task('T0001', 'P0001')])
+        .mockRejectedValueOnce(new Error('temporary network failure'));
+      render(<App api={open({ listTasks })} />);
+      await screen.findByText('T0001 · Task T0001');
+      await act(async () => {
+        vi.advanceTimersByTime(4000);
+        await Promise.resolve();
+      });
+      expect(screen.getByText('T0001 · Task T0001')).toBeTruthy();
+      expect(screen.queryByText('Не удалось загрузить задачи.')).toBeNull();
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });

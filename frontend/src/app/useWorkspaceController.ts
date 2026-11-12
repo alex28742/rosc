@@ -17,6 +17,8 @@ const ENGINE_KICKER = 'ROSC · СИСТЕМА';
 const ENGINE_SUCCESS_DISMISS_MS = 6500;
 const MAX_ENGINE_NOTICES = 3;
 const ONBOARDING_POLL_MS = 3000;
+/** A read-only refresh while the Project Tasks tab is visible, so Architect-created Tasks appear without a reload. */
+const TASK_LIST_POLL_MS = 4000;
 
 const engineNotice = (key: string, kind: EngineNotice['kind'], title: string, description: string): EngineNotice =>
   ({ key, kind, kicker: ENGINE_KICKER, title, description });
@@ -288,11 +290,16 @@ export function useWorkspaceController({ route, routeKey, go }: Navigation, api:
     const current = () => seq === tasksSeq.current && projectIdOf(routeRef.current) === projectId;
     try {
       const items = await trackRead(() => api.listTasks(projectId), current);
-      if (current()) setTasks({ projectId, items, status: 'ready' });
+      if (current()) setTasks(prev => {
+        // Avoid resetting pagination/scroll/render state when a quiet refresh finds no changes.
+        if (prev.projectId === projectId && prev.status === 'ready'
+          && JSON.stringify(prev.items) === JSON.stringify(items)) return prev;
+        return { projectId, items, status: 'ready' };
+      });
     } catch (e) {
-      if (!current()) return;
+      if (!current() || quiet) return; // a transient background failure must not hide the loaded Task list
       setTasks(prev => ({ projectId, items: prev.projectId === projectId ? prev.items : [], status: 'failed' }));
-      if (!quiet && epoch.current === started) setError(describeError(e));
+      if (epoch.current === started) setError(describeError(e));
     }
   }, [api, trackRead]);
 
@@ -645,6 +652,14 @@ export function useWorkspaceController({ route, routeKey, go }: Navigation, api:
     else registrySeq.current++;
   }, [settingsRoute, loadAgents]);
   const projectTab: ProjectTab = route.kind === 'project' ? (route.tab ?? 'tasks') : 'tasks';
+  // The Architect may create a Task via a Project Tool without a local Owner mutation. Read Core again while
+  // the Tasks tab is actually visible; the interval stops on Task/Settings/Project close or Project switch.
+  const tasksVisible = route.kind === 'project' && projectTab === 'tasks';
+  useEffect(() => {
+    if (!projectId || !tasksVisible) return;
+    const timer = setInterval(() => { void loadTasks(projectId, true); }, TASK_LIST_POLL_MS);
+    return () => clearInterval(timer);
+  }, [projectId, tasksVisible, loadTasks]);
   useEffect(() => {
     if (projectId && projectTab === 'settings') {
       assignmentsSeq.current++;
