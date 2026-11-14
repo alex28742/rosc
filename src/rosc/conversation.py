@@ -28,9 +28,9 @@ from sqlalchemy.orm import Session, sessionmaker
 from .authorization import (CONVERSATION_MESSAGE_CREATE, CONVERSATION_READ, ActorContext, AuthorizationPolicy,
                             ResourceScope, evaluate)
 from .models import (CONVERSATION_KIND_PROJECT, MAX_CLIENT_KEY, MAX_MESSAGE_BODY, PARTICIPANT_ARCHITECT,
-                     PARTICIPANT_OWNER, PARTICIPANT_WORKER, Conversation, ConversationMessage, ConversationDelivery, ConversationParticipant,
-                     CONVERSATION_KIND_TASK, RECIPIENT_ARCHITECT, Project, ProjectIdentityError, Task,
-                     validate_project_identity)
+                     PARTICIPANT_OWNER, PARTICIPANT_WORKER, AgentDefinition, Conversation, ConversationMessage,
+                     ConversationDelivery, ConversationParticipant, CONVERSATION_KIND_TASK, MessageEnvelope,
+                     MessageParty, RECIPIENT_ARCHITECT, Project, ProjectIdentityError, Task, validate_project_identity)
 
 # Failure codes after which nothing can have reached the provider, so an explicit retry cannot duplicate a turn.
 SAFE_RETRY_CODES = frozenset({"session_not_ready", "connection_failed", "not_received", "assignment_changed"})
@@ -206,6 +206,58 @@ def message_view(message: ConversationMessage, sender: ConversationParticipant,
     return view
 
 
+def group_metadata(session: Session, message_ids: list[str]) -> dict[str, dict]:
+    """P046: the immutable P043B group envelope (``to``/``audience``/``reply_to``/round/turn) of the given messages, keyed
+    by message id.  Messages without an envelope (legacy P014/P038 API) are absent: their addressing is ``recipient``."""
+    if not message_ids:
+        return {}
+    try:
+        envelopes = {e.message_id: e for e in session.scalars(select(MessageEnvelope).where(
+            MessageEnvelope.message_id.in_(message_ids)))}
+    except OperationalError:  # a database not yet upgraded to the P043B schema: legacy messages only
+        return {}
+    parties: dict[str, dict[str, list[str]]] = {}
+    for party in session.scalars(select(MessageParty).where(MessageParty.message_id.in_(list(envelopes))).order_by(
+            MessageParty.message_id, MessageParty.role, MessageParty.party_ref)):
+        parties.setdefault(party.message_id, {"to": [], "audience": []})[party.role].append(party.party_ref)
+    parents = [e.reply_to_message_id for e in envelopes.values() if e.reply_to_message_id]
+    ordinals = {m.message_id: m.ordinal for m in session.scalars(select(ConversationMessage).where(
+        ConversationMessage.message_id.in_(parents)))} if parents else {}
+    return {message_id: {
+        "to": parties.get(message_id, {}).get("to", []),
+        "audience": parties.get(message_id, {}).get("audience", []),
+        "reply_to": envelope.reply_to_message_id,
+        "reply_to_ordinal": ordinals.get(envelope.reply_to_message_id) if envelope.reply_to_message_id else None,
+        "round_id": envelope.round_id, "turn_id": envelope.turn_id, "sender_agent_id": envelope.sender_agent_id,
+    } for message_id, envelope in envelopes.items()}
+
+
+def agent_names(session: Session, agent_ids: set[str]) -> dict[str, str]:
+    ids = {a for a in agent_ids if a}
+    return {a.agent_id: a.display_name for a in session.scalars(select(AgentDefinition).where(
+        AgentDefinition.agent_id.in_(ids)))} if ids else {}
+
+
+def decorate_messages(session: Session, rows: list[ConversationMessage], views: list[dict]) -> list[dict]:
+    """Adds ``group`` (envelope or null) and the registered display name of an Agent sender; never changes old fields."""
+    groups = group_metadata(session, [row.message_id for row in rows])
+    names = agent_names(session, {view["sender"].get("agent_id") for view in views})
+    for row, view in zip(rows, views):
+        view["group"] = groups.get(row.message_id)
+        agent_id = view["sender"].get("agent_id")
+        view["sender"]["agent_display_name"] = names.get(agent_id) if agent_id else None
+    return views
+
+
+def load_message_view(session: Session, message_id: str) -> dict:
+    """One decorated message view (legacy shape + ``group``), as returned by the paged read."""
+    row = session.get(ConversationMessage, message_id)
+    sender = session.get(ConversationParticipant, row.sender_participant_id) if row is not None else None
+    if row is None or sender is None:
+        raise ConversationStoreError("Conversation records are inconsistent")
+    return decorate_messages(session, [row], [message_view(row, sender, session.get(ConversationDelivery, message_id))])[0]
+
+
 def _empty_page(project_id: int, limit: int, task_id: int | None = None) -> dict:
     return {
         "project_id": _project_label(project_id),
@@ -338,6 +390,7 @@ class ProjectConversationService:
             if sender is None:
                 raise ConversationStoreError("Conversation records are inconsistent")
             messages.append(message_view(row, sender, deliveries.get(row.message_id)))
+        decorate_messages(session, window, messages)
         return {
             "project_id": _project_label(conversation.project_id),
             "task_id": None if conversation.task_id is None else _task_label(conversation.task_id),

@@ -34,7 +34,7 @@ describe('Task Conversation with a live Project Architect (P039)', () => {
     render(<App api={api} />);
     const view = within(await screen.findByLabelText('Task Conversation'));
     await view.findByText('Architect: не активен');
-    fireEvent.change(view.getByLabelText('Адресат сообщения'), { target: { value: 'architect' } });
+    fireEvent.click(view.getByLabelText('Адресовать Architect'));
     fireEvent.change(view.getByLabelText('Сообщение в Task Conversation'), { target: { value: 'Что делаем в T1?' } });
     fireEvent.click(view.getByRole('button', { name: 'Отправить' }));
     await waitFor(() => expect(send).toHaveBeenCalledWith('P0001', 'T0001', owner.message_id));

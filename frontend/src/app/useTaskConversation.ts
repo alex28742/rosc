@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import { describeError, type CoreApi } from '../core/api';
 import type { ArchitectStatus, TaskArchitectStatus, ConversationMessage, MessageDelivery, MessageRecipient } from '../core/models';
 import type { TaskConversationControls } from './presentation/contracts';
+import { useGroupConversation } from './useGroupConversation';
 
 type ArchitectCache = { status: 'loading' | 'ready' | 'failed'; info: ArchitectStatus | null };
 type TaskArchitectCache = { status: 'loading' | 'ready' | 'failed'; info: TaskArchitectStatus | null; busy: boolean };
@@ -239,12 +240,25 @@ export function useTaskConversation(api: CoreApi, projectId: string | null, task
     }
   }, [api, patch, projectId, taskId]);
 
+  /** P046: the group bridge re-reads or merges into the SAME canonical Task history (never a second chat). */
+  const reloadGroupMessages = useCallback(() => {
+    const current = scopeRef.current;
+    if (current && projectId && taskId && cacheRef.current.scope === current) void load(current, projectId, taskId);
+  }, [load, projectId, taskId]);
+  const mergeGroupMessage = useCallback((message: ConversationMessage) => {
+    const current = scopeRef.current;
+    if (!current) return;
+    setCache(prev => prev.scope !== current ? prev
+      : { ...prev, conversationId: message.conversation_id, messages: merge(prev.messages, [message]) });
+  }, []);
+  const group = useGroupConversation(api, projectId && taskId ? projectId : null, taskId, reloadGroupMessages, mergeGroupMessage);
+
   const { scope: _scope, architect, taskArchitect, ...state } = visible;
   void _scope;
   const onRefreshArchitect = useCallback(() => {
     const current = scopeRef.current;
     if (current && projectId && taskId) { void loadArchitect(current, projectId); void loadTaskArchitect(current, projectId, taskId); }
   }, [loadArchitect, loadTaskArchitect, projectId, taskId]);
-  return { state, architect, taskArchitect, onActivateTaskArchitect, onRefreshArchitect, onReload, onLoadOlder: () => void onLoadOlder(), onSend, onSendToArchitect, onReconcile,
+  return { state, group, architect, taskArchitect, onActivateTaskArchitect, onRefreshArchitect, onReload, onLoadOlder: () => void onLoadOlder(), onSend, onSendToArchitect, onReconcile,
     onRetryDelivery };
 }

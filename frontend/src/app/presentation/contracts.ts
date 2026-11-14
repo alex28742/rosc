@@ -1,7 +1,7 @@
 // The only surface a presentation package sees. Presentations render these typed view models and call these
 // callbacks; they never reach the API client, the router or Core persistence.
 import type { ComponentType, ReactNode } from 'react';
-import type { AgentDefinition, AgentFormValues, ArchitectStatus, ContextAccess, ConversationMessage, MessageRecipient, Project, PromptRevision, ProjectFormValues, RepairConfirmation, RoleAssignment, SpecRevision, SpecRevisionSummary, Task, TaskArchitectStatus, TaskAuthoring, TaskFormValues, ProjectWorker } from '../../core/models';
+import type { AgentDefinition, AgentFormValues, ArchitectStatus, ContextAccess, ConversationMessage, GroupStatus, MessageRecipient, Project, PromptRevision, ProjectFormValues, RepairConfirmation, RoleAssignment, SpecRevision, SpecRevisionSummary, Task, TaskArchitectStatus, TaskAuthoring, TaskFormValues, ProjectWorker } from '../../core/models';
 import type { ScrollRegions } from '../scroll';
 
 export type LoadStatus = 'loading' | 'ready' | 'failed';
@@ -212,8 +212,32 @@ export type ContextAccessControlState = {
   error: string;
 };
 
+/**
+ * P046 group conversation of one room (PC or this TC). `info` is exactly what Core reports; every mutation is an
+ * explicit Owner action and resolves to an error message or null. Only `onStart` can launch provider turns, and only
+ * for a round the Owner has already authorized.
+ */
+export type GroupControls = {
+  status: LoadStatus;
+  info: GroupStatus | null;
+  error: string;
+  /** The action currently in flight (one at a time), or null. */
+  busy: string | null;
+  onReload: () => void;
+  onPost: (body: string, clientKey: string, to: string[]) => Promise<string | null>;
+  onAuthorize: (agents: string[], quota: number, renew: boolean) => Promise<string | null>;
+  onStart: () => Promise<string | null>;
+  onControls: (change: { paused?: boolean; emergency_brake?: boolean }) => Promise<string | null>;
+  onRelease: (agentId: string) => Promise<string | null>;
+  onKeep: (agentId: string) => Promise<string | null>;
+  /** Owner Send-full / Skip for a large Passive backlog; continues the authorized queue afterwards. */
+  onCatchup: (turnId: string, choice: 'send_full' | 'skip_backlog') => Promise<string | null>;
+  onReconcile: () => Promise<string | null>;
+};
+
 export type ConversationControls = {
   state: ConversationState;
+  group: GroupControls;
   architect: ArchitectControlState;
   contextAccess: ContextAccessControlState;
   /** Explicit Owner activation of the Project Architect. Resolves to an error message or null. */
@@ -255,6 +279,7 @@ export type ProjectViewProps = {
 /** Task Conversation (P038): same state shape as the Project one, scoped to a single Task. */
 export type TaskConversationControls = {
   state: ConversationState;
+  group: GroupControls;
   /** P039: read-only Architect availability for this Project (never starts anything). */
   architect: { status: LoadStatus; info: ArchitectStatus | null };
   /** P040 r03: verified state of THIS Task's own native Architect session (read-only GET; never the Project host state). */

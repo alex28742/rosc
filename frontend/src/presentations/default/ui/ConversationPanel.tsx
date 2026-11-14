@@ -2,6 +2,8 @@ import { useEffect, useId, useMemo, useRef, useState, type FormEvent } from 'rea
 import type { ConversationControls } from '../../../app/presentation/contracts';
 import { architectReason, describeArchitect } from './architectView';
 import { findMatches, renderBody } from './chatSearch';
+import { ARCHITECT_CHIP, GroupActivityRow, GroupBar, GroupCatchupDialog, GroupParticipants, MessageAddress, RecipientChips,
+  ReleaseOffers, senderName } from './GroupConversation';
 
 type Props = {
   projectId: string;
@@ -48,8 +50,21 @@ export function ConversationPanel({ projectId, conversation, collapsed, onCollap
   const [searchOpen, setSearchOpen] = useState(false);
   const [searchTerm, setSearchTerm] = useState('');
   const [matchIndex, setMatchIndex] = useState(0);
-  /** The last submitted body with its key. Kept after a failure so an unchanged retry replays the same key. */
-  const pending = useRef<{ body: string; key: string } | null>(null);
+  /** The last submitted body + addressees with its key. Kept after a failure so an unchanged retry replays the same key. */
+  const pending = useRef<{ body: string; to: string; key: string } | null>(null);
+  const group = conversation.group;
+  const [selected, setSelected] = useState<Set<string>>(() => new Set());
+  const [groupOpen, setGroupOpen] = useState(false);
+  const [peopleOpen, setPeopleOpen] = useState(false);
+  /** Addressee chips appear once this room has an in-scope Worker; until then the composer is the plain Architect chat. */
+  const hasWorkers = (group.info?.roster ?? []).some(entry => entry.role === 'worker');
+  const workers = [...selected].filter(id => id !== ARCHITECT_CHIP);
+  const mixed = workers.length > 0 && selected.has(ARCHITECT_CHIP);
+  const toggle = (id: string) => setSelected(prev => {
+    const next = new Set(prev);
+    if (next.has(id)) next.delete(id); else next.add(id);
+    return next;
+  });
   const inFlight = useRef(false);
   const [locked, setLocked] = useState(false);
   const feed = useRef<HTMLDivElement | null>(null);
@@ -111,14 +126,17 @@ export function ConversationPanel({ projectId, conversation, collapsed, onCollap
   const submit = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
     const body = draft.trim();
-    if (!body || !ready || state.sending || inFlight.current) return;
+    if (!body || !ready || state.sending || inFlight.current || mixed) return;
     inFlight.current = true;
     setLocked(true);
-    const key = pending.current?.body === body ? pending.current.key : newClientKey();
-    pending.current = { body, key };
+    const to = workers.join(',');
+    const key = pending.current?.body === body && pending.current.to === to ? pending.current.key : newClientKey();
+    pending.current = { body, to, key };
     setFailure('');
     try {
-      const problem = await conversation.onSend(body, key);
+      // Workers selected: a P046 group message (stored only; a model runs after an explicit round grant + start).
+      // Otherwise the established Project Conversation path (delivered to a verified live Architect).
+      const problem = workers.length > 0 ? await group.onPost(body, key, workers) : await conversation.onSend(body, key);
       if (problem === null) {
         setDraft(current => current.trim() === body ? '' : current);
         pending.current = null;
@@ -148,6 +166,8 @@ export function ConversationPanel({ projectId, conversation, collapsed, onCollap
           onClick={toggleSearch}>⌕</button>
       </div>
     </header>
+    <GroupBar group={group} open={groupOpen} onOpenChange={setGroupOpen} />
+    <GroupParticipants group={group} open={peopleOpen} onOpenChange={setPeopleOpen} />
     {searchOpen && <div className="rosc-conversation__search">
       <input type="search" aria-label="Поиск по сообщениям" placeholder="Найти в переписке…"
         value={searchTerm} autoFocus
@@ -185,14 +205,18 @@ export function ConversationPanel({ projectId, conversation, collapsed, onCollap
       </div>}
       {state.messages.map(message => {
         const fromArchitect = message.sender.kind === 'architect';
+        const fromWorker = message.sender.kind === 'worker';
         const delivery = message.delivery;
+        const name = senderName(message, group.info);
         return <article key={message.message_id}
-          className={fromArchitect ? 'rosc-chat-message rosc-chat-message--architect' : 'rosc-chat-message rosc-chat-message--owner'}
+          className={fromArchitect ? 'rosc-chat-message rosc-chat-message--architect'
+            : fromWorker ? 'rosc-chat-message rosc-chat-message--worker' : 'rosc-chat-message rosc-chat-message--owner'}
           data-message-id={message.message_id}>
-          <span className="rosc-chat-avatar" aria-hidden="true">{fromArchitect ? 'A' : 'O'}</span>
+          <span className="rosc-chat-avatar" aria-hidden="true">{fromArchitect ? 'A' : fromWorker ? (name[0] ?? 'W').toUpperCase() : 'O'}</span>
           <div className="rosc-chat-bubble">
             <div className="rosc-chat-meta">
-              <span>{message.sender.display_name}</span>
+              <span>{name}{fromWorker ? ' · Worker' : ''}</span>
+              <MessageAddress message={message} info={group.info} refPrefix="" />
               <time dateTime={message.created_at}>{formatTime(message.created_at)}</time>
             </div>
             <p className="rosc-chat-body">{renderBody(message.body,
@@ -210,8 +234,16 @@ export function ConversationPanel({ projectId, conversation, collapsed, onCollap
           </div>
         </article>;
       })}
+      <GroupActivityRow info={group.info} />
     </div>
+    <ReleaseOffers group={group} />
+    <GroupCatchupDialog group={group} />
     <form className="rosc-conversation__compose" onSubmit={submit}>
+      {hasWorkers && <RecipientChips group={group} selected={selected} onToggle={toggle} disabled={locked}
+        architect={{ label: 'Architect', available: true,
+          title: live ? 'Сообщение будет передано активному Architect' : 'Architect не активирован: сообщение только сохранится' }} />}
+      {mixed && <p className="rosc-conversation__error" role="alert">
+        Групповые ходы Architect пока не интегрированы: отправьте сообщение Architect и Workers отдельно.</p>}
       <textarea aria-label="Сообщение в Project Conversation" placeholder="Обсудить задачу, задать вопрос…" rows={3}
         value={draft} readOnly={locked} aria-busy={locked}
         onChange={event => setDraft(event.target.value)}
@@ -225,12 +257,13 @@ export function ConversationPanel({ projectId, conversation, collapsed, onCollap
         <div className="rosc-conversation__recipients">
           <button type="button" className="rosc-chat-tool" disabled title="Вложения пока недоступны"
             aria-label="Прикрепить файлы — пока недоступно">📎</button>
-          <button type="button" className="rosc-chat-tool" disabled title="Адресация участников пока недоступна"
-            aria-label="@ Адресаты — пока недоступно">@ Адресаты ▾</button>
+          {!hasWorkers && <button type="button" className="rosc-chat-tool" disabled title="Адресация участников пока недоступна"
+            aria-label="@ Адресаты — пока недоступно">@ Адресаты ▾</button>}
           <small>От: Owner · local_unverified</small>
         </div>
         <button type="submit" className="rosc-btn rosc-btn--primary"
-          disabled={!draft.trim() || !ready || state.sending || locked}>{state.sending ? 'Сохранение…' : 'Отправить'}</button>
+          disabled={!draft.trim() || !ready || state.sending || locked || mixed || group.busy === 'post'}>
+          {state.sending || group.busy === 'post' ? 'Сохранение…' : workers.length > 0 ? `Отправить · ${workers.length} адресат(а/ов)` : 'Отправить'}</button>
       </div>
       {failure && <p className="rosc-conversation__error" role="alert">{failure}</p>}
       {ambiguous && <p className="rosc-conversation__hint">
@@ -239,7 +272,8 @@ export function ConversationPanel({ projectId, conversation, collapsed, onCollap
       {!ready && <p className="rosc-conversation__hint">Отправка станет доступна после загрузки истории.</p>}
       {deliveryFailure && <p className="rosc-conversation__error" role="alert">{deliveryFailure}</p>}
       <p className="rosc-conversation__hint">
-        {live ? 'Новое сообщение сохраняется в ROSC и передаётся Architect. Ранее сохранённые сообщения не пересылаются.'
+        {workers.length > 0 ? 'Сообщение сохранится в Project Conversation для выбранных Workers. Модель вызывается только после «Разрешить» и «Запустить ход» в блоке «Групповой чат».'
+          : live ? 'Новое сообщение сохраняется в ROSC и передаётся Architect. Ранее сохранённые сообщения не пересылаются.'
           : unresolved ? 'Сообщение сохраняется только в ROSC. Runtime требует безопасного разрешения; доставки и ответа не будет.'
             : 'Сообщение сохраняется только в ROSC. Architect не активирован — доставки и ответа не будет.'}
       </p>

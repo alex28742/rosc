@@ -1,5 +1,32 @@
-import type { ArchitectStatus, TaskArchitectStatus, ContextAccess, ConversationMessageInput, ConversationMessageResult, ConversationPage, DeliveryResult } from '../models';
+import type { ArchitectStatus, TaskArchitectStatus, ContextAccess, ConversationMessageInput, ConversationMessageResult, ConversationPage, DeliveryResult, GroupMember, GroupMessageInput, GroupRound, GroupStatus } from '../models';
 import { post, request } from './http';
+
+/** P046: one route core for the Project room (`taskId` null) and every Task room. */
+const groupBase = (projectId: string, taskId: string | null) =>
+  `/projects/${projectId}${taskId ? `/tasks/${taskId}` : ''}/conversation/group`;
+
+/** Read-only room state. Never claims, dispatches or launches a model. */
+export const getGroupStatus = (projectId: string, taskId: string | null) => request<GroupStatus>(groupBase(projectId, taskId));
+/** Stores one Owner group message with explicit addressees; it does not start a model turn by itself. */
+export const sendGroupMessage = (projectId: string, taskId: string | null, input: GroupMessageInput) =>
+  post<ConversationMessageResult>(`${groupBase(projectId, taskId)}/messages`, input);
+/** Explicit Owner grant of N published replies per listed Worker (or Renew of the current round). */
+export const authorizeGroupRound = (projectId: string, taskId: string | null, input: { agents: string[]; quota: number; renew: boolean }) =>
+  post<GroupRound>(`${groupBase(projectId, taskId)}/round`, input);
+/** The ONLY call that launches provider turns: runs the already-authorized queue of this room. */
+export const startGroupTurns = (projectId: string, taskId: string | null) =>
+  post<{ started: boolean; running: boolean }>(`${groupBase(projectId, taskId)}/start`);
+export const setGroupControls = (projectId: string, taskId: string | null, input: { paused?: boolean; emergency_brake?: boolean }) =>
+  post<{ paused: boolean; emergency_brake: boolean }>(`${groupBase(projectId, taskId)}/controls`, input);
+export const releaseGroupMember = (projectId: string, taskId: string | null, agentId: string) =>
+  post<GroupMember>(`${groupBase(projectId, taskId)}/members/${agentId}/release`);
+export const keepGroupMember = (projectId: string, taskId: string | null, agentId: string) =>
+  post<GroupMember>(`${groupBase(projectId, taskId)}/members/${agentId}/keep`);
+export const chooseGroupCatchup = (projectId: string, taskId: string | null, turnId: string, choice: 'send_full' | 'skip_backlog') =>
+  post<unknown>(`${groupBase(projectId, taskId)}/turns/${turnId}/catchup`, { choice });
+/** Evidence lookup for a held (UNKNOWN) turn; never re-sends. */
+export const reconcileGroup = (projectId: string, taskId: string | null) =>
+  post<{ reconciled: { turn_id: string; state: string; error_code: string | null }[] }>(`${groupBase(projectId, taskId)}/reconcile`);
 
 /** One bounded page of the durable Project Conversation; `before` asks for messages older than that ordinal. */
 export const getConversation = (projectId: string, before?: number) =>

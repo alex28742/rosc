@@ -36,6 +36,8 @@ from .conversation import (DEFAULT_PAGE_SIZE, ConversationConflict, Conversation
                            ConversationNotFound, ConversationStoreError, InvalidConversationInput,
                            ProjectConversationService, UnsafeProjectIdentity as UnsafeConversationIdentity)
 from .db import make_session_factory
+from .group_conversation import GroupConversationBridge, TransportFactory, claude_transport_factory
+from .worker_conversation import WorkerConversationCore
 from .models import (CURRENT_BINDING, Project, ProjectIdentityError, ProjectRootBinding, Task, reserved_roots,
                      validate_project_identity)
 from .workspace import (MAX_MANIFEST_BYTES, READY, WorkspaceConflict, WorkspaceError, WorkspaceUncertain, inspect_project, inspect_task, provision_project,
@@ -245,7 +247,29 @@ class TaskConversationMessageInput(ConversationMessageInput):
     recipient: Literal["architect"] | None = None
 
 
-CONVERSATION_PATH = re.compile(r"^/api/projects/[^/]+/(tasks/[^/]+/conversation(/messages(/[^/]+/send)?)?|conversation(/messages(/[^/]+/(reconcile|retry))?)?|architect/(activate|deactivate)|architect(/context-access)?|tasks/[^/]+/architect(/activate)?)$")
+class GroupMessageInput(ConversationMessageInput):
+    """P046: an Owner group message with trusted structured addressees (stable Agent ids); never an author or session."""
+
+    to: list[str] = Field(min_length=1, max_length=16)
+    reply_to: str | None = Field(default=None, max_length=64)
+
+
+class GroupRoundInput(BaseModel):
+    agents: list[str] = Field(min_length=1, max_length=16)
+    quota: int | None = None
+    renew: bool = False
+
+
+class GroupControlsInput(BaseModel):
+    paused: bool | None = None
+    emergency_brake: bool | None = None
+
+
+class GroupCatchupInput(BaseModel):
+    choice: Literal["send_full", "skip_backlog"]
+
+
+CONVERSATION_PATH = re.compile(r"^/api/projects/[^/]+/(tasks/[^/]+/conversation(/messages(/[^/]+/send)?)?|conversation(/messages(/[^/]+/(reconcile|retry))?)?|(tasks/[^/]+/)?conversation/group(/.*)?|architect/(activate|deactivate)|architect(/context-access)?|tasks/[^/]+/architect(/activate)?)$")
 DEFAULT_GLOBAL_LIBRARY = global_library_dir()  # <checkout>/global (Git-tracked); None for a non-editable install
 
 
@@ -371,7 +395,8 @@ def create_app(db_path: Path | None = None, workspace_root: Path | None = None, 
                global_library_root: Path | None = None,
                latency_trace: LatencyTrace | None = None,
                architect_rules: ArchitectRulesLoader | None = None,
-               worker_session_service: WorkerSessionService | None = None) -> FastAPI:
+               worker_session_service: WorkerSessionService | None = None,
+               group_transport_factory: TransportFactory | None = None) -> FastAPI:
     """``auth_provider``/``authorization_policy`` and the ``extra_allowed_*`` sets are Python-level composition and
     test seams only. Nothing in a request (body, query, header, cookie) can select an actor, a role or these values,
     and there is deliberately no environment knob.
@@ -402,6 +427,11 @@ def create_app(db_path: Path | None = None, workspace_root: Path | None = None, 
     tool_host = ToolHost(context_broker.call, trace)  # loopback listener starts lazily, only at an Owner activation
     architect = ArchitectService(sessions, policy, architect_runtime or OpenCodeRuntime(db_path.parent),
                                  tools=tool_host, context=context_broker, rules=architect_rules, trace=trace)
+    # P046: Owner-only group bridge over the P043B Core and the P043C Claude CLI transport.  The transport factory is a
+    # Python-level composition seam (tests inject a fake process runner); no request can select or configure it.
+    group_core = WorkerConversationCore(sessions, policy)
+    group = GroupConversationBridge(sessions, policy, group_core, group_transport_factory or claude_transport_factory(
+        sessions, db_path.parent / "conversation-evidence"))
 
     @asynccontextmanager
     async def lifespan(_app: FastAPI):
@@ -409,11 +439,13 @@ def create_app(db_path: Path | None = None, workspace_root: Path | None = None, 
             architect.recover()  # pending work of a dead process becomes unknown (nothing re-sent); P028: Tools of a verified live session reconnect
         except OperationalError:
             log.warning("Architect recovery skipped: database is not migrated")
+        group.recover_all()  # interrupted group turns become explicit states; no provider call
         yield
         tool_host.shutdown()
 
     app = FastAPI(title="ROSC Core", version="0.1.0", lifespan=lifespan)
     app.state.architect = architect
+    app.state.group = group
 
     @app.exception_handler(RequestValidationError)
     async def validation_failed(request: Request, exc: RequestValidationError):
@@ -818,6 +850,73 @@ def create_app(db_path: Path | None = None, workspace_root: Path | None = None, 
     def retry_delivery(project_id: str, message_id: str) -> dict:
         return {"delivery": conversation_call(architect.retry, current_actor(), numeric_id(project_id, "P"),
                                               message_id)}
+
+    # -- P046 group conversation (PC and every TC share one route core; GET never launches anything) -------------
+    def group_routes(prefix: str, scope) -> None:
+        """Registers the group routes under ``prefix``; ``scope(**path)`` -> (project_id, task_id | None)."""
+
+        @app.get(prefix)
+        def group_status(project_id: str, task_id: str | None = None) -> dict:
+            pid, tid = scope(project_id, task_id)
+            return conversation_call(group.status, current_actor(), pid, tid)
+
+        @app.post(f"{prefix}/messages", status_code=201)
+        def group_message(project_id: str, data: GroupMessageInput, response: Response, task_id: str | None = None) -> dict:
+            pid, tid = scope(project_id, task_id)
+            result = conversation_call(group.post_message, current_actor(), pid, tid, client_key=data.client_key,
+                                       body=data.body, to=data.to, reply_to=data.reply_to)
+            if result["replayed"]:
+                response.status_code = 200
+            return result
+
+        @app.post(f"{prefix}/round")
+        def group_round(project_id: str, data: GroupRoundInput, task_id: str | None = None) -> dict:
+            pid, tid = scope(project_id, task_id)
+            return conversation_call(group.authorize_round, current_actor(), pid, tid, agents=data.agents,
+                                     quota=data.quota, renew=data.renew)
+
+        @app.post(f"{prefix}/start")
+        def group_start(project_id: str, task_id: str | None = None) -> dict:
+            pid, tid = scope(project_id, task_id)
+            return conversation_call(group.start, current_actor(), pid, tid)
+
+        @app.post(f"{prefix}/controls")
+        def group_controls(project_id: str, data: GroupControlsInput, task_id: str | None = None) -> dict:
+            pid, tid = scope(project_id, task_id)
+            return conversation_call(group.set_controls, current_actor(), pid, tid, paused=data.paused,
+                                     emergency_brake=data.emergency_brake)
+
+        @app.post(f"{prefix}/members/{{agent_id}}/release")
+        def group_release(project_id: str, agent_id: str, task_id: str | None = None) -> dict:
+            pid, tid = scope(project_id, task_id)
+            return conversation_call(group.release, current_actor(), pid, tid, agent_path_id(agent_id))
+
+        @app.post(f"{prefix}/members/{{agent_id}}/keep")
+        def group_keep(project_id: str, agent_id: str, task_id: str | None = None) -> dict:
+            pid, tid = scope(project_id, task_id)
+            return conversation_call(group.keep, current_actor(), pid, tid, agent_path_id(agent_id))
+
+        @app.post(f"{prefix}/turns/{{turn_id}}/catchup")
+        def group_catchup(project_id: str, turn_id: str, data: GroupCatchupInput, task_id: str | None = None) -> dict:
+            pid, tid = scope(project_id, task_id)
+            return conversation_call(group.choose_catchup, current_actor(), pid, tid, agent_path_id(turn_id),
+                                     data.choice)
+
+        @app.post(f"{prefix}/reconcile")
+        def group_reconcile(project_id: str, task_id: str | None = None) -> dict:
+            pid, tid = scope(project_id, task_id)
+            return conversation_call(group.reconcile, current_actor(), pid, tid)
+
+    def project_scope(project_id: str, task_id: str | None) -> tuple[int, None]:
+        return numeric_id(project_id, "P"), None
+
+    def task_scope(project_id: str, task_id: str | None) -> tuple[int, int]:
+        if task_id is None:
+            raise HTTPException(404, "Not found")
+        return numeric_id(project_id, "P"), numeric_id(task_id, "T")
+
+    group_routes("/api/projects/{project_id}/conversation/group", project_scope)
+    group_routes("/api/projects/{project_id}/tasks/{task_id}/conversation/group", task_scope)
 
     return app
 

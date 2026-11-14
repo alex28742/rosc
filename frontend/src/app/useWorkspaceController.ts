@@ -5,6 +5,7 @@ import type { Navigation } from './navigation';
 import type { AgentRegistryState, AssignmentIntent, EngineNotice, Feedback, LoadStatus, ProjectAssignmentsState, ProjectTab } from './presentation/contracts';
 import { assignmentBaseline, ROLE_REQUIRED_CAPABILITIES } from './presentation/contracts';
 import { projectIdOf } from './route';
+import { useGroupConversation } from './useGroupConversation';
 
 export type Layer = 'dashboard' | 'project' | 'task' | 'modal' | 'settings';
 
@@ -628,6 +629,19 @@ export function useWorkspaceController({ route, routeKey, go }: Navigation, api:
     }
   }, [api, patchChat]);
 
+  /** P046: the group bridge re-reads or merges into the SAME canonical Project history (never a second chat). */
+  const reloadGroupMessages = useCallback(() => {
+    const id = projectIdOf(routeRef.current);
+    if (id && chatRef.current.projectId === id) void loadConversation(id);
+  }, [loadConversation]);
+  const mergeGroupMessage = useCallback((message: ConversationMessage) => {
+    const id = projectIdOf(routeRef.current);
+    if (!id) return;
+    setChat(prev => prev.projectId !== id ? prev
+      : { ...prev, conversationId: message.conversation_id, messages: mergeMessages(prev.messages, [message]) });
+  }, []);
+  const group = useGroupConversation(api, projectId, null, reloadGroupMessages, mergeGroupMessage);
+
   // Effect order matters: the first one starts a new message epoch before the loaders capture it.
   useEffect(() => { epoch.current++; setError(''); setNotice(''); }, [routeKey]);
   useEffect(() => { void loadProjects(); }, [loadProjects]);
@@ -817,6 +831,7 @@ export function useWorkspaceController({ route, routeKey, go }: Navigation, api:
       hasMore: chatCache.hasMore, nextBefore: chatCache.nextBefore, error: chatCache.error,
       sending: chatCache.sending, olderLoading: chatCache.olderLoading,
     },
+    group,
     architect: {
       status: architect.projectId === projectId ? architect.status : 'loading' as LoadStatus,
       info: architect.projectId === projectId ? architect.info : null,

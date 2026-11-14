@@ -1,7 +1,8 @@
 """P043C (Prompt 045): real Claude Code CLI transport for the P043B Worker Conversation Core.
 
-Backend-only and disabled for regular users: nothing here is wired into ``app.py`` routes or any background loop.  The
-only callers are tests and the explicit Owner-invoked isolated smoke (``scripts/p045_claude_smoke.py``).
+P046 wires it into the Owner-only group bridge (``group_conversation.py``): a turn is launched only by an explicit
+Owner ``start`` POST after an explicit round grant, on a bounded per-room driver; there is still no background loop,
+no launch from a read, and the isolated smoke (``scripts/p045_claude_smoke.py``) keeps working.
 
 Transport shape (``T2`` from the P043A research): ONE headless ``claude -p`` process per authorized Agent turn, on the
 Core-persisted native lane ``LaneRef.native_session_id`` — ``--session-id <id>`` for the lane's first turn,
@@ -17,7 +18,9 @@ custom agents/commands from user/project config), ``--tools ""`` (no native tool
 Evidence and truthful status (``<evidence_dir>/lanes/<lane_id>/<correlation_id>/``, dirs 0700, files 0600, atomic
 writes; never in git, never credentials):
 
-* ``intent.json`` is written and fsynced BEFORE spawn.  No intent => provably never launched => ``not_received``.
+* ``intent.json`` is written and fsynced BEFORE spawn.  A lookup only happens for a Core-submitted turn, so a missing,
+  corrupted or inconsistent intent is ``unknown`` (P046 fail-closed), never "never launched"; only an intent recording
+  an ``exec`` failure (or the CLI's zero-API ``--resume`` refusal) proves ``not_received``.
 * the process's stdin is ``prompt.txt`` and its stdout/stderr go straight to files, so a completed provider result
   survives a crash of the ROSC driver between process exit and Core publication; ``lookup`` re-derives it from the
   CLI's own structured ``stream-json`` output (never terminal scraping, never provider transcript parsing).
@@ -145,9 +148,10 @@ def _write_json(path: Path, value: dict) -> None:
 
 
 def _read_json(path: Path) -> dict | None:
+    """The JSON object stored at ``path``, or None when it is missing, unreadable or not a JSON object."""
     try:
         value = json.loads(path.read_text(encoding="utf-8"))
-    except FileNotFoundError:
+    except (OSError, ValueError):
         return None
     return value if isinstance(value, dict) else None
 
@@ -318,6 +322,21 @@ class ClaudeConversationTransport:
             return LookupOutcome(LOOKUP_REPLY, text=text)
         return LookupOutcome(status)
 
+    def activity(self, lane: LaneRef, correlation_id: str) -> str | None:
+        """Read-only observation for the UI (never changes Core state, never launches anything): ``cli_confirmed``
+        only while a ROSC-launched CLI holds this lane AND its own ``init`` event named the lane's native session;
+        ``awaiting_confirmation`` while a launch is recorded without that proof; ``None`` without any launch record."""
+        try:
+            turn_dir = self._turn_dir(lane, correlation_id)
+        except TransportConfigError:
+            return None
+        intent = _read_json(turn_dir / "intent.json")
+        if intent is None or intent.get("lane_id") != lane.lane_id:
+            return None
+        if self._facts(turn_dir).init_session_id == lane.native_session_id and self.busy(lane):
+            return "cli_confirmed"
+        return "awaiting_confirmation"
+
     # ------------------------------------------------------------------ internals
     def _validate(self, lane: LaneRef, payload: TurnPayload) -> tuple[str | None, dict]:
         """Correlate before launch: the persisted turn/lane/project/binding must match exactly what we were given."""
@@ -469,11 +488,19 @@ class ClaudeConversationTransport:
             return StreamFacts()
 
     def _classify(self, lane: LaneRef, turn_dir: Path, *, finished: dict | None = None) -> tuple[str, str, str | None]:
-        """Evidence-only classification -> (lookup status, reason, reply text)."""
+        """Evidence-only classification -> (lookup status, reason, reply text).
+
+        P046 fail-closed rule: a lookup is only ever made for a turn the Core already recorded as submitted (UNKNOWN /
+        accepted reconcile, or a refused duplicate submit), so ABSENT, unreadable or inconsistent evidence can never
+        prove that nothing was launched: it is ``unknown``.  ``not_received`` requires positive durable proof of zero
+        launch — an intent recording an ``exec`` failure, or the CLI's own zero-API-time ``--resume`` refusal.  Genuine
+        pre-spawn refusals stay safely retryable because ``submit`` returns them directly (``not_accepted``)."""
         intent = _read_json(turn_dir / "intent.json")
         if intent is None:
-            return LOOKUP_NOT_RECEIVED, "never_launched", None
-        if intent.get("native_session_id") != lane.native_session_id or intent.get("lane_id") != lane.lane_id:
+            return LOOKUP_UNKNOWN, "evidence_missing" if not (turn_dir / "intent.json").exists() \
+                else "evidence_corrupt", None
+        if (intent.get("native_session_id") != lane.native_session_id or intent.get("lane_id") != lane.lane_id
+                or intent.get("correlation_id") != turn_dir.name):
             return LOOKUP_UNKNOWN, "evidence_mismatch", None
         if intent.get("launch") == "spawn_failed":
             return LOOKUP_NOT_RECEIVED, "launch_failed", None

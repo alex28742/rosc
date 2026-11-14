@@ -1,6 +1,6 @@
 import { cleanup, fireEvent, render, screen, within } from '@testing-library/react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { workerControls, authoringControls, architectStatus, taskArchitectStatus, agentDefinition, contextAccess, project, roleAssignment, task } from '../../app/testing';
+import { groupControls, workerControls, authoringControls, architectStatus, taskArchitectStatus, agentDefinition, contextAccess, project, roleAssignment, task } from '../../app/testing';
 import { DashboardView } from './views/DashboardView';
 import { ProjectView } from './views/ProjectView';
 import { TaskView } from './views/TaskView';
@@ -17,6 +17,7 @@ const scroll = { region: () => () => {} };
 const workspace = { busy: false, onReconcile: vi.fn(), onRepair: vi.fn() };
 const textScale = { scale: 100 as const, onChange: vi.fn() };
 const taskConversation = () => ({
+  group: groupControls(),
   state: { status: 'ready' as const, conversationId: null, messages: [], hasMore: false, nextBefore: null,
     error: '', sending: false, olderLoading: false },
   architect: { status: 'ready' as const, info: null },
@@ -27,6 +28,7 @@ const taskConversation = () => ({
 });
 
 const conversation = () => ({
+  group: groupControls(),
   state: { status: 'ready' as const, conversationId: null, messages: [], hasMore: false, nextBefore: null,
     error: '', sending: false, olderLoading: false },
   architect: { status: 'ready' as const, info: architectStatus(), busy: false, error: '' },

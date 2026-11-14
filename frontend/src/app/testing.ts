@@ -1,8 +1,8 @@
 // Test fixtures shared by the application tests. Not imported by production code.
 import { vi } from 'vitest';
-import type { TaskAuthoringControls, TaskWorkerControls } from './presentation/contracts';
+import type { GroupControls, TaskAuthoringControls, TaskWorkerControls } from './presentation/contracts';
 import type { CoreApi } from '../core/api';
-import type { ProjectWorker, WorkerSession, TaskAuthoring, AgentDefinition, ArchitectStatus, ContextAccess, ConversationMessage, ConversationPage, ConversationParticipant, TaskArchitectStatus, ConversationMessageInput, Project, RoleAssignment, Task } from '../core/models';
+import type { GroupStatus, ProjectWorker, WorkerSession, TaskAuthoring, AgentDefinition, ArchitectStatus, ContextAccess, ConversationMessage, ConversationPage, ConversationParticipant, TaskArchitectStatus, ConversationMessageInput, Project, RoleAssignment, Task } from '../core/models';
 
 export const project = (id: string, over: Partial<Project> = {}): Project => ({
   id, name: `Project ${id}`, description: `About ${id}`, root_path: `/tmp/${id}`, mode: 'existing', docs_entrypoint: null,
@@ -108,6 +108,20 @@ export const workerControls = (over: Partial<TaskWorkerControls> = {}): TaskWork
   onBootstrap: vi.fn(async () => undefined), ...over,
 });
 
+/** P046: an empty group room (no round, no members). */
+export const groupStatus = (over: Partial<GroupStatus> = {}): GroupStatus => ({
+  conversation_id: null, roster: [], names: {}, settings: { passive_missed_message_threshold: 10, catchup_confirmation_chars: 2000, group_reply_quota_default: 3 },
+  has_owner_message: false, controls: { paused: false, emergency_brake: false }, round: null, holding_turn: null, activity: null,
+  answering: null, waiting: [], failed: [], members: [], catchup: null, driver: { running: false, last: null }, ...over,
+});
+
+export const groupControls = (over: Partial<GroupControls> = {}): GroupControls => ({
+  status: 'ready', info: groupStatus(), error: '', busy: null, onReload: vi.fn(),
+  onPost: vi.fn(async () => null), onAuthorize: vi.fn(async () => null), onStart: vi.fn(async () => null),
+  onControls: vi.fn(async () => null), onRelease: vi.fn(async () => null), onKeep: vi.fn(async () => null),
+  onCatchup: vi.fn(async () => null), onReconcile: vi.fn(async () => null), ...over,
+});
+
 export function stubApi(over: Partial<{ [K in keyof CoreApi]: ReturnType<typeof vi.fn> }> = {}) {
   const api = {
     listProjects: vi.fn(async () => [] as Project[]),
@@ -119,6 +133,17 @@ export function stubApi(over: Partial<{ [K in keyof CoreApi]: ReturnType<typeof 
     reconcileTask: vi.fn(async () => task('T0001', 'P0001')),
     repairTask: vi.fn(async () => ({ ...task('T0001', 'P0001'), repair: null })),
     getConversation: vi.fn(async () => conversationPage()),
+    getGroupStatus: vi.fn(async () => groupStatus()),
+    sendGroupMessage: vi.fn(async (_projectId: string, _taskId: string | null, input: { body: string; to: string[] }) => ({
+      message: conversationMessage(input.body, { group: { to: input.to, audience: ['owner', ...input.to], reply_to: null, reply_to_ordinal: null, round_id: null, turn_id: null, sender_agent_id: null } }), replayed: false,
+    })),
+    authorizeGroupRound: vi.fn(async () => ({})),
+    startGroupTurns: vi.fn(async () => ({ started: true, running: true })),
+    setGroupControls: vi.fn(async () => ({ paused: false, emergency_brake: false })),
+    releaseGroupMember: vi.fn(async () => ({})),
+    keepGroupMember: vi.fn(async () => ({})),
+    chooseGroupCatchup: vi.fn(async () => ({})),
+    reconcileGroup: vi.fn(async () => ({ reconciled: [] })),
     getTaskConversation: vi.fn(async () => conversationPage({ task_id: 'T0001' })),
     sendTaskConversationMessage: vi.fn(async (_projectId: string, _taskId: string, input: ConversationMessageInput) => ({
       message: conversationMessage(input.body, { recipient: input.recipient ?? null }), replayed: false,

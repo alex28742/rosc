@@ -36,7 +36,7 @@ describe('Task Conversation in the Task drawer', () => {
     expect(api.sendTaskConversationMessage).toHaveBeenLastCalledWith('P0001', 'T0001',
       expect.objectContaining({ body: 'Без адресата', recipient: null }));
 
-    fireEvent.change(view.getByLabelText('Адресат сообщения'), { target: { value: 'architect' } });
+    fireEvent.click(view.getByLabelText('Адресовать Architect'));
     fireEvent.change(box, { target: { value: 'Для Architect' } });
     fireEvent.click(view.getByRole('button', { name: 'Отправить' }));
     await view.findByText('Сохранено · не отправлено Architect');

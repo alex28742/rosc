@@ -61,6 +61,19 @@ export type ConversationParticipant = {
   actor_id: string;
   assurance: string;
   agent_id: string | null;
+  /** P046: registered display name of an Agent sender (Worker replies); absent/null for the Owner. */
+  agent_display_name?: string | null;
+};
+
+/** P046: immutable P043B group envelope of a message. `to`/`audience` hold stable Agent ids or `owner`. */
+export type MessageGroup = {
+  to: string[];
+  audience: string[];
+  reply_to: string | null;
+  reply_to_ordinal: number | null;
+  round_id: string | null;
+  turn_id: string | null;
+  sender_agent_id: string | null;
 };
 
 /** Delivery of one Owner message to the Project Architect (P015). `not_sent` means it was only stored in ROSC. */
@@ -84,8 +97,61 @@ export type ConversationMessage = {
   delivery?: MessageDelivery;
   /** P038: the addressee the Owner chose in a Task Conversation. Stored intent only, never a delivery. */
   recipient?: MessageRecipient;
+  /** P046: group addressing (null for a legacy message, whose addressing is `recipient`). */
+  group?: MessageGroup | null;
 };
 export type MessageRecipient = 'architect' | null;
+
+/** P046 group conversation (Core-reported state of one PC/TC room). Nothing here is inferred by the browser. */
+export type GroupRosterEntry = {
+  agent_id: string;
+  display_name: string;
+  icon_label: string | null;
+  role: 'architect' | 'worker';
+  runtime_adapter: string;
+  model_id: string;
+  /** True only when a real group transport exists for this Agent (v1.0: Claude Code Workers). */
+  group_supported: boolean;
+  unsupported_reason: string | null;
+};
+export type GroupTurnState = 'queued' | 'reserved' | 'submitted' | 'accepted' | 'reply_captured' | 'published'
+  | 'deferred' | 'failed' | 'unknown' | 'cancelled';
+export type GroupTurn = {
+  turn_id: string; round_id: string; agent_id: string; state: GroupTurnState; pass: number; position: number;
+  attempt: number; lane_id: string | null; error_code: string | null; catchup_choice: string | null;
+  input_after_ordinal: number | null; input_through_ordinal: number | null; reply_message_id: string | null;
+};
+export type GroupRound = {
+  round_id: string; round_no: number; state: 'open' | 'awaiting_owner' | 'closed'; per_agent_quota: number;
+  current_pass: number; grants: Record<string, { quota: number; published: number; failed: boolean }>; turns: GroupTurn[];
+};
+export type GroupMember = {
+  agent_id: string; role: 'architect' | 'worker'; state: 'active' | 'passive' | 'released'; epoch: number;
+  applied_through: number; considered_through: number; omitted_ranges: number[][]; missed: number;
+  release_offer: { missed: number; step: number; threshold: number } | null;
+  lane: { lane_id: string; native_session_id: string; root_binding_version: number } | null;
+};
+export type GroupCatchup = { turn_id: string; agent_id: string; from: number; through: number; chars: number; limit: number; count: number };
+/** `cli_confirmed`: the CLI's own init event named this lane's session and the process is alive; never inferred from tmux. */
+export type GroupActivity = 'cli_confirmed' | 'awaiting_confirmation' | null;
+export type GroupStatus = {
+  conversation_id: string | null;
+  roster: GroupRosterEntry[];
+  names: Record<string, string>;
+  settings: Record<string, number>;
+  has_owner_message: boolean;
+  controls: { paused: boolean; emergency_brake: boolean };
+  round: GroupRound | null;
+  holding_turn: GroupTurn | null;
+  activity: GroupActivity;
+  answering: string | null;
+  waiting: string[];
+  failed: GroupTurn[];
+  members: GroupMember[];
+  catchup: GroupCatchup | null;
+  driver: { running: boolean; last: { state: string; reason?: string; agent_id?: string | null; error_code?: string | null; at: string } | null };
+};
+export type GroupMessageInput = { client_key: string; body: string; to: string[] };
 
 /** Verified Project Architect runtime state. `ready` is reported by Core only after a fresh liveness probe. */
 export type ArchitectState = 'not_configured' | 'stopped' | 'starting' | 'ready' | 'error';
