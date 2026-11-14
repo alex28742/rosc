@@ -432,10 +432,8 @@ MAX_CLIENT_KEY = 128
 
 
 class Conversation(Base):
-    """One durable conversation. A Project has at most one canonical ``project`` conversation.
-
-    ``task_id`` exists so a later Task Conversation uses the same model instead of a second one; P014 implements only
-    the project scope and the service refuses to create a ``task`` conversation.
+    """One durable conversation: at most one canonical ``project`` conversation per Project and at most one ``task``
+    conversation per Task (P038), both in this same model.
     """
 
     __tablename__ = "conversations"
@@ -782,3 +780,274 @@ class WorkerSession(Base):
     bootstrap_digest: Mapped[str | None] = mapped_column(String(64), nullable=True)
     bootstrap_sources: Mapped[str | None] = mapped_column(Text, nullable=True)  # JSON list of project-relative paths
     bootstrap_sent_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
+# P043B (Prompt 044) Worker Conversation Core. Additive group-room bookkeeping around the ONE canonical
+# ``ConversationMessage`` store: addressing/audience snapshots, Active/Passive/Released membership, independent native
+# provider lanes per (Project, Agent, Conversation), confirmed inbound cursors, Owner-authorized bounded rounds with
+# per-Agent outgoing-reply grants and one durable sequential turn queue per room.  No row here is a process, a delivery
+# claim or a Run; the only transport in this slice is a deterministic fake used by tests.
+PARTY_OWNER_REF = "owner"
+MEMBER_ACTIVE, MEMBER_PASSIVE, MEMBER_RELEASED = "active", "passive", "released"
+LANE_ACTIVE, LANE_INVALIDATED = "active", "invalidated"
+ROUND_OPEN, ROUND_AWAITING_OWNER, ROUND_CLOSED = "open", "awaiting_owner", "closed"
+TURN_QUEUED, TURN_RESERVED, TURN_SUBMITTED, TURN_ACCEPTED = "queued", "reserved", "submitted", "accepted"
+TURN_REPLY_CAPTURED, TURN_PUBLISHED, TURN_DEFERRED, TURN_FAILED = "reply_captured", "published", "deferred", "failed"
+TURN_UNKNOWN, TURN_CANCELLED = "unknown", "cancelled"
+TURN_STATES = (TURN_QUEUED, TURN_RESERVED, TURN_SUBMITTED, TURN_ACCEPTED, TURN_REPLY_CAPTURED, TURN_PUBLISHED,
+               TURN_DEFERRED, TURN_FAILED, TURN_UNKNOWN, TURN_CANCELLED)
+# States that hold the room (and the lane): at most one such turn per room and per lane, enforced by partial indexes.
+TURN_HOLDING_STATES = (TURN_RESERVED, TURN_SUBMITTED, TURN_ACCEPTED, TURN_REPLY_CAPTURED, TURN_UNKNOWN)
+GAP_OWNER_SKIP, GAP_RELEASED_PERIOD = "owner_skip", "released_period"
+_HOLDING = "state IN (" + ", ".join(f"'{s}'" for s in TURN_HOLDING_STATES) + ")"
+
+
+class MessageEnvelope(Base):
+    """Immutable group metadata of one canonical message.  Legacy messages have no row (their addressing is derived
+    from ``ConversationMessage.recipient``)."""
+
+    __tablename__ = "conversation_message_envelopes"
+
+    message_id: Mapped[str] = mapped_column(ForeignKey("conversation_messages.message_id", ondelete="RESTRICT"),
+                                            primary_key=True)
+    reply_to_message_id: Mapped[str | None] = mapped_column(
+        ForeignKey("conversation_messages.message_id", ondelete="RESTRICT"), nullable=True)
+    round_id: Mapped[str | None] = mapped_column(ForeignKey("group_rounds.round_id", ondelete="RESTRICT"),
+                                                 nullable=True)
+    turn_id: Mapped[str | None] = mapped_column(ForeignKey("group_turns.turn_id", ondelete="RESTRICT"),
+                                                nullable=True, unique=True)
+    sender_agent_id: Mapped[str | None] = mapped_column(ForeignKey("agent_definitions.agent_id", ondelete="RESTRICT"),
+                                                        nullable=True)
+
+
+class MessageParty(Base):
+    """One explicit addressee (``to``) or one historical audience member of a message.  ``party_ref`` is ``owner`` or
+    the stable Agent id, never an @handle."""
+
+    __tablename__ = "conversation_message_parties"
+    __table_args__ = (
+        CheckConstraint("role IN ('to', 'audience')", name="ck_message_parties_role"),
+        CheckConstraint("party_kind IN ('owner', 'architect', 'worker')", name="ck_message_parties_kind"),
+        CheckConstraint("(party_kind = 'owner') = (agent_id IS NULL)", name="ck_message_parties_agent"),
+        CheckConstraint("party_ref = coalesce(agent_id, 'owner')", name="ck_message_parties_ref"),
+    )
+
+    message_id: Mapped[str] = mapped_column(ForeignKey("conversation_messages.message_id", ondelete="RESTRICT"),
+                                            primary_key=True)
+    role: Mapped[str] = mapped_column(String(16), primary_key=True)
+    party_ref: Mapped[str] = mapped_column(String(36), primary_key=True)
+    party_kind: Mapped[str] = mapped_column(String(16))
+    agent_id: Mapped[str | None] = mapped_column(ForeignKey("agent_definitions.agent_id", ondelete="RESTRICT"),
+                                                 nullable=True)
+
+
+class ConversationMember(Base):
+    """Durable room roster entry of one stable Agent.  A first-time member's baseline is its real join point; pre-join
+    history is never delivered as native input (no bulk backfill in v1.0).  ``released`` is set only by an explicit
+    Owner action; a re-invitation starts a new ``epoch`` whose baseline skips the released period (recorded as a
+    gap)."""
+
+    __tablename__ = "conversation_members"
+    __table_args__ = (
+        CheckConstraint("role IN ('architect', 'worker')", name="ck_conversation_members_role"),
+        CheckConstraint("state IN ('active', 'passive', 'released')", name="ck_conversation_members_state"),
+        CheckConstraint("epoch >= 1", name="ck_conversation_members_epoch"),
+        CheckConstraint("epoch_baseline_ordinal >= 0", name="ck_conversation_members_baseline"),
+        CheckConstraint("release_offer_ack_missed >= 0", name="ck_conversation_members_ack"),
+    )
+
+    conversation_id: Mapped[str] = mapped_column(ForeignKey("conversations.conversation_id", ondelete="RESTRICT"),
+                                                 primary_key=True)
+    agent_id: Mapped[str] = mapped_column(ForeignKey("agent_definitions.agent_id", ondelete="RESTRICT"),
+                                          primary_key=True)
+    role: Mapped[str] = mapped_column(String(16))
+    state: Mapped[str] = mapped_column(String(16))
+    epoch: Mapped[int] = mapped_column(Integer, default=1)
+    epoch_baseline_ordinal: Mapped[int] = mapped_column(Integer, default=0)
+    release_offer_ack_missed: Mapped[int] = mapped_column(Integer, default=0)
+    updated_by: Mapped[str] = mapped_column(String(64))
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
+
+
+class ConversationMemberGap(Base):
+    """Audited ordinal range a member's native context deliberately did NOT receive (Owner Skip or released period).
+    Never counted as applied; canonical messages are never deleted."""
+
+    __tablename__ = "conversation_member_gaps"
+    __table_args__ = (
+        CheckConstraint("reason IN ('owner_skip', 'released_period')", name="ck_member_gaps_reason"),
+        CheckConstraint("from_ordinal >= 1 AND through_ordinal >= from_ordinal", name="ck_member_gaps_range"),
+        Index("ix_member_gaps_member", "conversation_id", "agent_id", "epoch"),
+    )
+
+    gap_id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    conversation_id: Mapped[str] = mapped_column(ForeignKey("conversations.conversation_id", ondelete="RESTRICT"))
+    agent_id: Mapped[str] = mapped_column(ForeignKey("agent_definitions.agent_id", ondelete="RESTRICT"))
+    epoch: Mapped[int] = mapped_column(Integer)
+    from_ordinal: Mapped[int] = mapped_column(Integer)
+    through_ordinal: Mapped[int] = mapped_column(Integer)
+    reason: Mapped[str] = mapped_column(String(24))
+    created_by: Mapped[str] = mapped_column(String(64))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
+
+
+class AgentNativeLane(Base):
+    """Pointer to one provider-native conversation of one stable Agent in ONE room, pinned to a Root Binding version.
+    Holds no transcript or credential.  A Root Binding change invalidates the lane instead of silently resuming it."""
+
+    __tablename__ = "agent_native_lanes"
+    __table_args__ = (
+        CheckConstraint("state IN ('active', 'invalidated')", name="ck_native_lanes_state"),
+        CheckConstraint("length(adapter) BETWEEN 1 AND 64", name="ck_native_lanes_adapter"),
+        ForeignKeyConstraint(["project_id", "root_binding_version"],
+                             ["project_root_bindings.project_id", "project_root_bindings.version"],
+                             ondelete="RESTRICT", name="fk_native_lanes_binding"),
+        Index("ux_native_lanes_active", "agent_id", "conversation_id", unique=True,
+              sqlite_where=text("state = 'active'")),
+        Index("ix_native_lanes_project", "project_id"),
+    )
+
+    lane_id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    project_id: Mapped[int] = mapped_column(ForeignKey("projects.id", ondelete="RESTRICT"))
+    agent_id: Mapped[str] = mapped_column(ForeignKey("agent_definitions.agent_id", ondelete="RESTRICT"))
+    conversation_id: Mapped[str] = mapped_column(ForeignKey("conversations.conversation_id", ondelete="RESTRICT"))
+    root_binding_version: Mapped[int] = mapped_column(Integer)
+    adapter: Mapped[str] = mapped_column(String(64))
+    native_session_id: Mapped[str] = mapped_column(String(36), unique=True)
+    state: Mapped[str] = mapped_column(String(16), default=LANE_ACTIVE)
+    invalidated_reason: Mapped[str | None] = mapped_column(String(48), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
+    invalidated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
+class InboundCursor(Base):
+    """Highest room ordinal whose input batch the provider CONFIRMED accepting in this native lane/epoch.  Advanced only
+    by an accepted submit; never by the Agent's own published reply, an UNKNOWN outcome or an Owner Skip."""
+
+    __tablename__ = "agent_inbound_cursors"
+    __table_args__ = (CheckConstraint("applied_through_ordinal >= 0", name="ck_inbound_cursors_ordinal"),)
+
+    conversation_id: Mapped[str] = mapped_column(ForeignKey("conversations.conversation_id", ondelete="RESTRICT"),
+                                                 primary_key=True)
+    agent_id: Mapped[str] = mapped_column(ForeignKey("agent_definitions.agent_id", ondelete="RESTRICT"),
+                                          primary_key=True)
+    epoch: Mapped[int] = mapped_column(Integer, primary_key=True)
+    lane_id: Mapped[str] = mapped_column(ForeignKey("agent_native_lanes.lane_id", ondelete="RESTRICT"),
+                                         primary_key=True)
+    applied_through_ordinal: Mapped[int] = mapped_column(Integer, default=0)
+    last_turn_id: Mapped[str | None] = mapped_column(ForeignKey("group_turns.turn_id", ondelete="RESTRICT"),
+                                                     nullable=True)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
+
+
+class ConversationDispatchControl(Base):
+    """Persisted Owner gates of one room: Pause Dispatch / Emergency Brake forbid NEW provider dispatch (they never
+    claim that an in-flight turn was cancelled).  Cleared only by an explicit Owner action."""
+
+    __tablename__ = "conversation_dispatch_controls"
+
+    conversation_id: Mapped[str] = mapped_column(ForeignKey("conversations.conversation_id", ondelete="RESTRICT"),
+                                                 primary_key=True)
+    paused: Mapped[bool] = mapped_column(Boolean, default=False)
+    emergency_brake: Mapped[bool] = mapped_column(Boolean, default=False)
+    updated_by: Mapped[str] = mapped_column(String(64))
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
+
+
+class GroupRound(Base):
+    """One explicit Owner authorization of a bounded discussion.  New Owner messages never reset it; only an explicit
+    Renew closes it and opens the next one."""
+
+    __tablename__ = "group_rounds"
+    __table_args__ = (
+        CheckConstraint("state IN ('open', 'awaiting_owner', 'closed')", name="ck_group_rounds_state"),
+        CheckConstraint("per_agent_quota >= 1", name="ck_group_rounds_quota"),
+        CheckConstraint("round_no >= 1 AND current_pass >= 0", name="ck_group_rounds_numbers"),
+        UniqueConstraint("conversation_id", "round_no", name="uq_group_rounds_number"),
+        Index("ux_group_rounds_current", "conversation_id", unique=True, sqlite_where=text("state <> 'closed'")),
+    )
+
+    round_id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    conversation_id: Mapped[str] = mapped_column(ForeignKey("conversations.conversation_id", ondelete="RESTRICT"))
+    round_no: Mapped[int] = mapped_column(Integer)
+    state: Mapped[str] = mapped_column(String(16), default=ROUND_OPEN)
+    per_agent_quota: Mapped[int] = mapped_column(Integer)
+    current_pass: Mapped[int] = mapped_column(Integer, default=0)
+    authorizing_message_id: Mapped[str | None] = mapped_column(
+        ForeignKey("conversation_messages.message_id", ondelete="RESTRICT"), nullable=True)
+    authorized_by: Mapped[str] = mapped_column(String(64))
+    authorized_by_assurance: Mapped[str] = mapped_column(String(32))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
+    closed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
+class GroupRoundGrant(Base):
+    """Per-Agent outgoing allowance of one round: decremented only by a committed published Agent reply."""
+
+    __tablename__ = "group_round_grants"
+    __table_args__ = (
+        CheckConstraint("quota >= 1 AND published_count >= 0 AND published_count <= quota",
+                        name="ck_group_round_grants_quota"),
+    )
+
+    round_id: Mapped[str] = mapped_column(ForeignKey("group_rounds.round_id", ondelete="RESTRICT"), primary_key=True)
+    agent_id: Mapped[str] = mapped_column(ForeignKey("agent_definitions.agent_id", ondelete="RESTRICT"),
+                                          primary_key=True)
+    quota: Mapped[int] = mapped_column(Integer)
+    published_count: Mapped[int] = mapped_column(Integer, default=0)
+    failed: Mapped[bool] = mapped_column(Boolean, default=False)  # second safe failure: excluded from later passes
+
+
+class GroupTurn(Base):
+    """One durable slot of the room's sequential MODEL TURN DISPATCH queue."""
+
+    __tablename__ = "group_turns"
+    __table_args__ = (
+        CheckConstraint(_in_list("state", TURN_STATES), name="ck_group_turns_state"),
+        CheckConstraint("attempt IN (1, 2)", name="ck_group_turns_attempt"),
+        CheckConstraint("(attempt = 1) = (retry_of IS NULL)", name="ck_group_turns_retry"),
+        CheckConstraint("pass_no >= 0 AND position >= 0", name="ck_group_turns_position"),
+        CheckConstraint("catchup_choice IS NULL OR catchup_choice IN ('send_full', 'skip_backlog')",
+                        name="ck_group_turns_catchup"),
+        CheckConstraint("(state = 'published') = (reply_message_id IS NOT NULL)", name="ck_group_turns_published"),
+        UniqueConstraint("round_id", "pass_no", "position", name="uq_group_turns_slot"),
+        Index("ux_group_turns_room_holding", "conversation_id", unique=True, sqlite_where=text(_HOLDING)),
+        Index("ux_group_turns_lane_holding", "lane_id", unique=True,
+              sqlite_where=text(_HOLDING + " AND lane_id IS NOT NULL")),
+        Index("ix_group_turns_round", "round_id", "pass_no"),
+    )
+
+    turn_id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    round_id: Mapped[str] = mapped_column(ForeignKey("group_rounds.round_id", ondelete="RESTRICT"))
+    conversation_id: Mapped[str] = mapped_column(ForeignKey("conversations.conversation_id", ondelete="RESTRICT"))
+    agent_id: Mapped[str] = mapped_column(ForeignKey("agent_definitions.agent_id", ondelete="RESTRICT"))
+    lane_id: Mapped[str | None] = mapped_column(ForeignKey("agent_native_lanes.lane_id", ondelete="RESTRICT"),
+                                                nullable=True)
+    pass_no: Mapped[int] = mapped_column(Integer)
+    position: Mapped[int] = mapped_column(Integer)
+    attempt: Mapped[int] = mapped_column(Integer, default=1)
+    retry_of: Mapped[str | None] = mapped_column(ForeignKey("group_turns.turn_id", ondelete="RESTRICT"), nullable=True)
+    state: Mapped[str] = mapped_column(String(16), default=TURN_QUEUED)
+    correlation_id: Mapped[str] = mapped_column(String(36), unique=True)
+    input_after_ordinal: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    input_through_ordinal: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    catchup_choice: Mapped[str | None] = mapped_column(String(16), nullable=True)
+    captured_reply: Mapped[str | None] = mapped_column(Text, nullable=True)
+    captured_to: Mapped[str | None] = mapped_column(Text, nullable=True)  # JSON list of party refs
+    captured_reply_to: Mapped[str | None] = mapped_column(String(36), nullable=True)
+    reply_message_id: Mapped[str | None] = mapped_column(
+        ForeignKey("conversation_messages.message_id", ondelete="RESTRICT"), nullable=True, unique=True)
+    error_code: Mapped[str | None] = mapped_column(String(48), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
+
+
+class RoscSetting(Base):
+    """Owner-editable ROSC Settings value; defaults live in the canonical schema in ``worker_conversation``."""
+
+    __tablename__ = "rosc_settings"
+
+    key: Mapped[str] = mapped_column(String(64), primary_key=True)
+    value_int: Mapped[int] = mapped_column(Integer)
+    updated_by: Mapped[str] = mapped_column(String(64))
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))

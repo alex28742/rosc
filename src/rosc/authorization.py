@@ -90,6 +90,12 @@ PROMPT_APPROVE = "task.prompt.approve"
 WORKER_SESSION_STATUS = "worker.session.status"
 WORKER_SESSION_ACTIVATE = "worker.session.activate"
 
+# P043B Worker Conversation Core (internal-only in this slice; no HTTP endpoint). Owner-only group-room controls
+# (round authorization/renew, membership release/keep, catch-up choice, pause/brake) and the global ROSC Settings.
+CONVERSATION_GROUP_CONTROL = "conversation.group.control"
+ROSC_SETTINGS_READ = "rosc.settings.read"
+ROSC_SETTINGS_UPDATE = "rosc.settings.update"
+
 # Resource shapes: which identifiers an action must carry and which it may carry.
 # (required fields, optional fields); every other field must be absent.
 _SHAPES: dict[str, tuple[frozenset[str], frozenset[str]]] = {
@@ -135,6 +141,9 @@ _SHAPES: dict[str, tuple[frozenset[str], frozenset[str]]] = {
     PROMPT_APPROVE: (frozenset({"project_id", "task_id"}), frozenset()),
     WORKER_SESSION_STATUS: (frozenset({"project_id", "agent_id"}), frozenset()),
     WORKER_SESSION_ACTIVATE: (frozenset({"project_id", "agent_id"}), frozenset()),
+    CONVERSATION_GROUP_CONTROL: (frozenset({"project_id"}), frozenset({"task_id"})),
+    ROSC_SETTINGS_READ: (frozenset(), frozenset()),
+    ROSC_SETTINGS_UPDATE: (frozenset(), frozenset()),
 }
 IMPLEMENTED_ACTIONS = frozenset(_SHAPES)
 
