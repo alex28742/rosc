@@ -842,8 +842,9 @@ class MessageParty(Base):
 
 
 class ConversationMember(Base):
-    """Durable room roster entry of one stable Agent.  ``released`` is set only by an explicit Owner action; a
-    re-invitation starts a new ``epoch`` whose baseline skips the released period (recorded as a gap)."""
+    """Durable room roster entry of one stable Agent.  A first-time member's baseline is its join point (no pre-join
+    history without an explicit Owner share).  ``released`` is set only by an explicit Owner action; a re-invitation
+    starts a new ``epoch`` whose baseline skips the released period (recorded as a gap)."""
 
     __tablename__ = "conversation_members"
     __table_args__ = (
@@ -863,6 +864,8 @@ class ConversationMember(Base):
     epoch: Mapped[int] = mapped_column(Integer, default=1)
     epoch_baseline_ordinal: Mapped[int] = mapped_column(Integer, default=0)
     release_offer_ack_missed: Mapped[int] = mapped_column(Integer, default=0)
+    # Set only by an explicit Owner history share: pre-join messages up to this ordinal may enter the context.
+    history_shared_through_ordinal: Mapped[int | None] = mapped_column(Integer, nullable=True)
     updated_by: Mapped[str] = mapped_column(String(64))
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
 

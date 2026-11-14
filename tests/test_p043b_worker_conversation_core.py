@@ -659,6 +659,7 @@ class SettingsAndCatchupTests(CoreCase):
         for i in range(3):
             self.say("x" * 30, to=[self.A])
         room, question = self.group([self.B], quota=1, body="what do you think?")
+        self.core.share_history(OWNER, 1, self.B)  # explicit Owner permission to pass pre-join history
         claim = self.core.claim_next(room)
         self.assertEqual(claim.status, "catchup_choice_required")
         self.assertEqual((claim.detail["chars"], claim.detail["limit"]), (90, 50))
@@ -677,6 +678,7 @@ class SettingsAndCatchupTests(CoreCase):
         for i in range(3):
             self.say("y" * 30, to=[self.A])
         room, _ = self.group([self.B], quota=1)
+        self.core.share_history(OWNER, 1, self.B)
         claim = self.core.claim_next(room)
         self.core.choose_catchup(OWNER, 1, claim.turn_id, "send_full")
         with self.assertRaises(ConversationConflict):
@@ -835,6 +837,127 @@ class ControlsAndRecoveryTests(CoreCase):
         self.transport.busy_lanes.add(self.core.get_or_create_native_lane(room, self.A).lane_id)
         self.assertEqual(self.core.dispatch(claim.turn_id, self.transport)["state"], "deferred")
         self.assertEqual(self.transport.submits, [])
+
+
+class CoordinatorReviewTests(CoreCase):
+    """Corrections after coordinator review of 4faf753: historical visibility and re-authorization before submit."""
+
+    def test_new_member_does_not_receive_private_history_before_joining(self) -> None:
+        private = [self.say(f"private to A {i}", to=[self.A]) for i in range(3)]
+        room, question = self.group([self.B], quota=1, body="B, welcome")
+        member = {m["agent_id"]: m for m in self.status()["members"]}[self.B]
+        self.assertEqual(member["considered_through"], private[-1]["ordinal"])
+        self.assertEqual(member["missed"], 0)
+        claim = self.core.claim_next(room)
+        self.assertEqual(claim.status, "reserved")  # no catch-up prompt: there is no history B may receive
+        payload = self.core.dispatch(claim.turn_id, self.transport)["payload"]
+        self.assertEqual([e.body for e in payload.events], ["B, welcome"])
+        # Historical audience snapshots are untouched: the private messages never listed B.
+        for m in private:
+            self.assertNotIn(self.B, self.core.lookup_message(OWNER, 1, m["ordinal"])["audience"])
+
+    def test_new_member_joining_by_addressing_starts_at_its_invitation(self) -> None:
+        self.say("only A", to=[self.A])
+        self.say("A and B now", to=[self.A, self.B])
+        self.core.authorize_round(OWNER, 1, agents=[self.B], quota=1)
+        claim = self.core.claim_next(self.room())
+        payload = self.core.dispatch(claim.turn_id, self.transport)["payload"]
+        self.assertEqual([e.body for e in payload.events], ["A and B now"])
+
+    def test_explicit_owner_history_share_is_required_and_bounded(self) -> None:
+        self.say("before B", to=[self.A])
+        room, _ = self.group([self.B], quota=1, body="hello B")
+        with self.assertRaises(ConversationDenied):
+            self.core.share_history(AGENT_ACTOR, 1, self.B)
+        shared = self.core.share_history(OWNER, 1, self.B)
+        self.assertEqual(shared["history_shared_through"], 1)
+        claim = self.core.claim_next(room)
+        payload = self.core.dispatch(claim.turn_id, self.transport)["payload"]
+        self.assertEqual([e.body for e in payload.events], ["before B", "hello B"])
+        self.core.complete(claim.turn_id, "thanks")
+        self.core.release_member(OWNER, 1, self.B)
+        self.say("re-invite", to=[self.B])
+        with self.assertRaises(ConversationConflict):  # released period never gets backfill, even via share
+            self.core.share_history(OWNER, 1, self.B)
+
+    def test_passive_member_still_receives_group_messages_addressed_to_others(self) -> None:
+        room, _ = self.group([self.A, self.B], quota=2)
+        self.drain(room, limit=2)  # pass 0: both answered
+        to_a = [self.say(f"just for A {i}", to=[self.A]) for i in range(3)]
+        b = {m["agent_id"]: m for m in self.status()["members"]}[self.B]
+        self.assertEqual(b["state"], "passive")
+        self.assertGreaterEqual(b["missed"], 3)  # the three to-A messages (+ A's reply if A answered after B)
+        for _ in range(2):
+            claim = self.core.claim_next(room)
+            payload = self.core.dispatch(claim.turn_id, self.transport)["payload"]
+            if claim.agent_id == self.B:
+                self.assertTrue({m["ordinal"] for m in to_a} <= {e.ordinal for e in payload.events})
+            self.core.complete(claim.turn_id, "ok")
+
+    def test_released_period_messages_excluded_after_reinvite(self) -> None:
+        room, _ = self.group([self.A, self.B], quota=1)
+        self.drain(room)
+        self.core.release_member(OWNER, 1, self.B)
+        self.say("while B released", to=[self.A])
+        self.say("B is back", to=[self.A, self.B])
+        self.core.authorize_round(OWNER, 1, agents=[self.B], quota=1, renew=True)
+        claim = self.core.claim_next(room)
+        payload = self.core.dispatch(claim.turn_id, self.transport)["payload"]
+        self.assertEqual([e.body for e in payload.events], ["B is back"])
+        member = {m["agent_id"]: m for m in self.status()["members"]}[self.B]
+        self.assertEqual(member["epoch"], 2)
+        self.assertTrue(member["omitted_ranges"])
+
+    def _claimed(self, agents=None):
+        room, _ = self.group(agents or [self.A, self.B], quota=1)
+        claim = self.core.claim_next(room)
+        self.assertEqual(claim.status, "reserved")
+        return room, claim
+
+    def _assert_closed_without_effects(self, room, claim, code) -> None:
+        result = self.core.dispatch(claim.turn_id, self.transport)
+        self.assertEqual((result["status"], result["state"], result["error_code"]), ("not_dispatched", "cancelled", code))
+        self.assertEqual(self.transport.submits, [])
+        self.assertEqual(self.fetch("SELECT count(*) FROM agent_inbound_cursors"), [(0,)])
+        self.assertEqual(self.fetch("SELECT coalesce(sum(published_count), 0) FROM group_round_grants"), [(0,)])
+        self.assertIsNone(self.status()["holding_turn"])  # the room is released
+
+    def test_claim_then_release_then_dispatch(self) -> None:
+        room, claim = self._claimed()
+        self.core.release_member(OWNER, 1, claim.agent_id)
+        self._assert_closed_without_effects(room, claim, "member_released")
+        nxt = self.core.claim_next(room)
+        self.assertEqual(nxt.status, "reserved")
+        self.assertNotEqual(nxt.agent_id, claim.agent_id)
+
+    def test_claim_then_revoke_assignment_then_dispatch(self) -> None:
+        room, claim = self._claimed()
+        assignment = [a for a in self.registry.list_assignments(OWNER, 1) if a["agent_id"] == claim.agent_id][0]
+        self.registry.revoke_assignment(OWNER, 1, assignment["assignment_id"], expected_version=assignment["version"])
+        self._assert_closed_without_effects(room, claim, "assignment_changed")
+
+    def test_claim_then_renew_then_dispatch(self) -> None:
+        room, claim = self._claimed()
+        renewed = self.core.authorize_round(OWNER, 1, agents=[self.A, self.B], quota=1, renew=True)
+        self._assert_closed_without_effects(room, claim, "round_closed")
+        nxt = self.core.claim_next(room)
+        self.assertEqual(nxt.status, "reserved")
+        self.assertEqual(self.status()["round"]["round_id"], renewed["round_id"])
+
+    def test_in_flight_and_unknown_turns_are_not_affected_by_later_revocation(self) -> None:
+        room, claim = self._claimed()
+        self.core.dispatch(claim.turn_id, self.transport)  # accepted (in flight)
+        self.core.release_member(OWNER, 1, claim.agent_id)
+        self.assertEqual(self.status()["holding_turn"]["state"], "accepted")
+        self.assertEqual(self.core.complete(claim.turn_id, "finished")["state"], "published")
+        task_room, tclaim = None, None
+        task_room, _ = self.group([self.C], quota=1, task_id=1)
+        tclaim = self.core.claim_next(task_room)
+        self.transport.plan[self.C] = [SubmitOutcome(SUBMIT_UNKNOWN, "timeout")]
+        self.core.dispatch(tclaim.turn_id, self.transport)
+        self.core.authorize_round(OWNER, 1, agents=[self.C], quota=1, renew=True, task_id=1)
+        self.assertEqual(self.status(1)["holding_turn"]["state"], "unknown")  # still held for reconciliation
+        self.assertEqual(self.core.claim_next(task_room).status, "busy")
 
 
 if __name__ == "__main__":
