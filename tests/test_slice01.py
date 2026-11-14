@@ -652,7 +652,12 @@ class HardeningTests(StageCase):
                                   "report_records", "evidence_records", "conversations", "conversation_participants",
                                   "conversation_messages", "architect_sessions", "conversation_deliveries",
                                   "architect_tool_audit", "conversation_native_sessions", "execution_packages", "task_spec_revisions", "prompt_revisions",
-                                  "prompt_approvals", "worker_sessions", "alembic_version"})
+                                  "prompt_approvals", "worker_sessions", "alembic_version",
+                                  # P043B Worker Conversation Core (additive; empty after registration)
+                                  "conversation_message_envelopes", "conversation_message_parties",
+                                  "conversation_members", "conversation_member_gaps", "agent_native_lanes",
+                                  "agent_inbound_cursors", "conversation_dispatch_controls", "group_rounds",
+                                  "group_round_grants", "group_turns", "rosc_settings"})
 
 
 if __name__ == "__main__":
