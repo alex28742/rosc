@@ -375,8 +375,9 @@ class WorkerConversationCore:
         """Owner addressing changes roster state: addressees become Active (a Released one is re-invited into a new
         epoch without backfill), other Active members become Passive.  ``targets=None`` addresses the whole room.
 
-        A first-time member joins with baseline ``before_ordinal``: messages created before it joined are NOT part of
-        its context unless the Owner explicitly shares that history (``share_history``)."""
+        A first-time member joins with baseline ``before_ordinal`` (the actual moment it is first brought into the roster):
+        messages created before it joined are never part of its native input.  ROSC v1.0 has no bulk history backfill;
+        a future explicit read-only grant for specific historical #ordinals is out of this Core's scope."""
         now = _now()
         members = {m.agent_id: m for m in self._members(session, room.conversation_id)}
         addressed = set(members) - {a for a, m in members.items() if m.state == MEMBER_RELEASED} if targets is None \
@@ -387,7 +388,7 @@ class WorkerConversationCore:
                 session.add(ConversationMember(
                     conversation_id=room.conversation_id, agent_id=agent_id, role=assignment.role,
                     state=MEMBER_ACTIVE, epoch=1, epoch_baseline_ordinal=before_ordinal, release_offer_ack_missed=0,
-                    history_shared_through_ordinal=None, updated_by=actor.actor_id, updated_at=now))
+                    updated_by=actor.actor_id, updated_at=now))
             elif member.state == MEMBER_RELEASED:
                 lane = self._active_lane(session, room.conversation_id, agent_id)
                 prior = self._considered_through(session, member, lane)
@@ -543,10 +544,7 @@ class WorkerConversationCore:
             if not isinstance(n, int) or isinstance(n, bool) or not spec.minimum <= n <= spec.maximum:
                 raise InvalidConversationInput(f"quota must be an integer from {spec.minimum} to {spec.maximum}")
             if authorizing_message_id is not None:
-                msg = session.get(ConversationMessage, authorizing_message_id) \
-                    if isinstance(authorizing_message_id, str) else None
-                if msg is None or msg.conversation_id != room.conversation_id:
-                    raise InvalidConversationInput("authorizing message is not in this conversation")
+                self._require_current_owner_message(session, room, authorizing_message_id)
             current = self._current_round(session, room.conversation_id)
             if current is not None:
                 if not renew:
@@ -558,10 +556,9 @@ class WorkerConversationCore:
                 session.flush()
             elif renew:
                 raise ConversationConflict("There is no current round to renew")
-            join_point = self._max_ordinal(session, room.conversation_id)
-            if authorizing_message_id is not None:  # the authorizing message itself belongs to the new members' context
-                join_point = session.get(ConversationMessage, authorizing_message_id).ordinal - 1
-            self._apply_addressing(session, room, targets, actor, join_point)
+            # A first-time member joins at the CURRENT room boundary; membership is never moved back in time (an Agent
+            # already invited by an addressed Owner message keeps its real join point).
+            self._apply_addressing(session, room, targets, actor, self._max_ordinal(session, room.conversation_id))
             number = (session.scalar(select(func.max(GroupRound.round_no)).where(
                 GroupRound.conversation_id == room.conversation_id)) or 0) + 1
             rnd = GroupRound(round_id=str(uuid.uuid4()), conversation_id=room.conversation_id, round_no=number,
@@ -634,26 +631,20 @@ class WorkerConversationCore:
             return self._member_view(session, member)
         return self._tx(write)
 
-    def share_history(self, actor: ActorContext, project_id: object, agent_id: object, *,
-                      task_id: object = None) -> dict:
-        """Explicit Owner permission to give a first-epoch member the room history created before it joined.  The
-        normal catch-up rule (Send full / Skip above the configured size) still applies before any dispatch.  Not
-        available after a release/re-invite: a released period never gets mandatory backfill."""
-        self._authorize(actor, CONVERSATION_GROUP_CONTROL, project_id=project_id, task_id=task_id)
-
-        def write(session: Session) -> dict:
-            room = self._require_room(session, project_id, task_id)  # type: ignore[arg-type]
-            member = self._member(session, room.conversation_id, agent_id) if isinstance(agent_id, str) else None
-            if member is None:
-                raise ConversationNotFound("Member not found")
-            if member.epoch != 1 or member.state == MEMBER_RELEASED:
-                raise ConversationConflict("History can be shared only with a current first-time member")
-            if member.epoch_baseline_ordinal > 0:
-                member.history_shared_through_ordinal = member.epoch_baseline_ordinal
-                member.epoch_baseline_ordinal = 0
-            member.updated_by, member.updated_at = actor.actor_id, _now()
-            return self._member_view(session, member)
-        return self._tx(write)
+    def _require_current_owner_message(self, session: Session, room: Conversation, message_id: object) -> None:
+        """v1.0 rule: a round may cite only the room's latest Owner message.  A stale, foreign-room or Agent-authored
+        id is refused, so the field can neither move membership back in time nor shrink the catch-up boundary."""
+        msg = session.get(ConversationMessage, message_id) if isinstance(message_id, str) else None
+        if msg is None or msg.conversation_id != room.conversation_id:
+            raise InvalidConversationInput("authorizing message is not in this conversation")
+        latest = session.scalar(select(func.max(ConversationMessage.ordinal)).join(
+            ConversationParticipant,
+            ConversationParticipant.participant_id == ConversationMessage.sender_participant_id).where(
+            ConversationMessage.conversation_id == room.conversation_id,
+            ConversationParticipant.kind == PARTICIPANT_OWNER))
+        sender = session.get(ConversationParticipant, msg.sender_participant_id)
+        if sender is None or sender.kind != PARTICIPANT_OWNER or msg.ordinal != latest:
+            raise InvalidConversationInput("authorizing message must be the latest Owner message of this conversation")
 
     def choose_catchup(self, actor: ActorContext, project_id: object, turn_id: object, choice: object, *,
                        task_id: object = None) -> dict:
@@ -822,21 +813,19 @@ class WorkerConversationCore:
     def _events(self, session: Session, member: ConversationMember, after: int, through: int) -> list[InputEvent]:
         """Room events in (after, through] that THIS member may receive: never its own replies; a message carrying a
         group envelope only if its historical audience snapshot included the member (Passive members are in every
-        audience, so they keep receiving group messages addressed to others) or the Owner explicitly shared history up
-        to that ordinal.  Messages without an envelope (legacy API) are room-wide; pre-join ones are already excluded by
-        the member's baseline."""
+        audience, so they keep receiving group messages addressed to others).  Messages without an envelope (legacy API)
+        are room-wide; pre-join ones are excluded by the member's baseline (its real join point)."""
         rows = session.execute(select(ConversationMessage, ConversationParticipant).join(
             ConversationParticipant,
             ConversationParticipant.participant_id == ConversationMessage.sender_participant_id).where(
             ConversationMessage.conversation_id == member.conversation_id, ConversationMessage.ordinal > after,
             ConversationMessage.ordinal <= through).order_by(ConversationMessage.ordinal)).all()
-        shared = member.history_shared_through_ordinal or 0
         events = []
         for message, sender in rows:
             if sender.agent_id == member.agent_id:
                 continue  # the Agent's own published replies are never fed back as peer input
             view = self._message_view(session, message)
-            if session.get(MessageEnvelope, message.message_id) is not None and message.ordinal > shared \
+            if session.get(MessageEnvelope, message.message_id) is not None \
                     and member.agent_id not in view["audience"]:
                 continue  # not visible to this member when it was created (before joining / while released)
             events.append(InputEvent(message.ordinal, message.message_id, sender.kind, sender.agent_id,
@@ -1134,7 +1123,6 @@ class WorkerConversationCore:
                 "applied_through": self._applied_through(session, member, lane),
                 "considered_through": self._considered_through(session, member, lane),
                 "omitted_ranges": [list(r) for r in self._gaps(session, member)],
-                "history_shared_through": member.history_shared_through_ordinal,
                 "missed": missed,
                 "release_offer": ({"missed": missed, "step": step, "threshold": threshold}
                                   if member.state == MEMBER_PASSIVE and step >= 1 and step > acked else None),

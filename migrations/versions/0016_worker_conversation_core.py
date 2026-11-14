@@ -144,7 +144,6 @@ def upgrade() -> None:
         sa.Column("epoch", sa.Integer, nullable=False),
         sa.Column("epoch_baseline_ordinal", sa.Integer, nullable=False),
         sa.Column("release_offer_ack_missed", sa.Integer, nullable=False),
-        sa.Column("history_shared_through_ordinal", sa.Integer, nullable=True),
         sa.Column("updated_by", sa.String(64), nullable=False),
         _ts("updated_at"),
         sa.CheckConstraint("role IN ('architect', 'worker')", name="ck_conversation_members_role"),

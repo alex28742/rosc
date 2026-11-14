@@ -654,38 +654,49 @@ class SettingsAndCatchupTests(CoreCase):
             self.say(f"x {i}", to=[self.A])
         self.assertEqual(b()["release_offer"]["step"], 2)  # 14//7
 
-    def test_large_backlog_requires_owner_choice_and_skip_is_audited(self) -> None:
+    def _passive_backlog(self, filler: str) -> tuple[str, dict]:
+        """B was invited earlier and answered, then became Passive while 90 chars addressed to A accumulated; the Owner
+        now addresses B again (catch-up limit lowered to 50)."""
         self.core.update_setting(OWNER, SETTING_CATCHUP_CHARS, 50)
-        for i in range(3):
-            self.say("x" * 30, to=[self.A])
-        room, question = self.group([self.B], quota=1, body="what do you think?")
-        self.core.share_history(OWNER, 1, self.B)  # explicit Owner permission to pass pre-join history
+        room, _ = self.group([self.B], quota=1, body="hi B")  # #1, B answers as #2
+        self.assertEqual(self.drain(room), [self.B])
+        for _ in range(3):
+            self.say(filler * 30, to=[self.A])  # #3..#5: B (already a member) is Passive and in their audience
+        self.assertEqual({m["agent_id"]: m for m in self.status()["members"]}[self.B]["state"], "passive")
+        question = self.say("B, your view?", to=[self.B])  # #6
+        self.core.authorize_round(OWNER, 1, agents=[self.B], quota=1, renew=True,
+                                  authorizing_message_id=question["message_id"])
+        return room, question
+
+    def test_large_backlog_requires_owner_choice_and_skip_is_audited(self) -> None:
+        room, _ = self._passive_backlog("x")
+        submits = len(self.transport.submits)
         claim = self.core.claim_next(room)
         self.assertEqual(claim.status, "catchup_choice_required")
         self.assertEqual((claim.detail["chars"], claim.detail["limit"]), (90, 50))
-        self.assertEqual(self.transport.submits, [])
+        self.assertEqual(len(self.transport.submits), submits)  # nothing sent before the Owner decides
+        b = {m["agent_id"]: m for m in self.status()["members"]}[self.B]
+        self.assertEqual(b["applied_through"], 1)  # no false inbound-cursor advance while waiting
         self.core.choose_catchup(OWNER, 1, claim.turn_id, "skip_backlog")
         claim = self.core.claim_next(room)
         view = self.core.dispatch(claim.turn_id, self.transport)
-        self.assertEqual([e.body for e in view["payload"].events], ["what do you think?"])
-        self.assertEqual(view["payload"].omitted_ranges, ((1, 3),))
+        self.assertEqual([e.body for e in view["payload"].events], ["B, your view?"])
+        self.assertEqual(view["payload"].omitted_ranges, ((2, 5),))
         member = {m["agent_id"]: m for m in self.status()["members"]}[self.B]
-        self.assertEqual(member["omitted_ranges"], [[1, 3]])
-        self.assertEqual(self.fetch("SELECT count(*) FROM conversation_messages"), [(4,)])  # nothing deleted
+        self.assertEqual(member["omitted_ranges"], [[2, 5]])
+        self.assertEqual(self.fetch("SELECT count(*) FROM conversation_messages"), [(6,)])  # nothing deleted
+        self.assertEqual(self.fetch("SELECT reason FROM conversation_member_gaps"), [("owner_skip",)])
 
     def test_send_full_backlog_submits_delta_and_current_message(self) -> None:
-        self.core.update_setting(OWNER, SETTING_CATCHUP_CHARS, 50)
-        for i in range(3):
-            self.say("y" * 30, to=[self.A])
-        room, _ = self.group([self.B], quota=1)
-        self.core.share_history(OWNER, 1, self.B)
+        room, _ = self._passive_backlog("y")
         claim = self.core.claim_next(room)
+        self.assertEqual(claim.status, "catchup_choice_required")
         self.core.choose_catchup(OWNER, 1, claim.turn_id, "send_full")
         with self.assertRaises(ConversationConflict):
             self.core.choose_catchup(OWNER, 1, claim.turn_id, "skip_backlog")
         claim = self.core.claim_next(room)
         view = self.core.dispatch(claim.turn_id, self.transport)
-        self.assertEqual(len(view["payload"].events), 4)
+        self.assertEqual([e.body for e in view["payload"].events], ["y" * 30] * 3 + ["B, your view?"])
         self.assertEqual(view["payload"].omitted_ranges, ())
 
 
@@ -842,16 +853,32 @@ class ControlsAndRecoveryTests(CoreCase):
 class CoordinatorReviewTests(CoreCase):
     """Corrections after coordinator review of 4faf753: historical visibility and re-authorization before submit."""
 
+    def legacy_post(self, body: str, recipient=None, task: str | None = None) -> None:
+        path = f"/api/projects/P0001/tasks/{task}/conversation/messages" if task else "/api/projects/P0001/conversation/messages"
+        payload = {"client_key": self.key(), "body": body, **({"recipient": recipient} if recipient else {})}
+        self.assertEqual(self.client.post(path, json=payload).status_code, 201)
+
     def test_new_member_does_not_receive_private_history_before_joining(self) -> None:
+        self.legacy_post("legacy architect-only secret", recipient="architect")
+        self.legacy_post("legacy room-wide note")
         private = [self.say(f"private to A {i}", to=[self.A]) for i in range(3)]
         room, question = self.group([self.B], quota=1, body="B, welcome")
         member = {m["agent_id"]: m for m in self.status()["members"]}[self.B]
-        self.assertEqual(member["considered_through"], private[-1]["ordinal"])
-        self.assertEqual(member["missed"], 0)
+        self.assertEqual(member["considered_through"], question["ordinal"] - 1)
+        self.assertEqual(member["state"], "active")
         claim = self.core.claim_next(room)
         self.assertEqual(claim.status, "reserved")  # no catch-up prompt: there is no history B may receive
         payload = self.core.dispatch(claim.turn_id, self.transport)["payload"]
         self.assertEqual([e.body for e in payload.events], ["B, welcome"])
+        self.core.complete(claim.turn_id, "hello")
+        later = self.say("next step for everyone", to=[self.A, self.B])
+        self.core.authorize_round(OWNER, 1, agents=[self.B], quota=1, renew=True,
+                                  authorizing_message_id=later["message_id"])
+        payload = self.core.dispatch(self.core.claim_next(room).turn_id, self.transport)["payload"]
+        self.assertEqual([e.body for e in payload.events], ["next step for everyone"])  # later delta only
+        sent = " ".join(e.body for p in self.transport.submits for e in p[1].events if p[1].agent_id == self.B)
+        for text in ("secret", "legacy", "private"):
+            self.assertNotIn(text, sent)
         # Historical audience snapshots are untouched: the private messages never listed B.
         for m in private:
             self.assertNotIn(self.B, self.core.lookup_message(OWNER, 1, m["ordinal"])["audience"])
@@ -864,21 +891,48 @@ class CoordinatorReviewTests(CoreCase):
         payload = self.core.dispatch(claim.turn_id, self.transport)["payload"]
         self.assertEqual([e.body for e in payload.events], ["A and B now"])
 
-    def test_explicit_owner_history_share_is_required_and_bounded(self) -> None:
+    def test_stale_authorizing_message_cannot_move_membership_back(self) -> None:
+        self.legacy_post("legacy architect-only", recipient="architect")  # #1
+        self.legacy_post("other room", task="T0001")
+        room, to_a = self.group([self.A], quota=1, body="to A")  # #2
+        self.drain(room)  # A answers as #3
+        legacy_id, reply_id, other_id = (self.fetch(f"SELECT message_id FROM conversation_messages WHERE body='{b}'")[0][0]
+                                         for b in ("legacy architect-only", "reply from " + self.A[:4], "other room"))
+        round_before = self.status()["round"]["round_id"]
+        for stale in (legacy_id, reply_id, other_id, "no-such-id", 7):
+            with self.assertRaises(InvalidConversationInput):
+                self.core.authorize_round(OWNER, 1, agents=[self.B], quota=1, renew=True, authorizing_message_id=stale)
+        self.assertNotIn(self.B, [m["agent_id"] for m in self.status()["members"]])  # refused atomically
+        self.assertEqual(self.status()["round"]["round_id"], round_before)
+        self.say("newer to A", to=[self.A])  # #4: "to A" (#2) is now stale as well
+        with self.assertRaises(InvalidConversationInput):
+            self.core.authorize_round(OWNER, 1, agents=[self.B], quota=1, renew=True,
+                                      authorizing_message_id=to_a["message_id"])
+        # The latest Owner message is accepted, and a first-time member joins at the CURRENT boundary.
+        latest = self.fetch("SELECT message_id FROM conversation_messages WHERE body='newer to A'")[0][0]
+        self.core.authorize_round(OWNER, 1, agents=[self.B], quota=1, renew=True, authorizing_message_id=latest)
+        b = {m["agent_id"]: m for m in self.status()["members"]}[self.B]
+        self.assertEqual((b["considered_through"], b["missed"]), (4, 0))
+        payload = self.core.dispatch(self.core.claim_next(room).turn_id, self.transport)["payload"]
+        self.assertEqual((payload.events, payload.input_after_ordinal), ((), 4))
+
+    def test_no_bulk_history_api_in_runtime_schema_or_status(self) -> None:
+        self.assertFalse(hasattr(WorkerConversationCore, "share_history"))
+        columns = {row[1] for row in self.fetch("PRAGMA table_info(conversation_members)")}
+        self.assertNotIn("history_shared_through_ordinal", columns)
+        self.assertIn("epoch_baseline_ordinal", columns)
         self.say("before B", to=[self.A])
         room, _ = self.group([self.B], quota=1, body="hello B")
-        with self.assertRaises(ConversationDenied):
-            self.core.share_history(AGENT_ACTOR, 1, self.B)
-        shared = self.core.share_history(OWNER, 1, self.B)
-        self.assertEqual(shared["history_shared_through"], 1)
-        claim = self.core.claim_next(room)
-        payload = self.core.dispatch(claim.turn_id, self.transport)["payload"]
-        self.assertEqual([e.body for e in payload.events], ["before B", "hello B"])
-        self.core.complete(claim.turn_id, "thanks")
-        self.core.release_member(OWNER, 1, self.B)
-        self.say("re-invite", to=[self.B])
-        with self.assertRaises(ConversationConflict):  # released period never gets backfill, even via share
-            self.core.share_history(OWNER, 1, self.B)
+        member = {m["agent_id"]: m for m in self.status()["members"]}[self.B]
+        self.assertFalse(any("shared" in key for key in member))
+        payload = self.core.dispatch(self.core.claim_next(room).turn_id, self.transport)["payload"]
+        self.assertEqual([e.body for e in payload.events], ["hello B"])
+        self.core.complete(payload.turn_id, "thanks")
+        # Re-addressing an existing member never rewinds its join point either.
+        self.say("B again", to=[self.B])
+        self.core.authorize_round(OWNER, 1, agents=[self.B], quota=1, renew=True)
+        payload = self.core.dispatch(self.core.claim_next(room).turn_id, self.transport)["payload"]
+        self.assertEqual([e.body for e in payload.events], ["B again"])
 
     def test_passive_member_still_receives_group_messages_addressed_to_others(self) -> None:
         room, _ = self.group([self.A, self.B], quota=2)
