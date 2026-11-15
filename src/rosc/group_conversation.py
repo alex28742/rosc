@@ -40,7 +40,7 @@ from .conversation import (ConversationConflict, ConversationDenied, Conversatio
 from .models import (ASSIGNMENT_ACTIVE, MEMBER_RELEASED, PARTICIPANT_OWNER, ROLE_ARCHITECT, ROLE_WORKER, ROUND_OPEN,
                      TURN_ACCEPTED, TURN_HOLDING_STATES, TURN_QUEUED, TURN_SUBMITTED, TURN_UNKNOWN, AgentDefinition,
                      AgentNativeLane, Conversation, ConversationMessage, ConversationParticipant, GroupRoundGrant,
-                     GroupTurn, RoleAssignment)
+                     GroupTurn, MessageEnvelope, RoleAssignment)
 from .worker_conversation import (LOOKUP_UNKNOWN, SETTINGS_SCHEMA, SUBMIT_NOT_ACCEPTED, LookupOutcome, SubmitOutcome,
                                   WorkerConversationCore)
 from .worker_session import SUPPORTED_ADAPTERS
@@ -218,6 +218,9 @@ class GroupConversationBridge:
                 ConversationMessage.conversation_id == room.conversation_id,
                 ConversationParticipant.kind == PARTICIPANT_OWNER).order_by(
                 ConversationMessage.ordinal.desc()).limit(1)).first()
+            latest_envelope = session.get(MessageEnvelope, latest_owner) if latest_owner else None
+            # P047 r02: a direct request attached to a running group round keeps that round current.
+            latest_round = latest_envelope.round_id if latest_envelope is not None else None
         core = self._core.room_status(actor, project_id, task_id=task_id) if room is not None else None
         activity = None
         if core is not None and core["holding_turn"] is not None:
@@ -226,7 +229,8 @@ class GroupConversationBridge:
         rnd = core["round"] if core else None
         # A round is "current conversation mode" only while its authorizing Owner message is the latest Owner message:
         # a later direct (legacy) message returns the room to 1:1 and hides the group header.
-        grants = len(rnd["grants"]) if rnd and rnd.get("authorizing_message_id") in (None, latest_owner) else 0
+        grants = len(rnd["grants"]) if rnd and (rnd.get("authorizing_message_id") in (None, latest_owner)
+                                                or rnd["round_id"] == latest_round) else 0
         engagement = "group" if grants >= 2 or peer_addressed else "direct" if grants == 1 else "none"
         return {
             "engagement": engagement,

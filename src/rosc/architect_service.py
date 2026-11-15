@@ -1300,6 +1300,13 @@ class ArchitectGroupTransport:
                     text = svc._task_preface(session.get(Task, room.task_id), project, text)
                 live_session_id = svc._live(session, lane.project_id).session_id
             runtime_id = self.runtime_id(payload.correlation_id)
+            # P047 r02: ``primed`` records CONFIRMED delivery of the Task preface, nothing weaker.
+            # * accepted (a provider reply) -> primed now;
+            # * proven not accepted (SAFE_CODES, e.g. connection_failed) -> stays unprimed, so the next authorized
+            #   turn carries the Task preface/description/acceptance criteria again;
+            # * UNKNOWN -> stays unprimed (delivery is not asserted); the Core holds the turn UNKNOWN and never
+            #   re-sends it.  If a later evidence ``lookup`` finds the provider did receive it, priming is recorded
+            #   there; otherwise the next authorized turn re-sends the short preface (a safe superset, never a gap).
             try:
                 reply = svc._runtime.ask(handle, runtime_id, text, svc._timeout)
             except RuntimeAmbiguous as exc:
@@ -1308,9 +1315,8 @@ class ArchitectGroupTransport:
                 return SubmitOutcome(SUBMIT_NOT_ACCEPTED if exc.code in self.SAFE_CODES else SUBMIT_UNKNOWN, exc.code)
             except Exception:
                 return SubmitOutcome(SUBMIT_UNKNOWN, "transport_error")
-            finally:
-                if first:
-                    self._mark_primed(lane.conversation_id, live_session_id)
+            if first:
+                self._mark_primed(lane.conversation_id, live_session_id)
             self._replies[payload.correlation_id] = reply
             return SubmitOutcome(SUBMIT_ACCEPTED, None)
 
@@ -1334,11 +1340,18 @@ class ArchitectGroupTransport:
         try:
             with svc._sessions() as session:
                 handle, _first, problem = self._handle_for(session, lane, create=False)
+                live = svc._live(session, lane.project_id) if problem is None else None
+                live_session_id = live.session_id if live is not None else None
             if problem is not None:
                 return LookupOutcome(LOOKUP_UNKNOWN)
             found = svc._runtime.lookup(handle, self.runtime_id(correlation_id))
         except Exception:
             return LookupOutcome(LOOKUP_UNKNOWN)
+        if found.status in ("reply", "in_progress") and live_session_id is not None:
+            # Provider evidence that the turn reached the Task's native session.  A turn submitted while the row was
+            # unprimed carried the Task preface (``primed`` never goes back to false for one native session), so
+            # this records the recovered first delivery exactly once; for a primed row it is a no-op.
+            self._mark_primed(lane.conversation_id, live_session_id)
         if found.status == "reply" and found.text:
             return LookupOutcome(LOOKUP_REPLY, text=found.text)
         if found.status == "absent":

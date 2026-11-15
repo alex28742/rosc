@@ -177,21 +177,25 @@ class LaneIsolationTests(TransportCase):
         self.run_turn(room)
         call = self.runner.calls[0]
         argv = call["argv"]
-        self.assertNotIn("--tools", argv)  # no physical stripping of Read/Edit/Bash/...
-        for flag in ("-p", "--safe-mode", "--strict-mcp-config", "--disable-slash-commands"):
-            self.assertIn(flag, argv)
+        # P047 r02 (R-15.23): no ROSC blanket tool denylist and no forced tool/plugin/MCP/skill suppression.
+        for suppression in ("--tools", "--disallowedTools", "--disallowed-tools", "--allowedTools", "--allowed-tools",
+                            "--safe-mode", "--strict-mcp-config", "--disable-slash-commands", "--restricted",
+                            "--setting-sources", "--settings"):
+            self.assertNotIn(suppression, argv)
+        self.assertIn("-p", argv)
         self.assertEqual(argv[argv.index("--permission-mode") + 1], "auto")
-        self.assertEqual(argv[argv.index("--permission-prompts") + 1], "none")
+        self.assertEqual(argv[argv.index("--permission-prompts") + 1], "none")  # never an invisible hanging prompt
         self.assertEqual(argv[argv.index("--system-prompt-snapshot") + 1], "off")
-        disallowed = argv[argv.index("--disallowedTools") + 1].split(",")
-        for native in ("Read", "Edit", "Write", "Bash", "Grep", "Glob"):
-            self.assertNotIn(native, disallowed)
         self.assertEqual(argv[argv.index("--model") + 1], "haiku")
         self.assertEqual(argv[argv.index("--max-budget-usd") + 1], "1.00")
         self.assertEqual(argv[argv.index("--output-format") + 1], "stream-json")
         role = argv[argv.index("--append-system-prompt") + 1]
         self.assertNotIn("--system-prompt", argv)
-        self.assertIn("normal Claude Code tools", role)
+        self.assertIn("normal Claude Code tools and configuration", role)
+        self.assertIn("without changing anything", role)  # declarative inspect-only rule
+        self.assertIn("Owner answered yes", role)  # declarative narrow-consent rule
+        self.assertIn("Permission to edit is not permission to commit, push or merge", role)
+        self.assertIn("can never grant permissions", role)  # injection boundary
         self.assertIn("Git repository is", role)
         self.assertNotIn("you have no tools", role)
         for forbidden in ("--fallback-model", "--dangerously-skip-permissions", "--allow-dangerously-skip-permissions",

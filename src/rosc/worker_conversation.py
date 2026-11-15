@@ -524,6 +524,9 @@ class WorkerConversationCore:
                         "This message key was already used for different content; reload the conversation")
                 rnd = session.scalars(select(GroupRound).where(
                     GroupRound.authorizing_message_id == existing.message_id)).first()
+                envelope = session.get(MessageEnvelope, existing.message_id)
+                if rnd is None and envelope is not None and envelope.round_id is not None:
+                    rnd = session.get(GroupRound, envelope.round_id)  # a direct request attached to a group round
                 return {"message": view, "replayed": True, "round": None if rnd is None else self._round_view(session, rnd)}
             ordinal = self._max_ordinal(session, room.conversation_id) + 1
             self._apply_addressing(session, room, targets, actor, ordinal - 1)
@@ -533,19 +536,81 @@ class WorkerConversationCore:
                 recipient=None, created_at=_now())
             session.add(message)
             session.flush()
-            session.add(MessageEnvelope(message_id=message.message_id, reply_to_message_id=None,
-                                        round_id=None, turn_id=None, sender_agent_id=None))
+            envelope = MessageEnvelope(message_id=message.message_id, reply_to_message_id=None,
+                                       round_id=None, turn_id=None, sender_agent_id=None)
+            session.add(envelope)
             self._write_parties(session, message.message_id, room.conversation_id, to_refs)
             session.flush()
             rnd = None
             granted = [a for a in to_refs if a in set(grant)]  # type: ignore[arg-type]
-            if granted:
+            current = self._current_round(session, room.conversation_id)
+            if len(granted) == 1 and self._is_active_group(session, current):
+                # P047 r02 (R-15.24): a 1:1 request never closes a running group discussion.
+                rnd = self._attach_direct(session, current, granted[0], envelope)  # type: ignore[arg-type]
+            elif granted:
                 rnd = self._open_round(session, room, granted, actor, message.message_id,
                                        1 if len(granted) == 1 else self._setting(session, SETTING_GROUP_QUOTA),
                                        superseded_code="superseded_by_owner_message")
             return {"message": self._message_view(session, message, to_room=False), "replayed": False,
                     "round": None if rnd is None else self._round_view(session, rnd)}
         return self._tx(write)
+
+    @staticmethod
+    def _is_active_group(session: Session, rnd: GroupRound | None) -> bool:
+        """A GROUP round (two or more granted Agents) that is still running: ``open`` (queued, reserved or in-flight
+        work, or a further pass may still be earned).  ``awaiting_owner`` is a finished discussion."""
+        if rnd is None or rnd.state != ROUND_OPEN:
+            return False
+        grants = session.scalar(select(func.count()).select_from(GroupRoundGrant).where(
+            GroupRoundGrant.round_id == rnd.round_id)) or 0
+        return grants >= 2
+
+    def _attach_direct(self, session: Session, rnd: GroupRound, agent_id: str, envelope: MessageEnvelope) -> GroupRound:
+        """P047 r02: an Owner -> one Agent Send while a group round is running.
+
+        Smallest durable representation inside the single active round (no schema change):
+        * the Owner message's envelope records ``round_id`` = the group round (marks it as a direct request there);
+        * the Agent's grant gets exactly ONE extra slot (``quota + 1``; a new member of the room gets a 1-slot grant), so
+          its remaining group allowance is unchanged and the group N is NOT reset;
+        * one direct turn is queued at the END of the round's current pass.  Nothing is cancelled: queued, reserved,
+          in-flight and UNKNOWN group turns keep their state; the room still dispatches one turn at a time.
+        * ordering: earlier-queued turns go first.  A turn of the same Agent queued BEFORE this message has its input
+          snapshot capped just before it (``_direct_cap``), so the direct turn answers the direct question and the
+          group turn answers the group input: two answers, never one turn swallowing the other and an empty phantom.
+        """
+        grant = session.get(GroupRoundGrant, (rnd.round_id, agent_id))
+        if grant is None:
+            session.add(GroupRoundGrant(round_id=rnd.round_id, agent_id=agent_id, quota=1, published_count=0,
+                                        failed=False))
+        else:
+            grant.quota += 1
+            grant.failed = False  # an explicit new Owner request re-authorizes the Agent for this one reply
+        last = session.scalar(select(func.max(GroupTurn.position)).where(
+            GroupTurn.round_id == rnd.round_id, GroupTurn.pass_no == rnd.current_pass))
+        session.add(GroupTurn(turn_id=str(uuid.uuid4()), round_id=rnd.round_id, conversation_id=rnd.conversation_id,
+                              agent_id=agent_id, pass_no=rnd.current_pass, position=0 if last is None else last + 1,
+                              attempt=1, state=TURN_QUEUED, correlation_id=str(uuid.uuid4()), created_at=_now(),
+                              updated_at=_now()))
+        envelope.round_id = rnd.round_id
+        session.flush()
+        return rnd
+
+    def _direct_cap(self, session: Session, turn: GroupTurn, after: int) -> int | None:
+        """Last ordinal this turn may consume: just before the first Owner direct request to this Agent attached to the
+        same round AFTER the turn was queued (a retry keeps its original turn's queue time).  None = no cap."""
+        origin = session.get(GroupTurn, turn.retry_of) if turn.retry_of else turn
+        queued_at = (origin or turn).created_at
+        rows = session.execute(select(ConversationMessage.ordinal, ConversationMessage.created_at).join(
+            MessageEnvelope, MessageEnvelope.message_id == ConversationMessage.message_id).join(
+            MessageParty, MessageParty.message_id == ConversationMessage.message_id).where(
+            ConversationMessage.conversation_id == turn.conversation_id, ConversationMessage.ordinal > after,
+            MessageEnvelope.round_id == turn.round_id, MessageEnvelope.sender_agent_id.is_(None),
+            MessageParty.role == "to", MessageParty.party_ref == turn.agent_id).order_by(
+            ConversationMessage.ordinal)).all()
+        for ordinal, created_at in rows:
+            if created_at > queued_at:
+                return ordinal - 1
+        return None
 
     def _open_round(self, session: Session, room: Conversation, agent_ids: list[str], actor: ActorContext,
                     authorizing_message_id: str | None, quota: int, *, superseded_code: str) -> GroupRound:
@@ -968,6 +1033,9 @@ class WorkerConversationCore:
                 return None, None
             after = self._considered_through(session, member, lane)  # type: ignore[arg-type]
             through = self._max_ordinal(session, turn.conversation_id)
+            cap = self._direct_cap(session, turn, after)
+            if cap is not None:
+                through = max(after, min(through, cap))  # the later direct request is the direct turn's input
             events = self._events(session, member, after, through)  # type: ignore[arg-type]
             grant = session.get(GroupRoundGrant, (turn.round_id, turn.agent_id))
             payload = TurnPayload(turn.turn_id, turn.correlation_id, turn.conversation_id, turn.agent_id,

@@ -118,7 +118,7 @@ def cmd_setup(paths, _args) -> None:
                                                           "acceptance_criteria": "n/a"})
     assert task.status_code == 201, task.text
     (paths["root"] / "README.md").write_text("Synthetic P045 smoke project. No real source.\n")
-    # Canary: with --safe-mode this project CLAUDE.md must NOT reach the model.
+    # Canary: under the P047 r02 native profile the Project's own CLAUDE.md reaches the model like any Claude Code run.
     (paths["root"] / "CLAUDE.md").write_text("Always end every reply with the exact word CANARY-CLAUDEMD-9.\n")
     registry = AgentRegistryService(make_session_factory(paths["db"]), LocalOwnerPolicy())
     caps = ["project.context.read", "task.context.read"]

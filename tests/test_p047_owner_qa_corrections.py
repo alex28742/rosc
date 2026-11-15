@@ -14,7 +14,7 @@ import threading
 
 from test_p015_architect_activation import CAPS as ARCH_CAPS
 from test_p015_architect_activation import FakeRuntime
-from test_p043b_worker_conversation_core import OWNER
+from test_p043b_worker_conversation_core import OWNER, WORKER_CAPS
 from test_p045_claude_conversation_transport import FakeCliRunner
 from test_p046_group_conversation_bridge import BridgeCase
 
@@ -239,6 +239,339 @@ class ArchitectGroupBridgeTests(P047Case):
         self.api.post(f"{self.url()}/reconcile")
         self.assertEqual(self.api.get(self.url()).json()["holding_turn"]["state"], "unknown")
         self.assertEqual(len(self.arch_runtime.asked), before + 1)
+
+
+class FirstAgentOrder:
+    """Deterministic pass order for a test: ``first`` always opens a pass."""
+
+    def __init__(self, first: str) -> None:
+        self.first = first
+
+    def shuffle(self, order: list[str]) -> None:
+        order.sort(key=lambda agent: (agent != self.first, agent))
+
+    def randrange(self, start: int, stop: int) -> int:
+        return start
+
+
+class AgentScriptedRunner(FakeCliRunner):
+    """Fake CLI that answers by agent: ``script(agent_id, prompt) -> reply``; records (agent_id, prompt) per call."""
+
+    def __init__(self, script) -> None:
+        super().__init__()
+        self.script = script
+        self.seen: list[tuple[str, str]] = []
+
+    def spawn(self, argv, **kw):
+        from pathlib import Path
+        prompt = Path(kw["stdin_path"]).read_text()
+        me = json.loads(prompt.splitlines()[1])["you"]["agent_id"]
+        self.seen.append((me, prompt))
+        reply = self.script(me, prompt)
+        handle = super().spawn(argv, **kw)
+        path = Path(kw["stdout_path"])
+        events = [json.loads(line) for line in path.read_text().splitlines()]
+        for event in events:
+            if event.get("type") == "result" and reply is not None:
+                event["result"] = reply
+        path.write_text("".join(json.dumps(e) + "\n" for e in events))
+        return handle
+
+
+class DirectDoesNotCancelGroupTests(P047Case):
+    """P047 r02 fix 2 (R-15.24/R-15.25): an Owner -> one Agent Send never closes or resets a running group round."""
+
+    DIRECT = "@Claude-2, какой отступ у кнопки?"
+
+    def setUp(self) -> None:
+        super().setUp()
+        self.core = self.app.state.group._core  # noqa: SLF001
+        self.core._rng = FirstAgentOrder(self.claude_agent)  # noqa: SLF001 - deterministic: Claude opens each pass
+
+    def pause(self, task: str | None, value: bool) -> None:
+        self.assertEqual(self.api.post(f"{self.url(task)}/controls", json={"paused": value}).status_code, 200)
+
+    def round_row(self, task: str | None = None) -> dict:
+        return self.api.get(self.url(task)).json()["round"]
+
+    def cancelled(self) -> list[tuple]:
+        return self.fetch("SELECT agent_id, error_code FROM group_turns WHERE state = 'cancelled'")
+
+    def run_queued_peer_scenario(self, task: str | None) -> None:
+        a, b = self.claude_agent, self.second
+        if task:  # Task-scoped Workers for the TC
+            self.registry.create_assignment(OWNER, 1, agent_id=a, role="worker", task_id=1, capabilities=WORKER_CAPS)
+            self.registry.create_assignment(OWNER, 1, agent_id=b, role="worker", task_id=1, capabilities=WORKER_CAPS)
+        replies = {a: ["@Claude-2 проверь, пожалуйста, отступы в форме."],
+                   b: ["Группа: отступы в форме согласованы.", "Отступ кнопки 16px."]}
+
+        def script(me, prompt):
+            if me == a and len(self.runner.seen) == 1:
+                self.pause(task, True)  # Claude-2's group turn stays QUEUED while the Owner asks it directly
+            return replies[me].pop(0)
+
+        self.runner = AgentScriptedRunner(script)
+        sent = self.post("Claude и Claude-2, обсудите форму", [a, b], task=task)
+        self.assertEqual(sent.status_code, 201, sent.text)
+        self.wait_room(task)
+        group_round = self.round_row(task)
+        queued = self.fetch("SELECT agent_id FROM group_turns WHERE round_id = ? AND state = 'queued'",
+                            group_round["round_id"])
+        self.assertEqual(queued, [(b,)])
+        direct = self.post(self.DIRECT, [b], task=task)
+        self.assertEqual(direct.status_code, 201, direct.text)
+        self.assertEqual(direct.json()["dispatch"]["mode"], "direct")
+        after_direct = self.round_row(task)
+        self.assertEqual(after_direct["round_id"], group_round["round_id"])  # NOT closed / replaced
+        self.assertEqual(after_direct["per_agent_quota"], 3)  # no group N reset
+        self.assertEqual(after_direct["grants"][a], {"quota": 3, "published": 1, "failed": False})
+        self.assertEqual(after_direct["grants"][b], {"quota": 4, "published": 0, "failed": False})  # +1 direct slot
+        self.assertEqual(self.cancelled(), [])  # the queued group answer is NOT cancelled
+        self.pause(task, False)
+        self.wait_room(task)
+        # Exactly-once publication, correct order, no phantom turns: Claude 1x, Claude-2 2x (group answer, then direct).
+        self.assertEqual([me for me, _ in self.runner.seen], [a, b, b])
+        group_prompt, direct_prompt = self.runner.seen[1][1], self.runner.seen[2][1]
+        self.assertIn("проверь, пожалуйста, отступы", group_prompt)
+        self.assertNotIn("какой отступ у кнопки", group_prompt)  # the group turn is not handed the direct question
+        self.assertIn("какой отступ у кнопки", direct_prompt)
+        self.assertNotIn("проверь, пожалуйста, отступы", direct_prompt)  # already consumed by the group turn
+        msgs = self.messages(task)
+        self.assertEqual([m["body"] for m in msgs], [
+            "Claude и Claude-2, обсудите форму", "@Claude-2 проверь, пожалуйста, отступы в форме.", self.DIRECT,
+            "Группа: отступы в форме согласованы.", "Отступ кнопки 16px."])
+        self.assertEqual(msgs[-1]["group"]["to"], ["owner"])
+        final = self.round_row(task)
+        self.assertEqual(final["round_id"], group_round["round_id"])
+        self.assertEqual(final["grants"][b], {"quota": 4, "published": 2, "failed": False})
+        self.assertEqual(final["grants"][a], {"quota": 3, "published": 1, "failed": False})
+        self.assertEqual(self.cancelled(), [])
+        self.assertEqual(self.api.get(self.url(task)).json()["engagement"], "group")
+
+    def test_pc_direct_question_keeps_queued_group_answer_and_gets_exactly_one_reply(self) -> None:
+        self.run_queued_peer_scenario(None)
+
+    def test_tc_direct_question_keeps_queued_group_answer_and_gets_exactly_one_reply(self) -> None:
+        self.run_queued_peer_scenario("T0001")
+
+    def test_direct_during_in_flight_group_turn_waits_and_answers_once(self) -> None:
+        a, b = self.claude_agent, self.second
+        gate, entered = threading.Event(), threading.Event()
+        replies = {a: ["Группа от Claude.", "Прямой ответ Claude."], b: ["Группа от Claude-2."]}
+
+        def script(me, prompt):
+            if len(self.runner.seen) == 1:
+                entered.set()
+                gate.wait(10)  # Claude's group turn is in flight (submitted) while the Owner writes to Claude
+            return replies[me].pop(0)
+
+        self.runner = AgentScriptedRunner(script)
+        self.post("группа", [a, b])
+        self.assertTrue(entered.wait(5))
+        holder = self.api.get(self.url()).json()["holding_turn"]
+        self.assertEqual((holder["agent_id"], holder["state"]), (a, "submitted"))
+        self.assertEqual(self.post("@Claude, только тебе", [a]).status_code, 201)
+        self.assertEqual(len(self.runner.seen), 1)  # never a concurrent dispatch in the room / native lane
+        gate.set()
+        self.wait_room()
+        self.assertEqual([me for me, _ in self.runner.seen], [a, b, a])
+        self.assertNotIn("только тебе", self.runner.seen[0][1])
+        self.assertIn("только тебе", self.runner.seen[2][1])
+        grants = self.round_row()["grants"]
+        self.assertEqual(grants[a], {"quota": 4, "published": 2, "failed": False})
+        self.assertEqual(grants[b], {"quota": 3, "published": 1, "failed": False})
+        self.assertEqual(self.cancelled(), [])
+        bodies = [m["body"] for m in self.messages()]
+        self.assertEqual(bodies.count("Прямой ответ Claude."), 1)
+
+    def test_fresh_owner_group_post_still_supersedes_queued_group_and_direct_work(self) -> None:
+        a, b = self.claude_agent, self.second
+        def script(me, prompt):
+            if len(self.runner.seen) == 1:
+                self.pause(None, True)
+            return "ok"
+
+        self.runner = AgentScriptedRunner(script)
+        self.post("старая группа", [a, b])
+        self.wait_room()
+        old = self.round_row()["round_id"]
+        self.post("@Claude, вопрос", [a])
+        self.assertEqual(self.round_row()["round_id"], old)
+        self.post("новая группа", [a, b])
+        fresh = self.round_row()
+        self.assertNotEqual(fresh["round_id"], old)
+        self.assertEqual({g["quota"] for g in fresh["grants"].values()}, {3})  # fresh N
+        rows = sorted(self.fetch("SELECT agent_id, state, error_code FROM group_turns WHERE round_id = ?", old))
+        self.assertEqual(rows, sorted([(a, "published", None), (b, "cancelled", "superseded_by_owner_message"),
+                                       (a, "cancelled", "superseded_by_owner_message")]))  # never-submitted only
+        self.pause(None, False)
+        self.wait_room()
+        self.assertEqual(len(self.runner.seen), 3)  # one answer each in the new round, nothing re-sent
+
+    def test_unknown_group_turn_holds_the_direct_request_truthfully_without_resend(self) -> None:
+        a, b = self.claude_agent, self.second
+        self.runner = AgentScriptedRunner(lambda me, prompt: None)
+        self.runner.modes = ["crash_no_result"]
+        self.post("группа", [a, b])
+        self.wait_room()
+        status = self.api.get(self.url()).json()
+        self.assertEqual(status["holding_turn"]["state"], "unknown")
+        round_id = status["round"]["round_id"]
+        self.assertEqual(self.post("@Claude-2, вопрос", [b]).status_code, 201)
+        self.wait_room()
+        status = self.api.get(self.url()).json()
+        self.assertEqual(status["round"]["round_id"], round_id)  # not closed
+        self.assertEqual(status["holding_turn"]["state"], "unknown")  # truthful, recoverable hold
+        self.assertEqual(status["waiting"].count(b), 2)  # its group turn and the direct turn both still queued
+        self.api.post(f"{self.url()}/reconcile")
+        self.assertEqual(self.api.get(self.url()).json()["holding_turn"]["state"], "unknown")
+        self.assertEqual(len(self.runner.seen), 1)  # the UNKNOWN turn is never re-sent, nothing else dispatched
+        self.assertEqual(self.cancelled(), [])
+
+
+class ArchitectDirectDuringGroupTests(P047Case):
+    """The Owner's acceptance scenario with the (fake-runtime) Architect: Architect -> @Claude stays queued."""
+
+    def make_client(self, **kw):
+        self.arch_runtime = FakeRuntime()
+        return super().make_client(architect_runtime=self.arch_runtime, **kw)
+
+    def test_owner_direct_to_claude_does_not_cancel_claude_queued_answer_to_architect(self) -> None:
+        architect = self.registry.register_agent(OWNER, display_name="Architect", runtime_adapter="opencode",
+                                                 provider_id="prov", model_id="model-a", capabilities=ARCH_CAPS)
+        self.registry.create_assignment(OWNER, 1, agent_id=architect["agent_id"], role="architect",
+                                        capabilities=ARCH_CAPS)
+        arch, claude = architect["agent_id"], self.claude_agent
+        self.api.post("/api/projects/P0001/architect/activate")
+        self.app.state.architect.drain()
+        self.app.state.group._core._rng = FirstAgentOrder(arch)  # noqa: SLF001
+        self.arch_runtime.reply = "Architect: @Claude проверь вариант B."
+        self.arch_runtime.on_ask = lambda: self.api.post(f"{self.url()}/controls", json={"paused": True})
+        replies = ["Claude -> Architect: вариант B проверен.", "Отступ кнопки 16px."]
+        self.runner = AgentScriptedRunner(lambda me, prompt: replies.pop(0))
+        self.post("Architect и Claude, обсудите", [arch, claude])
+        self.wait_room()
+        self.arch_runtime.on_ask = None
+        group_round = self.api.get(self.url()).json()["round"]
+        self.assertEqual(self.fetch("SELECT agent_id FROM group_turns WHERE state = 'queued'"), [(claude,)])
+        self.post("@Claude, какой отступ у кнопки?", [claude])
+        self.api.post(f"{self.url()}/controls", json={"paused": False})
+        self.wait_room()
+        self.assertEqual(len(self.runner.seen), 2)
+        self.assertNotIn("какой отступ", self.runner.seen[0][1])
+        self.assertIn("какой отступ", self.runner.seen[1][1])
+        status = self.api.get(self.url()).json()
+        self.assertEqual(status["round"]["round_id"], group_round["round_id"])
+        self.assertEqual(status["round"]["grants"][claude]["published"], 2)
+        self.assertEqual(status["round"]["grants"][arch]["published"], 1)  # Claude's replies did not address it
+        self.assertEqual(self.fetch("SELECT count(*) FROM group_turns WHERE state = 'cancelled'"), [(0,)])
+        bodies = [m["body"] for m in self.messages()]
+        self.assertEqual(bodies.count("Отступ кнопки 16px."), 1)
+        self.assertEqual(bodies.count("Claude -> Architect: вариант B проверен."), 1)
+
+
+class NativeFakeRuntime(FakeRuntime):
+    """P015 fake runtime that can also create the separate native session of a Task Conversation (P039)."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.native_created: list[str] = []
+
+    def create_native_session(self, session_id, handle, provider_id, model_id, title, tools):
+        self.native_created.append(title)
+        return f"ses_task_{len(self.native_created)}"
+
+
+class ArchitectTaskPrimingTests(P047Case):
+    """P047 r02 fix 3: ``primed`` is recorded only for a confirmed Task preface delivery."""
+
+    PREFACE = "now in the separate Task Conversation of T0001"
+
+    def make_client(self, **kw):
+        self.arch_runtime = NativeFakeRuntime()
+        return super().make_client(architect_runtime=self.arch_runtime, **kw)
+
+    def setUp(self) -> None:
+        super().setUp()
+        architect = self.registry.register_agent(OWNER, display_name="Architect", runtime_adapter="opencode",
+                                                 provider_id="prov", model_id="model-a", capabilities=ARCH_CAPS)
+        self.registry.create_assignment(OWNER, 1, agent_id=architect["agent_id"], role="architect",
+                                        capabilities=ARCH_CAPS)
+        self.arch = architect["agent_id"]
+        self.assertEqual(self.api.post("/api/projects/P0001/architect/activate").json()["state"], "ready")
+        self.app.state.architect.drain()
+        self.task = self.api.get("/api/projects/P0001/tasks").json()[0]
+
+    def primed(self) -> list[int]:
+        return [r[0] for r in self.fetch("SELECT primed FROM conversation_native_sessions")]
+
+    def task_texts(self) -> list[str]:
+        return [text for rid, text in self.arch_runtime.asked if rid.startswith("msg_roscgt")]
+
+    def assert_preface(self, text: str) -> None:
+        self.assertIn(self.PREFACE, text)
+        self.assertIn(f"Description: {self.task['description']}", text)
+        self.assertIn(f"Acceptance criteria: {self.task['acceptance_criteria']}", text)
+
+    def test_not_accepted_first_task_turn_stays_unprimed_and_next_turn_carries_the_preface(self) -> None:
+        from rosc.architect_runtime import RuntimeUnavailable
+        self.arch_runtime.reply = RuntimeUnavailable("connection_failed")
+        self.post("первый вопрос Architect", [self.arch], task="T0001")
+        self.wait_room("T0001")
+        failed = self.fetch("SELECT state, error_code FROM group_turns WHERE agent_id = ?", self.arch)
+        self.assertEqual({row[1] for row in failed}, {"connection_failed"})
+        self.assertTrue({row[0] for row in failed} <= {"deferred", "failed"})  # bounded safe re-queue, then failed
+        attempts = len(self.task_texts())
+        for text in self.task_texts():
+            self.assert_preface(text)  # every not-accepted attempt still carried the preface
+        self.assertEqual(self.primed(), [0])  # proven NOT_ACCEPTED: Task onboarding is NOT recorded as done
+        self.arch_runtime.reply = "Architect: понял задачу."
+        self.post("второй вопрос Architect", [self.arch], task="T0001")
+        self.wait_room("T0001")
+        texts = self.task_texts()
+        self.assertEqual(len(texts), attempts + 1)
+        self.assert_preface(texts[-1])  # the valid attempt still gets Task description + acceptance criteria
+        self.assertEqual(self.primed(), [1])
+        self.assertEqual(len(self.arch_runtime.native_created), 1)  # same native Task session, no new one
+
+    def test_accepted_first_task_turn_primes_exactly_once(self) -> None:
+        self.arch_runtime.reply = "Architect: ok."
+        self.post("первый", [self.arch], task="T0001")
+        self.wait_room("T0001")
+        self.assertEqual(self.primed(), [1])
+        self.post("второй", [self.arch], task="T0001")
+        self.wait_room("T0001")
+        texts = self.task_texts()
+        self.assertEqual(len(texts), 2)
+        self.assert_preface(texts[0])
+        self.assertNotIn(self.PREFACE, texts[1])  # primed once: never repeated
+        # The Project Conversation keeps its own (non-Task) native context: no Task preface, no Task session row.
+        self.post("в PC", [self.arch])
+        self.wait_room()
+        self.assertNotIn(self.PREFACE, self.task_texts()[-1])
+        self.assertEqual(len(self.fetch("SELECT 1 FROM conversation_native_sessions")), 1)
+
+    def test_unknown_first_task_turn_is_not_asserted_primed_never_resent_and_primes_on_lookup_evidence(self) -> None:
+        from rosc.architect_runtime import ReplyLookup, RuntimeAmbiguous
+        self.arch_runtime.reply = RuntimeAmbiguous("timeout")
+        self.arch_runtime.lookup_result = ReplyLookup("uncertain")
+        self.post("вопрос", [self.arch], task="T0001")
+        self.wait_room("T0001")
+        url = self.url("T0001")
+        self.assertEqual(self.api.get(url).json()["holding_turn"]["state"], "unknown")
+        self.assertEqual(self.primed(), [0])  # delivery is uncertain: not asserted
+        self.api.post(f"{url}/reconcile")
+        self.assertEqual(self.api.get(url).json()["holding_turn"]["state"], "unknown")
+        self.assertEqual(self.primed(), [0])
+        self.assertEqual(len(self.task_texts()), 1)  # never re-sent
+        # Provider evidence later proves the first turn (with its preface) did arrive: published once, primed once.
+        self.arch_runtime.lookup_result = ReplyLookup("reply", "Architect: ответ на вопрос.")
+        self.api.post(f"{url}/reconcile")
+        self.wait_room("T0001")
+        self.assertEqual(self.primed(), [1])
+        self.assertEqual(len(self.task_texts()), 1)
+        bodies = [m["body"] for m in self.messages("T0001")]
+        self.assertEqual(bodies.count("Architect: ответ на вопрос."), 1)
 
 
 # -- Bug D: trusted Project identity for the interactive tmux Worker (fake tmux from the P042A tests) ------------------
