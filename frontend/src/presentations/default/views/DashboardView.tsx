@@ -44,7 +44,7 @@ export function DashboardView({ projects, projectsStatus, feedback, inert, onOpe
         <span className="rosc-project-card__briefs">
           <span className="rosc-brief"><span className="rosc-brief__label">ОПИСАНИЕ</span><span className="rosc-brief__text">{p.description}</span></span>
           <span className="rosc-brief"><span className="rosc-brief__label">КОРНЕВАЯ ДИРЕКТОРИЯ</span><span className="rosc-brief__text rosc-brief__text--path">{p.root_path}</span></span>
-          <span className="rosc-brief"><span className="rosc-brief__label">АГЕНТЫ</span><span className="rosc-brief__text">Architect: не активен · Workers: {p.active_workers}</span></span>
+          <span className="rosc-brief"><span className="rosc-brief__label">АГЕНТЫ</span><span className="rosc-brief__text">Статус Architect и Workers проверяется в рабочей области проекта</span></span>
         </span>
         <span className="rosc-project-card__foot">
           <span className="rosc-project-card__meta">{p.docs_entrypoint ? `Документация: ${p.docs_entrypoint}` : 'Документация проекта не указана'}</span>

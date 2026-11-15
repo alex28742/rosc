@@ -3681,3 +3681,127 @@
     min-height: 36px;
   }
 }
+
+/* -- P047: group header only when relevant; compact critical strip in 1:1; stable control widths ---------------- */
+.rosc-group-people--embedded,
+.rosc-group-bar .rosc-group-people {
+  margin: 6px 0 0;
+  padding: 6px 0 0;
+  border: 0;
+  border-top: 1px solid var(--rosc-line);
+  border-radius: 0;
+  background: transparent;
+}
+
+.rosc-group-bar__ctl,
+.rosc-group-strip__actions {
+  display: inline-flex;
+  gap: 6px;
+  margin-left: auto;
+}
+
+/* Fixed widths: a label change (Пауза <-> Снять паузу) never moves the neighbouring button under the pointer. */
+.rosc-app .rosc-group-ctl {
+  min-width: 96px;
+  justify-content: center;
+}
+
+.rosc-app .rosc-group-ctl:disabled {
+  opacity: .5;
+  cursor: not-allowed;
+}
+
+.rosc-group-strip {
+  flex: none;
+  margin: 6px 12px 0;
+  padding: 4px 8px;
+  border: 1px solid var(--rosc-line);
+  border-radius: 8px;
+  background: var(--rosc-panel);
+  font-size: calc(11px * var(--rosc-text-scale, 1));
+}
+
+.rosc-group-strip--warning {
+  border-color: #ecd6ae;
+  background: var(--rosc-soft-amber);
+}
+
+.rosc-group-strip--danger {
+  border-color: var(--rosc-red-line);
+  background: var(--rosc-soft-red);
+  color: var(--rosc-red);
+}
+
+.rosc-group-strip__row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+}
+
+.rosc-group-strip .rosc-group-pill {
+  margin: 0;
+}
+
+.rosc-group-toggle {
+  overflow: hidden;
+  max-width: 100%;
+  text-align: left;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* Semantic status chips in the Project header (green only for verified active). */
+.rosc-chip--on {
+  border-color: #cde8d5;
+  background: #eaf7ee;
+  color: #1c7848;
+}
+
+.rosc-chip--on .rosc-chip__dot {
+  background: #22a35a;
+}
+
+.rosc-chip--warn {
+  border-color: #ecd6ae;
+  background: #fff7e8;
+  color: #8a5a00;
+}
+
+.rosc-chip--warn .rosc-chip__dot {
+  background: #d08a00;
+}
+
+.rosc-chip--error {
+  border-color: #f3ced2;
+  background: #fff0f1;
+  color: #b3424c;
+}
+
+.rosc-chip--error .rosc-chip__dot {
+  background: #c9414d;
+}
+
+.rosc-chip--unknown .rosc-chip__dot {
+  background: transparent;
+  border: 1px dashed #7d8b97;
+}
+
+.rosc-agents-card .rosc-task-workers {
+  margin-top: 10px;
+}
+
+@media (max-width: 700px) {
+  .rosc-group-strip {
+    margin: 6px 8px 0;
+  }
+
+  .rosc-group-bar__ctl,
+  .rosc-group-strip__actions {
+    margin-left: 0;
+  }
+
+  .rosc-app .rosc-group-ctl {
+    min-height: 36px;
+  }
+}

@@ -9,8 +9,10 @@ import type { ConversationMessage, GroupStatus, GroupTurn } from '../../../core/
  */
 
 export const UNSUPPORTED_TEXT: Record<string, string> = {
-  architect_group_not_integrated: 'Групповые ходы Architect пока не интегрированы — отправьте ему отдельным сообщением',
-  adapter_not_supported: 'У этого адаптера нет группового транспорта (в v1.0 — только Claude Code)',
+  architect_group_not_integrated: 'Групповые ходы Architect недоступны в этой сборке — отправьте ему отдельным сообщением',
+  architect_not_active: 'Architect не активен: активируйте его, чтобы позвать в групповой разговор',
+  no_active_architect_assignment: 'Architect не назначен этому проекту',
+  adapter_not_supported: 'У этого адаптера нет транспорта для чата (в v1.0 — только Claude Code)',
 };
 
 const TURN_ERROR_TEXT: Record<string, string> = {
@@ -44,10 +46,10 @@ function roomState(info: GroupStatus): { tone: 'idle' | 'active' | 'warning' | '
   if (turn && (turn.state === 'accepted' || turn.state === 'reply_captured'))
     return { tone: 'active', text: `${who}: ответ получен, публикация`, live: false };
   if (info.catchup) return { tone: 'warning', text: `Нужно решение Owner: пропущенный контекст ${nameOf(info, info.catchup.agent_id)}`, live: false };
-  if (info.round?.state === 'awaiting_owner') return { tone: 'warning', text: 'Ждём Owner: квота раунда исчерпана', live: false };
-  if (info.round && info.driver.running) return { tone: 'active', text: 'Очередь выполняется', live: false };
-  if (info.round) return { tone: 'idle', text: 'Раунд разрешён · ход не запущен', live: false };
-  return { tone: 'idle', text: 'Нет открытого раунда', live: false };
+  if (info.round?.state === 'awaiting_owner') return { tone: 'idle', text: 'Ответы получены · следующее сообщение Owner откроет новое обсуждение', live: false };
+  if (info.round && info.driver.running) return { tone: 'active', text: 'Агенты отвечают по очереди', live: false };
+  if (info.round) return { tone: 'idle', text: 'Ответы разрешены · очередь ожидает', live: false };
+  return { tone: 'idle', text: 'Нет активного обсуждения', live: false };
 }
 
 function Dots({ label }: { label: string }) {
@@ -74,7 +76,6 @@ export function GroupDialog({ title, kicker, children, onClose }: { title: strin
   </div>;
 }
 
-const sameAgents = (a: string[], b: string[]) => a.length === b.length && a.every(id => b.includes(id));
 
 function QuotaCards({ info }: { info: GroupStatus }) {
   const round = info.round;
@@ -92,103 +93,103 @@ function QuotaCards({ info }: { info: GroupStatus }) {
   </div>;
 }
 
-/** Collapsible group header (r05 «Групповой чат»): round, quota, Renew, Pause, Brake, start and reconciliation. */
+/** P047: the room is in a TRUE group interaction (Owner + 2+ addressed Agents, or Agent -> Agent with the Owner observing). */
+export const groupEngaged = (info: GroupStatus | null): boolean => info?.engagement === 'group';
+
+/** Critical states that must stay visible and recoverable even in ordinary 1:1 chatting. */
+export function groupAttention(info: GroupStatus | null): boolean {
+  if (!info) return false;
+  return info.controls.emergency_brake || info.controls.paused || info.holding_turn?.state === 'unknown'
+    || info.failed.length > 0 || info.catchup !== null;
+}
+
+/**
+ * P047 group header. ABSENT in direct 1:1 chatting (no reserved height). A compact strip appears only while a true
+ * group interaction is relevant, with expandable quota / participants / pause / brake details. Critical states
+ * (Brake, Pause, UNKNOWN, failed turns) get a narrow alert strip even in 1:1. There is no Authorize / Start / Renew
+ * step: the Owner's Send is the authorization (default N from ROSC Settings).
+ */
 export function GroupBar({ group, open, onOpenChange }: { group: GroupControls; open: boolean; onOpenChange: (open: boolean) => void }) {
   const info = group.info;
   const [problem, setProblem] = useState('');
-  const defaultQuota = info?.settings.group_reply_quota_default ?? 3;
-  const [quota, setQuota] = useState<number | null>(null);
   /** The held turn an Owner reconciliation already ran for (so the outcome can be reported, never invented). */
   const [reconciled, setReconciled] = useState<string | null>(null);
-  const n = quota ?? defaultQuota;
   const run = async (action: () => Promise<string | null>) => setProblem((await action()) ?? '');
-  if (group.status === 'failed' && !info) return <div className="rosc-group-bar rosc-group-bar--failed" role="alert">
-    Групповой чат недоступен: {group.error} <button type="button" className="rosc-btn rosc-btn--small" onClick={group.onReload}>Повторить</button>
+  if (group.status === 'failed' && !info) return <div className="rosc-group-strip rosc-group-strip--danger" role="alert">
+    Состояние разговора недоступно: {group.error} <button type="button" className="rosc-btn rosc-btn--small" onClick={group.onReload}>Повторить</button>
   </div>;
   if (!info) return null;
+  const engaged = groupEngaged(info);
+  const attention = groupAttention(info);
+  if (!engaged && !attention) return null;
   const state = roomState(info);
   const round = info.round;
-  const supported = new Set(info.roster.filter(r => r.group_supported).map(r => r.agent_id));
-  const activeSupported = info.members.filter(m => m.state === 'active' && supported.has(m.agent_id)).map(m => m.agent_id);
-  const grantAgents = round ? Object.keys(round.grants).filter(a => supported.has(a)) : [];
-  const held = info.holding_turn !== null;
   const busy = group.busy !== null;
-  const totalPublished = round ? Object.values(round.grants).reduce((sum, g) => sum + g.published, 0) : 0;
-  const totalQuota = round ? Object.values(round.grants).reduce((sum, g) => sum + g.quota, 0) : 0;
-  const canStart = Boolean(round && round.state === 'open' && !held && !info.driver.running && !info.controls.paused
-    && !info.controls.emergency_brake && !info.catchup);
-  const quotaOptions = [1, 2, 3, 4, 5].includes(defaultQuota) ? [1, 2, 3, 4, 5] : [1, 2, 3, 4, 5, defaultQuota].sort((a, b) => a - b);
-  const last = info.driver.last;
-  const lastNote = !info.driver.running && last?.reason && ['driver_error'].includes(last.reason)
-    ? 'Обработчик хода остановился с ошибкой; состояние комнаты сохранено в Core.' : '';
+  const unknown = info.holding_turn?.state === 'unknown' ? info.holding_turn : null;
+  const controls = <>
+    <button type="button" className={info.controls.paused ? 'rosc-btn rosc-btn--small rosc-btn--on rosc-group-ctl' : 'rosc-btn rosc-btn--small rosc-group-ctl'}
+      aria-pressed={info.controls.paused} disabled={busy || !info.conversation_id}
+      onClick={() => run(() => group.onControls({ paused: !info.controls.paused }))}>
+      {info.controls.paused ? 'Снять паузу' : 'Пауза'}</button>
+    <button type="button" className={info.controls.emergency_brake ? 'rosc-btn rosc-btn--small rosc-btn--danger-on rosc-group-ctl' : 'rosc-btn rosc-btn--small rosc-group-ctl'}
+      aria-pressed={info.controls.emergency_brake} disabled={busy || !info.conversation_id}
+      onClick={() => run(() => group.onControls({ emergency_brake: !info.controls.emergency_brake }))}>
+      {info.controls.emergency_brake ? 'Снять Brake' : 'Brake'}</button>
+  </>;
+  const unknownBanner = unknown && <UnknownBanner turn={unknown} info={info} busy={busy}
+    running={info.driver.running} checked={reconciled === unknown.turn_id}
+    onReconcile={async () => {
+      const id = unknown.turn_id;
+      const failure = await group.onReconcile();
+      setProblem(failure ?? '');
+      if (!failure) setReconciled(id);
+    }} />;
+  const failedNotes = info.failed.map(turn => <p key={turn.turn_id} className="rosc-group-note rosc-group-note--warning">
+    {nameOf(info, turn.agent_id)}: ход не принят дважды ({turnErrorText(turn.error_code)}) — агент исключён из этого обсуждения.</p>);
+  const errorLine = (problem || (group.error && group.status === 'failed'))
+    && <p className="rosc-conversation__error" role="alert">{problem || group.error}</p>;
 
+  if (!engaged) {
+    // Ordinary 1:1 chatting with a critical state: a narrow strip, never the full group panel.
+    return <section className={`rosc-group-strip rosc-group-strip--${state.tone}`} aria-label="Состояние доставки">
+      <div className="rosc-group-strip__row">
+        <span className={`rosc-group-pill rosc-group-pill--${state.tone}`} aria-live="polite">{state.text}</span>
+        <span className="rosc-group-strip__actions">{controls}</span>
+      </div>
+      {unknownBanner}
+      {failedNotes}
+      {errorLine}
+    </section>;
+  }
+
+  const agents = round ? Object.keys(round.grants) : info.members.filter(m => m.state === 'active').map(m => m.agent_id);
   return <section className={`rosc-group-bar rosc-group-bar--${state.tone}`} aria-label="Групповой чат">
     <div className="rosc-group-bar__head">
       <button type="button" className="rosc-group-toggle" aria-expanded={open} onClick={() => onOpenChange(!open)}>
-        <span aria-hidden="true">{open ? '▾' : '▸'}</span> Групповой чат
+        <span aria-hidden="true">{open ? '▾' : '▸'}</span> Группа: Owner{agents.map(a => `, ${nameOf(info, a)}`).join('')}
       </button>
-      <span className="rosc-group-bar__n" title="Разрешённых ответов на каждого агента в текущем раунде">
-        ответов на агента <strong>{round?.per_agent_quota ?? '—'}</strong>
+      <span className="rosc-group-bar__n" title="Потолок ответов каждого агента на одно сообщение Owner (настройка ROSC)">
+        до <strong>{round?.per_agent_quota ?? info.settings.group_reply_quota_default ?? 3}</strong> на агента
       </span>
-      <button type="button" className="rosc-btn rosc-btn--small" disabled={!round || busy || grantAgents.length === 0}
-        title="Новый раунд для тех же агентов: N ответов каждому"
-        onClick={() => run(() => group.onAuthorize(grantAgents, n, true))}>Продлить текущих</button>
-      <button type="button" className={info.controls.paused ? 'rosc-btn rosc-btn--small rosc-btn--on' : 'rosc-btn rosc-btn--small'}
-        aria-pressed={info.controls.paused} disabled={busy || !info.conversation_id}
-        onClick={() => run(() => group.onControls({ paused: !info.controls.paused }))}>
-        {info.controls.paused ? 'Снять паузу' : 'Пауза доставки'}</button>
-      <button type="button" className={info.controls.emergency_brake ? 'rosc-btn rosc-btn--small rosc-btn--danger-on' : 'rosc-btn rosc-btn--small'}
-        aria-pressed={info.controls.emergency_brake} disabled={busy || !info.conversation_id}
-        onClick={() => run(() => group.onControls({ emergency_brake: !info.controls.emergency_brake }))}>
-        {info.controls.emergency_brake ? 'Снять Emergency Brake' : 'Emergency Brake'}</button>
+      <span className="rosc-group-bar__ctl">{controls}</span>
     </div>
     <p className={`rosc-group-pill rosc-group-pill--${state.tone}`} aria-live="polite">
       {state.text}{state.live && <Dots label="формирует ответ" />}
     </p>
+    {unknownBanner}
+    {failedNotes}
     {open && <div className="rosc-group-bar__body">
-      {round ? <>
-        <p className="rosc-group-line">Раунд #{round.round_no} · проход {round.current_pass + 1} · опубликовано {totalPublished}/{totalQuota} · <strong>сообщения Owner не тратят квоту</strong></p>
-        <p className="rosc-group-line">Текущий: <span className="rosc-group-tag">{info.holding_turn ? nameOf(info, info.holding_turn.agent_id) : 'нет активного'}</span>
+      {round && <>
+        <p className="rosc-group-line">Обсуждение #{round.round_no} · каждое новое групповое сообщение Owner открывает новое обсуждение</p>
+        <p className="rosc-group-line">Сейчас: <span className="rosc-group-tag">{info.holding_turn ? nameOf(info, info.holding_turn.agent_id) : 'никто не отвечает'}</span>
           {' '}Далее: {info.waiting.length ? info.waiting.map((a, i) => <span key={`${a}-${i}`} className="rosc-group-tag">{nameOf(info, a)}</span>)
-            : <span className="rosc-muted">{round.state === 'awaiting_owner' ? 'квота исчерпана' : 'следующий проход или конец квоты'}</span>}</p>
+            : <span className="rosc-muted">только если агента позовут по @имени</span>}</p>
         <QuotaCards info={info} />
-      </> : <p className="rosc-group-line">{info.has_owner_message
-        ? 'Модель вызывается только после явного разрешения раунда Owner.'
-        : 'Сначала отправьте сообщение выбранным Workers, затем разрешите им N ответов.'}</p>}
-      {info.failed.map(turn => <p key={turn.turn_id} className="rosc-group-note rosc-group-note--warning">
-        {nameOf(info, turn.agent_id)}: ход не принят дважды ({turnErrorText(turn.error_code)}) — агент исключён из этого раунда.</p>)}
-      {info.holding_turn?.state === 'unknown' && <UnknownBanner turn={info.holding_turn} info={info} busy={busy}
-        running={info.driver.running} checked={reconciled === info.holding_turn.turn_id}
-        onReconcile={async () => {
-          const id = info.holding_turn?.turn_id ?? null;
-          const failure = await group.onReconcile();
-          setProblem(failure ?? '');
-          if (!failure) setReconciled(id);
-        }} />}
-      <div className="rosc-group-actions">
-        <label className="rosc-group-quota-select">Ответов на агента
-          <select value={n} onChange={event => setQuota(Number(event.target.value))} disabled={busy}>
-            {quotaOptions.map(value => <option key={value} value={value}>{value}</option>)}
-          </select>
-        </label>
-        {!round && <button type="button" className="rosc-btn rosc-btn--small rosc-btn--primary"
-          disabled={busy || activeSupported.length === 0}
-          title={activeSupported.length === 0 ? 'Нет активных адресатов с поддерживаемым адаптером: отправьте им сообщение' : undefined}
-          onClick={() => run(() => group.onAuthorize(activeSupported, n, false))}>
-          Разрешить {n} {n === 1 ? 'ответ' : 'ответа'}{activeSupported.length ? `: ${activeSupported.map(a => nameOf(info, a)).join(', ')}` : ''}</button>}
-        {round && activeSupported.length > 0 && !sameAgents(activeSupported, grantAgents) && <button type="button"
-          className="rosc-btn rosc-btn--small" disabled={busy || held || info.driver.running}
-          title="Закрывает текущий раунд и разрешает новый для тех, к кому вы обратились последним сообщением"
-          onClick={() => run(() => group.onAuthorize(activeSupported, n, true))}>
-          Новый раунд ({n}): {activeSupported.map(a => nameOf(info, a)).join(', ')}</button>}
-        {round && <button type="button" className="rosc-btn rosc-btn--small rosc-btn--primary" disabled={!canStart || busy}
-          title={canStart ? 'Запускает разрешённую очередь: по одному агенту за раз' : undefined}
-          onClick={() => run(group.onStart)}>{info.driver.running ? 'Ход выполняется…' : 'Запустить ход'}</button>}
-      </div>
-      <p className="rosc-group-hint">Одна генерация на комнату за раз. Следующий агент получает опубликованные ответы и новые сообщения Owner только в своём очередном ходе. Пауза и Brake запрещают новые ходы, но не отменяют уже запущенный.</p>
-      {lastNote && <p className="rosc-group-note rosc-group-note--warning">{lastNote}</p>}
+      </>}
+      <GroupParticipants group={group} open onOpenChange={() => undefined} embedded />
+      <p className="rosc-group-hint">Отправка сообщения двум и более агентам сама разрешает ответы: каждый отвечает один раз, дальше — только если коллега обратился к нему по @имени, не больше N. Одна генерация на комнату за раз. Пауза и Brake запрещают новые ходы, но не отменяют уже запущенный.</p>
     </div>}
-    {(problem || (group.error && group.status === 'failed')) && <p className="rosc-conversation__error" role="alert">{problem || group.error}</p>}
+    {errorLine}
   </section>;
 }
 
@@ -202,7 +203,7 @@ function UnknownBanner({ turn, info, busy, running, checked, onReconcile }: { tu
 }
 
 /** Collapsible roster (r05 «Участники»): Active / Passive / Released, missed count, Owner-only Release. */
-export function GroupParticipants({ group, open, onOpenChange }: { group: GroupControls; open: boolean; onOpenChange: (open: boolean) => void }) {
+export function GroupParticipants({ group, open, onOpenChange, embedded = false }: { group: GroupControls; open: boolean; onOpenChange: (open: boolean) => void; embedded?: boolean }) {
   const info = group.info;
   const [confirm, setConfirm] = useState<string | null>(null);
   const [problem, setProblem] = useState('');
@@ -210,9 +211,10 @@ export function GroupParticipants({ group, open, onOpenChange }: { group: GroupC
   const members = new Map(info.members.map(m => [m.agent_id, m]));
   const count = (state: string) => info.members.filter(m => m.state === state).length;
   return <section className="rosc-group-people" aria-label="Участники">
-    <button type="button" className="rosc-group-toggle" aria-expanded={open} onClick={() => onOpenChange(!open)}>
-      <span aria-hidden="true">{open ? '▾' : '▸'}</span> Участники: <small>active {count('active')} · passive {count('passive')} · released {count('released')}</small>
-    </button>
+    {embedded ? <p className="rosc-group-line">Участники: <small>active {count('active')} · passive {count('passive')} · released {count('released')}</small></p>
+      : <button type="button" className="rosc-group-toggle" aria-expanded={open} onClick={() => onOpenChange(!open)}>
+        <span aria-hidden="true">{open ? '▾' : '▸'}</span> Участники: <small>active {count('active')} · passive {count('passive')} · released {count('released')}</small>
+      </button>}
     {open && <div className="rosc-group-people__list">
       {info.roster.length === 0 && <p className="rosc-group-hint">В этой области нет назначенных агентов.</p>}
       {info.roster.map(entry => {
@@ -289,7 +291,7 @@ export function GroupCatchupDialog({ group }: { group: GroupControls }) {
       <button type="button" className="rosc-btn" disabled={group.busy !== null} onClick={() => choose('skip_backlog')}>Пропустить историю</button>
       <button type="button" className="rosc-link-btn" onClick={() => setDismissed(catchup.turn_id)}>Отмена</button>
     </div>
-    <small>Решение запускает уже разрешённую очередь этой комнаты.</small>
+    <small>Решение продолжает уже разрешённую очередь этой комнаты.</small>
     {problem && <p className="rosc-conversation__error" role="alert">{problem}</p>}
   </GroupDialog>;
 }
@@ -308,12 +310,13 @@ export function GroupActivityRow({ info }: { info: GroupStatus | null }) {
 
 export const ARCHITECT_CHIP = 'architect';
 
-/** Composer addressees: Architect (existing delivery path) + every in-scope Worker; unsupported ones disabled. */
+/** Composer addressees: Architect + every in-scope Worker; unsupported ones disabled. Selection is never changed silently. */
 export function RecipientChips({ group, selected, onToggle, disabled, architect }: {
   group: GroupControls; selected: ReadonlySet<string>; onToggle: (id: string) => void; disabled: boolean;
   architect: { label: string; available: boolean; title?: string };
 }) {
   const workers = (group.info?.roster ?? []).filter(entry => entry.role === 'worker');
+  // P047: the selection is shown exactly as made; an unavailable Agent stays visible but cannot be chosen.
   const chip = (id: string, label: string, role: string, enabled: boolean, title?: string) => {
     const on = selected.has(id);
     return <label key={id} className={`rosc-recipient${on ? ' rosc-recipient--on' : ''}${enabled ? '' : ' rosc-recipient--off'}`} title={title}>
@@ -351,4 +354,25 @@ export function MessageAddress({ message, info, refPrefix }: { message: Conversa
 export function senderName(message: ConversationMessage, info: GroupStatus | null): string {
   if (message.sender.kind === 'worker') return message.sender.agent_display_name ?? nameOf(info, message.sender.agent_id);
   return message.sender.display_name;
+}
+
+/**
+ * P047 composer routing, shared by PC and TC. Owner -> one Worker: a DIRECT reply; Owner -> two or more Agents (Workers,
+ * optionally with the Architect): ONE group message. The Architect alone keeps its established direct path. Returns the
+ * structured addressees for the group route, or a truthful reason the selection cannot be sent now.
+ */
+export function routeSelection(info: GroupStatus | null, selected: ReadonlySet<string>):
+  { route: 'architect' | 'group'; to: string[]; problem: string | null } {
+  const workers = [...selected].filter(id => id !== ARCHITECT_CHIP);
+  if (workers.length === 0) return { route: 'architect', to: [], problem: null };
+  const to = [...workers];
+  if (selected.has(ARCHITECT_CHIP)) {
+    const architect = info?.roster.find(entry => entry.role === 'architect');
+    if (!architect) return { route: 'group', to, problem: 'Architect не назначен этому проекту.' };
+    if (!architect.group_supported) {
+      return { route: 'group', to, problem: UNSUPPORTED_TEXT[architect.unsupported_reason ?? ''] ?? 'Architect сейчас недоступен для группового разговора.' };
+    }
+    to.push(architect.agent_id);
+  }
+  return { route: 'group', to, problem: null };
 }

@@ -114,8 +114,23 @@ class CoreCase(base.StageCase):
             return {"claim": claim}
         view = self.core.dispatch(claim.turn_id, self.transport)
         if view["state"] == "accepted":
-            view = {**view, **self.core.complete(claim.turn_id, reply or f"reply from {claim.agent_id[:4]}")}
+            # P047: a later pass needs a real addressed peer turn, so the default simulated discussion addresses the
+            # other granted Agents of the round (with only one Agent there is no peer: the reply goes to the Owner).
+            rnd = self.core.room_status(OWNER, 1, task_id=self._task_of(room))["round"]
+            peers = [a for a in (rnd["grants"] if rnd else {}) if a != claim.agent_id
+                     and self._member_state(room, a) not in (None, "released")]
+            view = {**view, **self.core.complete(claim.turn_id, reply or f"reply from {claim.agent_id[:4]}",
+                                                 to=peers or None)}
         return {"claim": claim, **view}
+
+    def _task_of(self, room: str):
+        rows = self.fetch("SELECT task_id FROM conversations WHERE conversation_id = ?", room)
+        return rows[0][0] if rows else None
+
+    def _member_state(self, room: str, agent_id: str):
+        rows = self.fetch("SELECT state FROM conversation_members WHERE conversation_id = ? AND agent_id = ?",
+                          room, agent_id)
+        return rows[0][0] if rows else None
 
     def drain(self, room: str, limit: int = 50) -> list[str]:
         order = []
@@ -216,9 +231,11 @@ class LaneTests(CoreCase):
             self.core.get_or_create_native_lane(self.room(), foreign)
 
     def test_root_binding_change_invalidates_lane_instead_of_resuming(self) -> None:
-        room, _ = self.group([self.A], quota=2)
+        room, _ = self.group([self.A], quota=1)
         first = self.step(room)
         old_lane = first["lane_id"]
+        # P047: a single Agent gets no second pass without new addressed input; the Owner asks again instead.
+        self.core.authorize_round(OWNER, 1, agents=[self.A], quota=1, renew=True)
         sessions = make_session_factory(self.data / "rosc.db")
         with sessions() as session:
             binding = session.query(ProjectRootBinding).filter_by(project_id=1).one()
@@ -439,11 +456,12 @@ class QuotaAndQueueTests(CoreCase):
         room = core.room_status(OWNER, 1)["conversation_id"]
         publishers: list[str] = []
         transport = FakeTransport()
-        for _ in range(9):
+        for _ in range(12):
             claim = core.claim_next(room)
-            self.assertEqual(claim.status, "reserved")
+            if claim.status != "reserved":
+                break
             core.dispatch(claim.turn_id, transport)
-            core.complete(claim.turn_id, "r")
+            core.complete(claim.turn_id, "r", to=[a for a in (self.A, self.B, self.C) if a != claim.agent_id])
             publishers.append(claim.agent_id)
             if len(publishers) == 3:  # restart exactly at the pass boundary
                 core = WorkerConversationCore(make_session_factory(db), LocalOwnerPolicy(), rng=random.Random(seed + 7))
@@ -452,10 +470,12 @@ class QuotaAndQueueTests(CoreCase):
                 core = WorkerConversationCore(make_session_factory(db), LocalOwnerPolicy(), rng=random.Random(seed + 99))
                 self.assertEqual([t["agent_id"] for t in core.room_status(OWNER, 1)["round"]["turns"]
                                   if t["pass"] == 1], stored)
-        passes = [publishers[i:i + 3] for i in (0, 3, 6)]
-        for previous, current in zip(passes, passes[1:]):
-            self.assertNotEqual(current[0], previous[-1])
-            self.assertEqual(sorted(current), sorted([self.A, self.B, self.C]))
+        # Pass 0 is a full rotation; P047: later passes contain only Agents a peer addressed after their last turn, so
+        # the previous speaker never opens the next pass and nobody exceeds N.
+        self.assertEqual(sorted(publishers[:3]), sorted([self.A, self.B, self.C]))
+        self.assertEqual(len(publishers), 9)  # everyone keeps being addressed, so the whole ceiling is used here
+        for agent in (self.A, self.B, self.C):
+            self.assertLessEqual(publishers.count(agent), 3)
         for a, b in zip(publishers, publishers[1:]):
             self.assertNotEqual(a, b)
 
@@ -492,7 +512,9 @@ class QuotaAndQueueTests(CoreCase):
         for a, b in zip(order, order[1:]):
             self.assertNotEqual(a, b)
         task_room, _ = self.group([self.C], quota=3, task_id=1)
-        self.assertEqual(self.drain(task_room), [self.C] * 3)  # the single-agent exception
+        # P047: N is a ceiling, not a command: a lone Agent answers once; without an addressed peer turn there is no
+        # second pass, whatever quota remains.
+        self.assertEqual(self.drain(task_room), [self.C])
 
     def test_adjacency_uses_last_actual_publisher_after_retry(self) -> None:
         room, _ = self.group([self.A, self.B, self.C], quota=2)
@@ -516,7 +538,7 @@ class CursorTests(CoreCase):
         accepted_through = view["input_through_ordinal"]
         o2 = self.say("owner 2", to=[self.A, self.B])
         o3 = self.say("owner 3", to=[self.A, self.B])
-        published = self.core.complete(claim.turn_id, "first reply")
+        published = self.core.complete(claim.turn_id, "first reply", to=[second])
         status = {m["agent_id"]: m for m in self.status()["members"]}
         self.assertEqual(status[first]["applied_through"], accepted_through)
         self.assertNotEqual(status[first]["applied_through"], published["ordinal"])
@@ -526,7 +548,7 @@ class CursorTests(CoreCase):
         self.assertEqual(claim2.agent_id, second)
         payload2 = self.core.dispatch(claim2.turn_id, self.transport)["payload"]
         self.assertEqual([e.ordinal for e in payload2.events], list(range(1, published["ordinal"] + 1)))
-        self.core.complete(claim2.turn_id, "second reply")
+        self.core.complete(claim2.turn_id, "second reply", to=[first])
         # First agent's next turn: only unseen #o2, #o3 and the peer reply, never its own reply.
         claim3 = self.core.claim_next(room)
         self.assertEqual(claim3.agent_id, first)
@@ -941,12 +963,17 @@ class CoordinatorReviewTests(CoreCase):
         b = {m["agent_id"]: m for m in self.status()["members"]}[self.B]
         self.assertEqual(b["state"], "passive")
         self.assertGreaterEqual(b["missed"], 3)  # the three to-A messages (+ A's reply if A answered after B)
+        b_turns = 0
         for _ in range(2):
             claim = self.core.claim_next(room)
+            self.assertEqual(claim.status, "reserved")
             payload = self.core.dispatch(claim.turn_id, self.transport)["payload"]
             if claim.agent_id == self.B:
+                b_turns += 1
                 self.assertTrue({m["ordinal"] for m in to_a} <= {e.ordinal for e in payload.events})
-            self.core.complete(claim.turn_id, "ok")
+            # P047: each reply addresses the peer, which is what earns the peer its next pass.
+            self.core.complete(claim.turn_id, "ok", to=[self.B if claim.agent_id == self.A else self.A])
+        self.assertEqual(b_turns, 1)
 
     def test_released_period_messages_excluded_after_reinvite(self) -> None:
         room, _ = self.group([self.A, self.B], quota=1)

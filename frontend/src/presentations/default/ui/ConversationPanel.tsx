@@ -2,8 +2,8 @@ import { useEffect, useId, useMemo, useRef, useState, type FormEvent } from 'rea
 import type { ConversationControls } from '../../../app/presentation/contracts';
 import { architectReason, describeArchitect } from './architectView';
 import { findMatches, renderBody } from './chatSearch';
-import { ARCHITECT_CHIP, GroupActivityRow, GroupBar, GroupCatchupDialog, GroupParticipants, MessageAddress, RecipientChips,
-  ReleaseOffers, senderName } from './GroupConversation';
+import { GroupActivityRow, GroupBar, GroupCatchupDialog, MessageAddress, RecipientChips, ReleaseOffers, routeSelection,
+  senderName } from './GroupConversation';
 
 type Props = {
   projectId: string;
@@ -55,11 +55,11 @@ export function ConversationPanel({ projectId, conversation, collapsed, onCollap
   const group = conversation.group;
   const [selected, setSelected] = useState<Set<string>>(() => new Set());
   const [groupOpen, setGroupOpen] = useState(false);
-  const [peopleOpen, setPeopleOpen] = useState(false);
   /** Addressee chips appear once this room has an in-scope Worker; until then the composer is the plain Architect chat. */
   const hasWorkers = (group.info?.roster ?? []).some(entry => entry.role === 'worker');
-  const workers = [...selected].filter(id => id !== ARCHITECT_CHIP);
-  const mixed = workers.length > 0 && selected.has(ARCHITECT_CHIP);
+  const routed = routeSelection(group.info, selected);
+  const workers = routed.to;
+  const mixed = routed.problem !== null;
   const toggle = (id: string) => setSelected(prev => {
     const next = new Set(prev);
     if (next.has(id)) next.delete(id); else next.add(id);
@@ -134,9 +134,9 @@ export function ConversationPanel({ projectId, conversation, collapsed, onCollap
     pending.current = { body, to, key };
     setFailure('');
     try {
-      // Workers selected: a P046 group message (stored only; a model runs after an explicit round grant + start).
-      // Otherwise the established Project Conversation path (delivered to a verified live Architect).
-      const problem = workers.length > 0 ? await group.onPost(body, key, workers) : await conversation.onSend(body, key);
+      // P047: Workers selected -> ONE Send that stores the message AND authorizes the replies (one Worker: direct reply;
+      // two+ Agents: group). Otherwise the established Project Conversation path to a verified live Architect.
+      const problem = routed.route === 'group' ? await group.onPost(body, key, workers) : await conversation.onSend(body, key);
       if (problem === null) {
         setDraft(current => current.trim() === body ? '' : current);
         pending.current = null;
@@ -167,7 +167,6 @@ export function ConversationPanel({ projectId, conversation, collapsed, onCollap
       </div>
     </header>
     <GroupBar group={group} open={groupOpen} onOpenChange={setGroupOpen} />
-    <GroupParticipants group={group} open={peopleOpen} onOpenChange={setPeopleOpen} />
     {searchOpen && <div className="rosc-conversation__search">
       <input type="search" aria-label="Поиск по сообщениям" placeholder="Найти в переписке…"
         value={searchTerm} autoFocus
@@ -242,8 +241,7 @@ export function ConversationPanel({ projectId, conversation, collapsed, onCollap
       {hasWorkers && <RecipientChips group={group} selected={selected} onToggle={toggle} disabled={locked}
         architect={{ label: 'Architect', available: true,
           title: live ? 'Сообщение будет передано активному Architect' : 'Architect не активирован: сообщение только сохранится' }} />}
-      {mixed && <p className="rosc-conversation__error" role="alert">
-        Групповые ходы Architect пока не интегрированы: отправьте сообщение Architect и Workers отдельно.</p>}
+      {mixed && <p className="rosc-conversation__error" role="alert">{routed.problem}</p>}
       <textarea aria-label="Сообщение в Project Conversation" placeholder="Обсудить задачу, задать вопрос…" rows={3}
         value={draft} readOnly={locked} aria-busy={locked}
         onChange={event => setDraft(event.target.value)}
@@ -263,16 +261,18 @@ export function ConversationPanel({ projectId, conversation, collapsed, onCollap
         </div>
         <button type="submit" className="rosc-btn rosc-btn--primary"
           disabled={!draft.trim() || !ready || state.sending || locked || mixed || group.busy === 'post'}>
-          {state.sending || group.busy === 'post' ? 'Сохранение…' : workers.length > 0 ? `Отправить · ${workers.length} адресат(а/ов)` : 'Отправить'}</button>
+          {group.busy === 'post' ? 'Отправка…' : state.sending ? 'Сохранение…' : 'Отправить'}</button>
       </div>
       {failure && <p className="rosc-conversation__error" role="alert">{failure}</p>}
+      {group.notice && <p className="rosc-conversation__hint" role="status">{group.notice}</p>}
       {ambiguous && <p className="rosc-conversation__hint">
         Предыдущая попытка могла сохраниться в ROSC. Проверьте историю: изменённый текст будет отправлен как новое сообщение.
       </p>}
       {!ready && <p className="rosc-conversation__hint">Отправка станет доступна после загрузки истории.</p>}
       {deliveryFailure && <p className="rosc-conversation__error" role="alert">{deliveryFailure}</p>}
       <p className="rosc-conversation__hint">
-        {workers.length > 0 ? 'Сообщение сохранится в Project Conversation для выбранных Workers. Модель вызывается только после «Разрешить» и «Запустить ход» в блоке «Групповой чат».'
+        {workers.length === 1 ? 'Личное сообщение: адресат ответит один раз, сразу после отправки.'
+          : workers.length > 1 ? 'Групповое сообщение: каждый адресат ответит один раз; дальше агенты отвечают друг другу только по @имени, не больше N на агента. Вы видите всё.'
           : live ? 'Новое сообщение сохраняется в ROSC и передаётся Architect. Ранее сохранённые сообщения не пересылаются.'
           : unresolved ? 'Сообщение сохраняется только в ROSC. Runtime требует безопасного разрешения; доставки и ответа не будет.'
             : 'Сообщение сохраняется только в ROSC. Architect не активирован — доставки и ответа не будет.'}

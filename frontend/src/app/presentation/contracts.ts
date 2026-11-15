@@ -213,9 +213,10 @@ export type ContextAccessControlState = {
 };
 
 /**
- * P046 group conversation of one room (PC or this TC). `info` is exactly what Core reports; every mutation is an
- * explicit Owner action and resolves to an error message or null. Only `onStart` can launch provider turns, and only
- * for a round the Owner has already authorized.
+ * P046/P047 conversation room state (PC or this TC). `info` is exactly what Core reports; every mutation is an explicit
+ * Owner action and resolves to an error message or null. P047: `onPost` is ONE Owner Send — it stores the message and
+ * authorizes the addressed Agents' replies, which Core starts by itself. `onStart` only resumes an already authorized
+ * queue (e.g. after a catch-up decision).
  */
 export type GroupControls = {
   status: LoadStatus;
@@ -223,6 +224,8 @@ export type GroupControls = {
   error: string;
   /** The action currently in flight (one at a time), or null. */
   busy: string | null;
+  /** P047: truthful note about the last Send when Core is holding dispatch (pause / brake / UNKNOWN); '' otherwise. */
+  notice: string;
   onReload: () => void;
   onPost: (body: string, clientKey: string, to: string[]) => Promise<string | null>;
   onAuthorize: (agents: string[], quota: number, renew: boolean) => Promise<string | null>;
@@ -266,6 +269,8 @@ export type ProjectViewProps = {
   workspace: WorkspaceControls;
   conversation: ConversationControls;
   assignments: ProjectAssignmentsControls;
+  /** P047: per-Worker lifecycle controls and verified CLI status for the Project Work Area (shared with Task). */
+  workers: TaskWorkerControls;
   /** Independent left Work Area text scale; never shared with Task or Dashboard. */
   textScale: TextScaleControls;
   tab: ProjectTab;

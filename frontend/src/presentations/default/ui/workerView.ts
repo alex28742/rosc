@@ -1,3 +1,4 @@
+import type { LoadStatus } from '../../../app/presentation/contracts';
 import type { ProjectWorker, WorkerBootstrap, WorkerSession } from '../../../core/models';
 
 /** Human wording for a non-secret Core reason code; unknown codes are shown as-is rather than guessed at. */
@@ -47,7 +48,9 @@ export function describeBootstrap(session: WorkerSession): BootstrapView {
   const files = b.sources.join(', ');
   if (session.state !== 'active') return { line: 'Контекст проекта готовится после подтверждения CLI-сессии.', tone: 'neutral', button: null };
   switch (b.state) {
-    case 'confirmed': return { line: `✓ Контекст проекта подготовлен: Worker прочитал ${files} (подтверждено hook-ом CLI).`, tone: 'ok', button: null };
+    case 'confirmed': return { line: b.reason === 'identity_acknowledged'
+      ? '✓ Worker подтвердил данные проекта ROSC (имя, ID, корень).'
+      : `✓ Контекст проекта подготовлен: Worker прочитал ${files} (подтверждено hook-ом CLI).`, tone: 'ok', button: null };
     case 'pending': return { line: 'Ожидаем подтверждение Worker: он читает entry point проекта…', tone: 'neutral', button: null };
     case 'failed': return { line: b.reason === 'reads_missing'
       ? 'Контекст не подготовлен: hook CLI не зафиксировал чтение всех файлов.'
@@ -55,6 +58,7 @@ export function describeBootstrap(session: WorkerSession): BootstrapView {
     case 'unknown': return { line: 'Подтверждение не получено. Повторно не отправляем: проверьте терминал Worker.', tone: 'warn', button: null };
     case 'stale': return { line: 'Файлы проекта изменились после подготовки: контекст нужно подготовить заново.', tone: 'warn', button: 'Подготовить контекст' };
     default:
+      if (b.reason === 'identity_missing') return { line: 'Эта CLI-сессия запущена до P047 и не получила проверенные данные проекта ROSC (имя, ID, корень; Git не обязателен). Представьте проект один раз — без чтения файлов и изменений.', tone: 'warn', button: b.can_bootstrap ? 'Представить проект' : null };
       if (b.reason === 'no_sources') return { line: 'В проекте не найден entry point (AGENTS.md, CLAUDE.md или docs entrypoint): читать нечего.', tone: 'neutral', button: null };
       return { line: 'Контекст проекта не подготовлен. Отдельный набор правил Worker в ROSC не определён.', tone: 'neutral', button: b.can_bootstrap ? 'Подготовить контекст' : null };
   }
@@ -63,3 +67,19 @@ export function describeBootstrap(session: WorkerSession): BootstrapView {
 /** The terminal help is only worth showing where Owner may need the CLI (trust prompt, unclear state) and a session exists. */
 export const showsTerminalHelp = (session: WorkerSession) =>
   session.terminal !== null || session.state === 'unknown';
+
+export type WorkerSummaryTone = 'on' | 'off' | 'warn' | 'unknown';
+
+/**
+ * P047: one truthful Project-level summary of the interactive (tmux) Worker CLI sessions, derived ONLY from the verified
+ * /workers read. Never a placeholder `0`: while loading it is «проверяется», on a failed read «неизвестно».
+ */
+export function summarizeWorkers(status: LoadStatus, workers: ProjectWorker[]): { text: string; tone: WorkerSummaryTone } {
+  if (status === 'loading') return { text: 'Worker CLI: проверяется', tone: 'unknown' };
+  if (status === 'failed') return { text: 'Worker CLI: неизвестно', tone: 'warn' };
+  if (workers.length === 0) return { text: 'Workers не назначены', tone: 'off' };
+  const active = workers.filter(item => item.session.state === 'active').length;
+  const unclear = workers.some(item => item.session.state === 'unknown' || item.session.state === 'unavailable');
+  return { text: `Worker CLI ${active}/${workers.length} ${active > 0 ? 'активен' : 'не активен'}`,
+    tone: active > 0 ? 'on' : unclear ? 'warn' : 'off' };
+}

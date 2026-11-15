@@ -110,7 +110,7 @@ export type GroupRosterEntry = {
   role: 'architect' | 'worker';
   runtime_adapter: string;
   model_id: string;
-  /** True only when a real group transport exists for this Agent (v1.0: Claude Code Workers). */
+  /** True only when this Agent can take a real turn here now (Claude Code Workers; the Architect only while active). */
   group_supported: boolean;
   unsupported_reason: string | null;
 };
@@ -123,6 +123,7 @@ export type GroupTurn = {
 };
 export type GroupRound = {
   round_id: string; round_no: number; state: 'open' | 'awaiting_owner' | 'closed'; per_agent_quota: number;
+  authorizing_message_id?: string | null;
   current_pass: number; grants: Record<string, { quota: number; published: number; failed: boolean }>; turns: GroupTurn[];
 };
 export type GroupMember = {
@@ -134,7 +135,10 @@ export type GroupMember = {
 export type GroupCatchup = { turn_id: string; agent_id: string; from: number; through: number; chars: number; limit: number; count: number };
 /** `cli_confirmed`: the CLI's own init event named this lane's session and the process is alive; never inferred from tmux. */
 export type GroupActivity = 'cli_confirmed' | 'awaiting_confirmation' | null;
+/** P047: `group` = Owner + 2+ addressed Agents, or Agent -> Agent with the Owner observing; `direct` = Owner -> one Agent. */
+export type GroupEngagement = 'none' | 'direct' | 'group';
 export type GroupStatus = {
+  engagement?: GroupEngagement;
   conversation_id: string | null;
   roster: GroupRosterEntry[];
   names: Record<string, string>;
@@ -207,7 +211,13 @@ export type ConversationPage = {
 };
 
 export type ConversationMessageInput = { client_key: string; body: string; recipient?: MessageRecipient };
-export type ConversationMessageResult = { message: ConversationMessage; replayed: boolean };
+export type ConversationMessageResult = { message: ConversationMessage; replayed: boolean; dispatch?: GroupDispatch };
+/** P047: what Core did with an Owner group-route Send (never a claim that a model answered). */
+export type GroupDispatch = {
+  mode: 'direct' | 'group'; agents: string[]; started: boolean;
+  round: { round_id: string; round_no: number; per_agent_quota: number } | null;
+  blocked: 'paused' | 'emergency_brake' | 'unknown_turn' | null;
+};
 export type DeliveryResult = { delivery: MessageDelivery };
 
 /** Can only be produced by an explicit user confirmation; the repair endpoint requires it. */
@@ -347,6 +357,8 @@ export type WorkerBootstrap = {
   /** Project-relative entry-point files that were (or would be) read. */
   sources: string[];
   confirmed_at: string | null;
+  /** P047: whether this incarnation got the trusted ROSC Project identity at launch. */
+  identity?: 'provided_at_launch' | 'missing';
 };
 export type WorkerSession = {
   project_id: string;

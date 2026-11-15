@@ -178,14 +178,13 @@ describe('Project Workers in the Task context (P042A r02)', () => {
     expect(api.activateWorkerSession).not.toHaveBeenCalled();
   });
 
-  it('shows no demo controls, no internal identifiers, and only a disabled addressee checkbox', async () => {
+  it('shows no demo controls, no internal identifiers and no stale "PC/TC later" addressee checkbox', async () => {
     const api = open([projectWorker('w-1', { state: 'active', reason: 'initialised' }, 'Мария')]);
     render(<App api={api} />);
     const r = await row('w-1');
     await r.findByText('CLI-сессия активна');
-    const box = r.getByRole('checkbox') as HTMLInputElement;
-    expect(box.disabled).toBe(true);
-    expect(box.title).toMatch(/появится позже/);
+    expect(r.queryByRole('checkbox')).toBeNull();  // P047: addressing lives in the PC/TC composer, which exists now
+    expect(document.body.textContent ?? '').not.toMatch(/появится позже|появятся в следующих срезах/);
     expect(r.getByText('@Мария')).toBeTruthy();
     expect(document.body.textContent ?? '').not.toMatch(/pane|incarnation|%\d|COLD|WARM|Симуляция|симуляция|только демо/);
   });

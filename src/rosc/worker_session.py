@@ -206,12 +206,33 @@ class Observation:
     bootstrap: dict | None = None
 
 
+def _write_private_json(path: Path, value: dict) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temp = path.with_name(path.name + ".tmp")
+    temp.write_text(json.dumps(value, sort_keys=True), encoding="utf-8")
+    os.chmod(temp, 0o600)
+    os.replace(temp, path)
+
+
 def _aware(value: datetime) -> datetime:
     return value if value.tzinfo else value.replace(tzinfo=timezone.utc)
 
 
 def _safe_name(project_id: int, agent_id: str) -> str:
     return f"rosc-p{project_id:04d}-{agent_id[:8]}"
+
+
+def project_identity_text(project: Project, agent: AgentDefinition, root: str, binding_version: int) -> str:
+    """P047: small TRUSTED ROSC identity for an interactive Worker.  Project name/ID are ROSC logical metadata that need
+    not match the directory basename; Git is optional.  Contains no instructions to act, read or change anything."""
+    return (f"ROSC PROJECT IDENTITY (trusted, from the ROSC database): you are @{agent.display_name}, a ROSC Worker "
+            f"agent for ROSC Project P{project.id:04d} named {project.name[:120]!r} (project uuid {project.project_uuid}). "
+            f"Its validated Root Binding is {root} (binding version {binding_version}); that directory is your "
+            "working directory and IS this project. The Project display name is ROSC logical metadata: it does not "
+            "have to match the directory basename, and a Git repository is optional. Never conclude you are in the "
+            "wrong project because of the folder name or a missing .git, never rename the directory and never run "
+            f"git init for that reason. If asked, answer: Project {project.name[:120]!r} is bound to {root}. "
+            "Wait for the Owner's instructions.")
 
 
 class WorkerSessionService:
@@ -396,7 +417,9 @@ class WorkerSessionService:
         seen = {os.path.realpath(item) for item in reads if isinstance(item, str)} if isinstance(reads, list) else set()
         if data.get("claimed") != "OK":
             return B_FAILED, "worker_reported_failure", when
-        if not required or not required <= seen:
+        if not required:
+            return B_CONFIRMED, "identity_acknowledged", when  # identity-only introduction: nothing had to be read
+        if not required <= seen:
             return B_FAILED, "reads_missing", when
         return B_CONFIRMED, "context_read", when
 
@@ -407,10 +430,22 @@ class WorkerSessionService:
             return False
         return isinstance(data, dict) and data.get("incarnation") == row.incarnation and data.get("token") == token
 
+    def _identity_given(self, row: WorkerSession, project: Project) -> bool:
+        """Was the CURRENT Root Binding's trusted identity part of this incarnation's launch (P047)?"""
+        try:
+            data = json.loads((self._dir / f"{row.incarnation}.identity.json").read_text(encoding="utf-8"))
+            binding = validate_project_identity(project)
+        except (OSError, ValueError, ProjectIdentityError):
+            return False
+        return (isinstance(data, dict) and data.get("incarnation") == row.incarnation
+                and data.get("binding_version") == binding.version and data.get("root") == binding.root_path)
+
     def _observe_bootstrap(self, row: WorkerSession, project: Project, obs: Observation) -> dict:
+        identity = "provided_at_launch" if self._identity_given(row, project) else "missing"
+
         def out(state: str, reason: str, *, sources=(), can=False, when=None) -> dict:
             return {"state": state, "reason": reason, "can_bootstrap": can, "sources": list(sources),
-                    "confirmed_at": _iso(when)}
+                    "confirmed_at": _iso(when), "identity": identity}
         if obs.state != STATE_ACTIVE:
             return out(B_NONE, "cli_not_active")
         try:
@@ -419,6 +454,10 @@ class WorkerSessionService:
             return out(B_NONE, "project_identity")
         names = [name for name, _ in found]
         if not row.bootstrap_token:
+            # A session started before P047 (or before a binding change) never got the trusted identity: the Owner's
+            # explicit «Подготовить контекст» introduces it once, even when the project has no entry-point files.
+            if not found and identity == "missing":
+                return out(B_NONE, "identity_missing", can=True)
             return out(B_NONE, "not_requested" if found else "no_sources", sources=names, can=bool(found))
         requested = json.loads(row.bootstrap_sources or "[]")
         if row.bootstrap_digest != digest:
@@ -528,9 +567,18 @@ class WorkerSessionService:
                                                  "PostToolUse": [entry("read", "Read")], "Stop": [entry("stop")]}},
                                       separators=(",", ":"))
                 created = False
+                binding = validate_project_identity(project)
+                identity = project_identity_text(project, agent, root, binding.version)
+                try:
+                    # P047: the trusted identity is part of THIS incarnation's launch (once, never typed into a TUI).
+                    _write_private_json(self._dir / f"{incarnation}.identity.json",
+                                        {"incarnation": incarnation, "project_id": project_id,
+                                         "binding_version": binding.version, "root": root})
+                except OSError:
+                    return self._view(project_id, agent_key, Observation(STATE_UNAVAILABLE, "spawn_failed"))
                 try:
                     self._tmux.new_session(name, root, {NONCE_ENV: incarnation, FILE_ENV: str(ack_file)},
-                                           [cli, "--settings", settings])
+                                           [cli, "--settings", settings, "--append-system-prompt", identity])
                     created = True
                     panes = self._tmux.panes(name)
                 except TmuxError:
@@ -560,7 +608,8 @@ class WorkerSessionService:
                     self._cleanup(name)  # we just created it: ROSC-owned, safe to remove; nothing was recorded
                     raise RegistryStoreError("Worker session could not be recorded; retry shortly") from None
                 if old_ack is not None:
-                    for suffix in (".ack.json", ".request.json", ".reads.jsonl", ".bootstrap.json", ".submitted.json"):
+                    for suffix in (".ack.json", ".request.json", ".reads.jsonl", ".bootstrap.json", ".submitted.json",
+                                   ".identity.json"):
                         old_ack.with_name(old_ack.name[:-len(".ack.json")] + suffix).unlink(missing_ok=True)
                 deadline = self._clock() + self._wait
                 obs = self._observe_bound(row)
@@ -594,7 +643,7 @@ class WorkerSessionService:
             found, digest = self._bootstrap_sources(project)
         except ProjectIdentityError:
             return obs
-        if not found:
+        if not found and obs.bootstrap.get("identity") != "missing":
             return obs
         token = str(uuid.uuid4())
         names = [name for name, _ in found]
@@ -615,9 +664,14 @@ class WorkerSessionService:
         except (OperationalError, IntegrityError):
             session.rollback()
             raise RegistryStoreError("Worker bootstrap could not be recorded; retry shortly") from None
-        text = (f"[ROSC bootstrap {token}] Подготовка контекста проекта, это не задача. Прочитай инструментом Read "
-                f"только эти файлы: {', '.join(paths)}. Ничего не изменяй и не запускай команд. Затем ответь одной "
-                f"последней строкой ровно в формате: ROSC-BOOTSTRAP {token} OK (или FAILED, если какой-то файл не прочитан).")
+        agent = session.get(AgentDefinition, row.agent_id)
+        binding = validate_project_identity(project)
+        identity = project_identity_text(project, agent, binding.root_path, binding.version) if agent else ""
+        reads = (f"Прочитай инструментом Read только эти файлы: {', '.join(paths)}. " if paths
+                 else "Читать файлы не нужно: entry point в проекте нет, Git и AGENTS.md не обязательны. ")
+        text = (f"[ROSC bootstrap {token}] Подготовка контекста проекта, это не задача. {identity} {reads}"
+                f"Ничего не изменяй и не запускай команд. Затем ответь одной последней строкой ровно в формате: "
+                f"ROSC-BOOTSTRAP {token} OK (или FAILED, если какой-то файл не прочитан).")
         try:
             self._tmux.send_text(row.pane_id, text)
             # Typing keys proves nothing: a TUI that is still starting can swallow the Enter. The CLI's own

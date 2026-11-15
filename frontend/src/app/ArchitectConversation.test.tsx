@@ -115,11 +115,11 @@ describe('Project "Агенты проекта" card', () => {
     expect(within(view).getByText('Активировать Architect')).toBeTruthy();
     expect(within(panel()).queryByText('Активировать Architect')).toBeNull();
     expect(within(panel()).queryByText('Остановить Architect')).toBeNull();
-    expect(within(view).getByText('Workers в работе')).toBeTruthy();
-    expect(within(view).getByText('0')).toBeTruthy();
+    expect(within(view).getByText('Workers', { selector: '.rosc-agent-stat span' })).toBeTruthy();
+    expect(within(view).queryByText('0')).toBeNull();  // P047: no hard-coded placeholder count
     expect(within(view).getByText('существующий проект')).toBeTruthy();
     expect(within(view).queryByRole('button', { name: /Запустить|Run/ })).toBeNull();
-    expect(screen.getByText('Worker: не активен')).toBeTruthy();
+    expect(screen.getAllByText('Workers не назначены').length).toBeGreaterThan(0);  // P047: verified /workers read
   });
 
   it('re-probes only the Architect status after a failed load and never touches history or runtime', async () => {

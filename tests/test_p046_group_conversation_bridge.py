@@ -84,14 +84,17 @@ class BridgeCase(TransportCase):
     def post(self, body: str, to: list[str], task: str | None = None, key: str | None = None):
         return self.api.post(f"{self.url(task)}/messages", json={"client_key": key or self.key(), "body": body, "to": to})
 
-    def run_room(self, to: list[str], task: str | None = None, quota: int = 1, body: str = "question") -> dict:
-        self.assertEqual(self.post(body, to, task).status_code, 201)
-        self.assertEqual(self.api.post(f"{self.url(task)}/round", json={"agents": to, "quota": quota}).status_code, 200)
-        started = self.api.post(f"{self.url(task)}/start")
-        self.assertEqual(started.status_code, 200, started.text)
-        status = self.api.get(self.url(task)).json()
-        self.app.state.group.wait(status["conversation_id"])
+    def run_room(self, to: list[str], task: str | None = None, body: str = "question") -> dict:
+        """P047: one Owner Send authorizes and starts the replies; wait for the room driver."""
+        sent = self.post(body, to, task)
+        self.assertEqual(sent.status_code, 201, sent.text)
+        self.wait_room(task)
         return self.api.get(self.url(task)).json()
+
+    def wait_room(self, task: str | None = None) -> None:
+        room = self.api.get(self.url(task)).json()["conversation_id"]
+        if room:
+            self.app.state.group.wait(room)
 
 
 class EvidenceLossFailClosedTests(TransportCase):
@@ -162,7 +165,7 @@ def run_turn_with(core, transport, room: str) -> dict:
 
 
 class GroupApiFlowTests(BridgeCase):
-    def test_reads_never_launch_and_only_explicit_start_runs_one_real_turn(self) -> None:
+    def test_reads_never_launch_and_one_send_runs_exactly_one_direct_reply(self) -> None:
         empty = self.api.get(self.url())
         self.assertEqual(empty.status_code, 200)
         self.assertIsNone(empty.json()["conversation_id"])
@@ -170,19 +173,20 @@ class GroupApiFlowTests(BridgeCase):
         self.assertTrue(roster["Claude"]["group_supported"])
         self.assertFalse(roster["Codex"]["group_supported"])  # no Codex native adapter in v1.0
         self.assertEqual(roster["Codex"]["unsupported_reason"], "adapter_not_supported")
-        self.assertEqual(self.post("Привет, Claude", [self.claude_agent]).status_code, 201)
-        self.assertEqual(self.api.post(f"{self.url()}/round", json={"agents": [self.claude_agent], "quota": 1}).status_code, 200)
         for _ in range(3):
             self.api.get(self.url())
             self.api.get("/api/projects/P0001/conversation")
         self.assertEqual(self.runner.calls, [])  # GET/poll never wakes a model
-        self.api.post(f"{self.url()}/start")
-        self.app.state.group.wait(self.api.get(self.url()).json()["conversation_id"])
+        sent = self.post("ты тут?", [self.claude_agent])
+        self.assertEqual(sent.status_code, 201)
+        self.assertEqual(sent.json()["dispatch"]["mode"], "direct")
+        self.assertEqual(sent.json()["dispatch"]["round"]["per_agent_quota"], 1)  # direct: N is irrelevant
+        self.wait_room()
         status = self.api.get(self.url()).json()
-        self.assertEqual(len(self.runner.calls), 1)
+        self.assertEqual(len(self.runner.calls), 1)  # exactly ONE reply, never N=3 repetitions
         self.assertEqual(status["round"]["grants"][self.claude_agent]["published"], 1)
-        self.assertEqual(status["round"]["state"], "awaiting_owner")  # quota spent: waits for the Owner
-        self.assertEqual(status["driver"]["last"]["reason"], "awaiting_owner")
+        self.assertEqual(status["round"]["state"], "awaiting_owner")
+        self.assertEqual(status["engagement"], "direct")
         page = self.api.get("/api/projects/P0001/conversation").json()
         owner, reply = page["messages"][-2:]
         self.assertEqual(owner["group"]["to"], [self.claude_agent])
@@ -192,9 +196,11 @@ class GroupApiFlowTests(BridgeCase):
         self.assertEqual(reply["group"]["to"], ["owner"])
         self.assertEqual(reply["ordinal"], owner["ordinal"] + 1)
         self.assertTrue(reply["body"].startswith("reply #1"))
-        # Quota exhausted: another start launches nothing.
+        # Polling, reloads and an explicit resume launch nothing more.
+        for _ in range(3):
+            self.api.get(self.url())
         self.api.post(f"{self.url()}/start")
-        self.app.state.group.wait(status["conversation_id"])
+        self.wait_room()
         self.assertEqual(len(self.runner.calls), 1)
 
     def test_task_room_is_isolated_from_project_room(self) -> None:
@@ -209,46 +215,50 @@ class GroupApiFlowTests(BridgeCase):
         self.assertNotIn("PC-ONLY-TEXT", json.dumps(tc))
         self.assertEqual(self.api.get(self.url("T0002")).json()["conversation_id"], None)
 
-    def test_idempotent_send_and_conflicting_reuse(self) -> None:
+    def test_idempotent_send_and_conflicting_reuse_never_duplicate_a_reply(self) -> None:
         first = self.post("same", [self.claude_agent], key="owner-key-fixed1")
+        self.wait_room()
         replay = self.post("same", [self.claude_agent], key="owner-key-fixed1")
+        self.wait_room()
         self.assertEqual((first.status_code, replay.status_code), (201, 200))
         self.assertEqual(first.json()["message"]["ordinal"], replay.json()["message"]["ordinal"])
         self.assertEqual(self.post("different", [self.claude_agent], key="owner-key-fixed1").status_code, 409)
-        self.assertEqual(len(self.api.get("/api/projects/P0001/conversation").json()["messages"]), 1)
-
-    def test_owner_message_mid_round_does_not_reset_quota(self) -> None:
-        self.run_room([self.claude_agent], quota=2)
-        before = self.api.get(self.url()).json()["round"]
-        self.assertEqual(self.post("follow-up", [self.claude_agent]).status_code, 201)
-        after = self.api.get(self.url()).json()["round"]
-        self.assertEqual(before["round_id"], after["round_id"])
-        self.assertEqual(after["grants"][self.claude_agent]["published"], before["grants"][self.claude_agent]["published"])
-
-    def test_pause_stops_launch_and_unpause_allows_next_explicit_start(self) -> None:
-        self.post("q", [self.claude_agent])
-        self.api.post(f"{self.url()}/round", json={"agents": [self.claude_agent], "quota": 1})
-        self.assertEqual(self.api.post(f"{self.url()}/controls", json={"paused": True}).json()["paused"], True)
-        self.api.post(f"{self.url()}/start")
-        room = self.api.get(self.url()).json()["conversation_id"]
-        self.app.state.group.wait(room)
-        status = self.api.get(self.url()).json()
-        self.assertEqual(status["driver"]["last"]["reason"], "paused")
-        self.assertEqual(self.runner.calls, [])
-        self.api.post(f"{self.url()}/controls", json={"paused": False, "emergency_brake": True})
-        self.api.post(f"{self.url()}/start")
-        self.app.state.group.wait(room)
-        self.assertEqual(self.runner.calls, [])
-        self.api.post(f"{self.url()}/controls", json={"emergency_brake": False})
-        self.api.post(f"{self.url()}/start")
-        self.app.state.group.wait(room)
+        messages = self.api.get("/api/projects/P0001/conversation").json()["messages"]
+        self.assertEqual([m["sender"]["kind"] for m in messages], ["owner", "worker"])
         self.assertEqual(len(self.runner.calls), 1)
 
-    def test_start_requires_round_and_renew_requires_current(self) -> None:
-        self.post("q", [self.claude_agent])
-        self.assertEqual(self.api.post(f"{self.url()}/start").status_code, 409)
-        self.assertEqual(self.api.post(f"{self.url()}/round", json={"agents": [self.claude_agent], "renew": True}).status_code, 409)
-        self.assertEqual(self.api.post(f"{self.url()}/round", json={"agents": [self.claude_agent], "quota": 1}).status_code, 200)
+    def test_new_owner_message_opens_a_fresh_allowance(self) -> None:
+        """R-15.25 supersedes the old no-reset rule ONLY at the new-Owner-message boundary."""
+        before = self.run_room([self.claude_agent])["round"]
+        after = self.run_room([self.claude_agent], body="follow-up")["round"]
+        self.assertNotEqual(before["round_id"], after["round_id"])
+        self.assertEqual(after["round_no"], before["round_no"] + 1)
+        self.assertEqual(after["grants"][self.claude_agent]["published"], 1)
+        self.assertEqual(len(self.runner.calls), 2)
+        self.assertEqual([c["flag"] for c in self.runner.calls], ["--session-id", "--resume"])  # native continuity
+
+    def test_pause_and_brake_hold_auto_dispatch_and_clearing_resumes_the_authorized_reply(self) -> None:
+        self.run_room([self.claude_agent], body="q1")
+        self.assertEqual(self.api.post(f"{self.url()}/controls", json={"paused": True}).json()["paused"], True)
+        held = self.post("q2", [self.claude_agent])
+        self.assertEqual(held.json()["dispatch"]["blocked"], "paused")
+        self.wait_room()
+        self.assertEqual(len(self.runner.calls), 1)
+        self.api.post(f"{self.url()}/controls", json={"paused": False, "emergency_brake": True})
+        self.wait_room()
+        self.assertEqual(len(self.runner.calls), 1)
+        self.assertEqual(self.post("q3", [self.claude_agent]).json()["dispatch"]["blocked"], "emergency_brake")
+        self.wait_room()
+        self.assertEqual(len(self.runner.calls), 1)
+        self.api.post(f"{self.url()}/controls", json={"emergency_brake": False})
+        self.wait_room()
+        self.assertEqual(len(self.runner.calls), 2)  # only the latest Owner message's reply; q2's was superseded
+        bodies = [m["body"] for m in self.api.get("/api/projects/P0001/conversation").json()["messages"]]
+        self.assertEqual(bodies[-2], "q3")
+
+    def test_start_without_conversation_is_404_and_renew_requires_current(self) -> None:
+        self.assertEqual(self.api.post(f"{self.url()}/start").status_code, 404)
+        self.run_room([self.claude_agent])
         self.assertEqual(self.api.post(f"{self.url()}/round", json={"agents": [self.claude_agent]}).status_code, 409)
         renewed = self.api.post(f"{self.url()}/round", json={"agents": [self.claude_agent], "quota": 2, "renew": True})
         self.assertEqual((renewed.status_code, renewed.json()["round_no"]), (200, 2))
@@ -256,8 +266,6 @@ class GroupApiFlowTests(BridgeCase):
     def test_in_flight_status_is_truthful_and_duplicate_start_or_reconcile_is_refused(self) -> None:
         self.runner = BlockingRunner()
         self.post("q", [self.claude_agent])
-        self.api.post(f"{self.url()}/round", json={"agents": [self.claude_agent], "quota": 1})
-        self.api.post(f"{self.url()}/start")
         self.assertTrue(self.runner.entered.wait(5))
         status = self.api.get(self.url()).json()
         self.assertTrue(status["driver"]["running"])
@@ -271,30 +279,35 @@ class GroupApiFlowTests(BridgeCase):
         self.assertEqual(len(self.runner.calls), 1)
         self.assertIsNone(self.api.get(self.url()).json()["holding_turn"])
 
-    def test_unknown_after_restart_is_explicit_and_reconcile_never_resends(self) -> None:
-        self.post("q", [self.claude_agent])
-        self.api.post(f"{self.url()}/round", json={"agents": [self.claude_agent], "quota": 1})
-        room = self.api.get(self.url()).json()["conversation_id"]
+    def test_unknown_after_restart_is_explicit_and_reconcile_or_new_send_never_resends(self) -> None:
         self.runner.modes = ["hang"]
-        self.api.post(f"{self.url()}/start")
-        self.app.state.group.wait(room)
+        self.run_room([self.claude_agent])
         status = self.api.get(self.url()).json()
         self.assertEqual(status["holding_turn"]["state"], "unknown")
         self.assertEqual(status["driver"]["last"]["reason"], "unknown")
         result = self.api.post(f"{self.url()}/reconcile").json()
         self.assertEqual(result["reconciled"][0]["state"], "unknown")
         self.api.post(f"{self.url()}/start")
-        self.app.state.group.wait(room)
+        self.wait_room()
         self.assertEqual(len(self.runner.calls), 1)
         self.assertEqual(self.api.get(self.url()).json()["driver"]["last"]["reason"], "busy")
+        nxt = self.post("still there?", [self.claude_agent])
+        self.assertEqual(nxt.json()["dispatch"]["blocked"], "unknown_turn")
+        self.wait_room()
+        self.assertEqual(len(self.runner.calls), 1)  # the held UNKNOWN turn is never retried or bypassed
+        held = self.api.get(self.url()).json()["holding_turn"]
+        self.assertEqual((held["state"], held["turn_id"]), ("unknown", status["holding_turn"]["turn_id"]))
 
     def test_passive_missed_keep_release_and_large_backlog_skip_gap(self) -> None:
         second = self.claude_worker("Claude-2")
         self.core.update_setting(OWNER, SETTING_PASSIVE_MISSED_THRESHOLD, 2)
         self.core.update_setting(OWNER, SETTING_CATCHUP_CHARS, 50)
-        self.run_room([self.claude_agent, second], quota=1, body="both")
-        for i in range(3):
-            self.post(f"only first {i} " + "x" * 30, [self.claude_agent])
+        group = self.run_room([self.claude_agent, second], body="both")
+        self.assertEqual(group["engagement"], "group")
+        self.assertEqual(len(self.runner.calls), 2)  # one initial answer each; replies to the Owner wake nobody else
+        for i in range(3):  # plain stored Owner messages (no reply requested) to the first Worker only
+            self.core.post_owner_message(OWNER, 1, client_key=self.key(), body=f"only first {i} " + "x" * 30,
+                                         to=[self.claude_agent])
         members = {m["agent_id"]: m for m in self.api.get(self.url()).json()["members"]}
         self.assertEqual(members[second]["state"], "passive")
         missed = members[second]["missed"]
@@ -302,26 +315,24 @@ class GroupApiFlowTests(BridgeCase):
         self.assertEqual(members[second]["release_offer"]["threshold"], 2)
         kept = self.api.post(f"{self.url()}/members/{second}/keep").json()
         self.assertIsNone(kept["release_offer"])
-        # Address the Passive member again; its backlog (> 50 chars) now needs an explicit Owner decision.
+        # Address the Passive member again: the Send authorizes it, but its backlog (> 50 chars) needs a decision first.
+        calls = len(self.runner.calls)
         self.post("Ты тут?", [second])
-        self.api.post(f"{self.url()}/round", json={"agents": [second], "quota": 1, "renew": True})
+        self.wait_room()
         status = self.api.get(self.url()).json()
         catchup = status["catchup"]
         self.assertEqual(catchup["agent_id"], second)
         self.assertGreater(catchup["chars"], 50)
         self.assertEqual(catchup["limit"], 50)
         self.assertEqual(catchup["count"], missed)
-        calls = len(self.runner.calls)
-        self.api.post(f"{self.url()}/start")
-        self.app.state.group.wait(status["conversation_id"])
         self.assertEqual(len(self.runner.calls), calls)  # nothing launched before the decision
-        self.assertEqual(self.api.get(self.url()).json()["driver"]["last"]["reason"], "catchup_choice_required")
+        self.assertEqual(status["driver"]["last"]["reason"], "catchup_choice_required")
         choice = self.api.post(f"{self.url()}/turns/{catchup['turn_id']}/catchup", json={"choice": "skip_backlog"})
         self.assertEqual(choice.status_code, 200, choice.text)
         member = {m["agent_id"]: m for m in self.api.get(self.url()).json()["members"]}[second]
         self.assertEqual(member["omitted_ranges"], [[catchup["from"], catchup["through"]]])
         self.api.post(f"{self.url()}/start")
-        self.app.state.group.wait(status["conversation_id"])
+        self.wait_room()
         self.assertEqual(len(self.runner.calls), calls + 1)
         prompt = self.runner.calls[-1]["prompt"]
         self.assertNotIn("only first 0", prompt)
@@ -337,14 +348,19 @@ class GroupApiBoundaryTests(BridgeCase):
         self.registry.create_assignment(OWNER, 1, agent_id=architect["agent_id"], role="architect",
                                         capabilities=ARCHITECT_CAPS)
         roster = {r["agent_id"]: r for r in self.api.get(self.url()).json()["roster"]}
-        self.assertEqual(roster[architect["agent_id"]]["unsupported_reason"], "architect_group_not_integrated")
-        for to in ([architect["agent_id"]], [self.codex], [self.claude_agent, self.codex], ["00000000-0000-4000-8000-000000000000"]):
+        # P047: the Architect bridge exists, but an inactive Architect is honestly not addressable (nothing stored).
+        self.assertEqual(roster[architect["agent_id"]]["unsupported_reason"], "architect_not_active")
+        for to in ([architect["agent_id"]], [self.claude_agent, architect["agent_id"]]):
+            self.assertEqual(self.post("q", to).status_code, 409, to)
+        for to in ([self.codex], [self.claude_agent, self.codex], ["00000000-0000-4000-8000-000000000000"]):
             self.assertEqual(self.post("q", to).status_code, 422, to)
+        self.assertIsNone(self.api.get(self.url()).json()["conversation_id"])
         task_only = self.claude_worker("T2 only", task=2)
         self.assertEqual(self.post("q", [task_only], task="T0001").status_code, 422)
         self.assertEqual(self.post("q", [task_only], task="T0002").status_code, 201)
+        self.wait_room("T0002")
         self.assertEqual(self.api.post(f"{self.url()}/round", json={"agents": [self.codex]}).status_code, 422)
-        self.assertEqual(self.runner.calls, [])
+        self.assertEqual(len(self.runner.calls), 1)  # only the accepted T0002 direct Send produced a reply
 
     def test_scope_ids_are_canonical_and_foreign_tasks_404(self) -> None:
         for path in ("/api/projects/1/conversation/group", "/api/projects/P0001/tasks/1/conversation/group",
@@ -357,8 +373,8 @@ class GroupApiBoundaryTests(BridgeCase):
         self.assertNotIn("SECRET-BODY", bad.text)
 
     def test_every_endpoint_refuses_non_owner_actor(self) -> None:
-        self.post("q", [self.claude_agent])
-        self.api.post(f"{self.url()}/round", json={"agents": [self.claude_agent], "quota": 1})
+        self.run_room([self.claude_agent])
+        self.runner.calls.clear()
         agent_api = self.make_client(auth_provider=AgentProvider())
         calls = [("get", self.url(), None),
                  ("post", f"{self.url()}/messages", {"client_key": "agent-key-1", "body": "x", "to": [self.claude_agent]}),

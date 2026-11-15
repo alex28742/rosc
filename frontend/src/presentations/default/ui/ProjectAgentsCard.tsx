@@ -1,9 +1,11 @@
 import { useState } from 'react';
-import type { ConversationControls, WorkspaceControls } from '../../../app/presentation/contracts';
+import type { ConversationControls, TaskWorkerControls, WorkspaceControls } from '../../../app/presentation/contracts';
 import type { Project } from '../../../core/models';
 import { ContextAccessSummary } from './ContextAccessSummary';
 import { WorkspaceActions } from './WorkspaceActions';
 import { describeArchitect } from './architectView';
+import { WorkerRows } from './WorkerRows';
+import { summarizeWorkers } from './workerView';
 
 const MODE_LABEL = { new: 'новый проект', existing: 'существующий проект' } as const;
 
@@ -11,21 +13,24 @@ type Props = {
   project: Project;
   conversation: ConversationControls;
   workspace: WorkspaceControls;
+  /** P047: the same per-Worker controls as the Task Work Area (activate / check / prepare context / terminal help). */
+  workers: TaskWorkerControls;
   onOpenSettings: () => void;
 };
 
 /**
- * Approved Project overview card. It states the real Architect session, the Core Worker placeholder and the Project
- * mode, and owns the explicit Architect lifecycle actions. Opening the card, or the Project, never starts a runtime.
+ * Project overview card: the verified Architect session with its explicit lifecycle actions, and (P047) every Project
+ * Worker with its own verified CLI status and explicit actions. Opening the card, or the Project, never starts a runtime.
  */
-export function ProjectAgentsCard({ project, conversation, workspace, onOpenSettings }: Props) {
+export function ProjectAgentsCard({ project, conversation, workspace, workers: workerControls, onOpenSettings }: Props) {
   const architect = conversation.architect;
   const [failure, setFailure] = useState('');
   const view = architect.status === 'failed'
     ? { state: 'статус не проверен', label: 'Architect: статус не проверен', live: false,
       tone: 'error' as const, hint: '' }
     : describeArchitect(architect.info, architect.status === 'ready', architect.busy);
-  const workers = project.active_workers;
+  const summary = summarizeWorkers(workerControls.status, workerControls.workers);
+  const summaryClass = summary.tone === 'on' ? 'on' : summary.tone === 'warn' ? 'error' : 'off';
 
   return <section className="rosc-panel-card rosc-agents-card" aria-label="Агенты проекта">
     <h3>Агенты проекта</h3>
@@ -34,10 +39,8 @@ export function ProjectAgentsCard({ project, conversation, workspace, onOpenSett
       <strong className={`rosc-agent-state rosc-agent-state--${view.tone}`} aria-live="polite">{view.state}</strong>
     </div>
     <div className="rosc-agent-stat">
-      <span>Workers в работе</span>
-      <strong className={workers > 0 ? 'rosc-agent-state rosc-agent-state--on' : 'rosc-agent-state rosc-agent-state--off'}>
-        {workers}
-      </strong>
+      <span>Workers</span>
+      <strong className={`rosc-agent-state rosc-agent-state--${summaryClass}`} aria-live="polite">{summary.text}</strong>
     </div>
     <div className="rosc-agent-stat">
       <span>Режим</span>
@@ -56,6 +59,7 @@ export function ProjectAgentsCard({ project, conversation, workspace, onOpenSett
     {(view.hint || architect.error || failure) && <p className="rosc-agents-card__hint" role="alert">
       {[view.hint, architect.error, failure].filter(Boolean).join(' ')}
     </p>}
+    <WorkerRows controls={workerControls} />
     <ContextAccessSummary contextAccess={conversation.contextAccess} />
     <div className="rosc-agents-card__workspace">
       <strong className="rosc-agents-card__label">Workspace</strong>

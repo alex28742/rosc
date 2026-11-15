@@ -1,16 +1,23 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { describeError, type CoreApi } from '../core/api';
-import type { ConversationMessage, GroupStatus } from '../core/models';
+import type { ConversationMessage, ConversationMessageResult, GroupStatus } from '../core/models';
 import type { GroupControls, LoadStatus } from './presentation/contracts';
 
 /** While Core reports work in this room (a running driver or a held turn) the status and history are re-read. */
 const ACTIVE_POLL_MS = 1500;
 
-type Cache = { scope: string | null; status: LoadStatus; info: GroupStatus | null; error: string; busy: string | null };
-const emptyFor = (scope: string | null): Cache => ({ scope, status: 'loading', info: null, error: '', busy: null });
+type Cache = { scope: string | null; status: LoadStatus; info: GroupStatus | null; error: string; busy: string | null; notice: string };
+const emptyFor = (scope: string | null): Cache => ({ scope, status: 'loading', info: null, error: '', busy: null, notice: '' });
+
+/** P047: an honest note when a Send was stored and authorized but Core is holding dispatch. */
+const BLOCKED_TEXT: Record<string, string> = {
+  paused: 'Сообщение сохранено, ответ разрешён, но доставка на паузе — снимите паузу, чтобы агент ответил.',
+  emergency_brake: 'Сообщение сохранено, но включён Emergency Brake — новые ответы не запускаются.',
+  unknown_turn: 'Сообщение сохранено, но предыдущий ход в состоянии UNKNOWN — нужна сверка, повторной отправки не будет.',
+};
 
 /**
- * P046: one room's group conversation (Project room when `taskId` is null, otherwise that Task's room).
+ * P046/P047: one room's group conversation (Project room when `taskId` is null, otherwise that Task's room).
  *
  * Reads are pure GETs and never launch anything; polling runs only while Core itself reports in-room work. Every async
  * result is dropped unless it still belongs to the open scope, so a Task switch can never show another room's state.
@@ -92,9 +99,16 @@ export function useGroupConversation(api: CoreApi, projectId: string | null, tas
     if (scopeRef.current && projectId) void load(scopeRef.current, projectId, taskId);
   }, [load, projectId, taskId]);
 
+  /** P047: ONE Owner Send = stored message + authorization; Core starts the reply itself (no Authorize/Start). */
   const onPost = useCallback((body: string, clientKey: string, to: string[]) =>
     act('post', (pid, tid) => api.sendGroupMessage(pid, tid, { client_key: clientKey, body, to }),
-      result => onMessageRef.current((result as { message: ConversationMessage }).message)), [act, api]);
+      result => {
+        const typed = result as ConversationMessageResult;
+        onMessageRef.current(typed.message);
+        const blocked = typed.dispatch?.blocked;
+        const current = scopeRef.current;
+        setCache(prev => prev.scope !== current ? prev : { ...prev, notice: blocked ? BLOCKED_TEXT[blocked] ?? blocked : '' });
+      }), [act, api]);
   const onAuthorize = useCallback((agents: string[], quota: number, renew: boolean) =>
     act(renew ? 'renew' : 'authorize', (pid, tid) => api.authorizeGroupRound(pid, tid, { agents, quota, renew })), [act, api]);
   const onStart = useCallback(() => act('start', (pid, tid) => api.startGroupTurns(pid, tid)), [act, api]);
@@ -112,6 +126,6 @@ export function useGroupConversation(api: CoreApi, projectId: string | null, tas
     }), [act, api]);
   const onReconcile = useCallback(() => act('reconcile', (pid, tid) => api.reconcileGroup(pid, tid)), [act, api]);
 
-  return { status: visible.status, info: visible.info, error: visible.error, busy: visible.busy, onReload, onPost,
+  return { status: visible.status, info: visible.info, error: visible.error, busy: visible.busy, notice: visible.notice, onReload, onPost,
     onAuthorize, onStart, onControls, onRelease, onKeep, onCatchup, onReconcile };
 }

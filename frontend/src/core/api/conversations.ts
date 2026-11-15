@@ -7,7 +7,8 @@ const groupBase = (projectId: string, taskId: string | null) =>
 
 /** Read-only room state. Never claims, dispatches or launches a model. */
 export const getGroupStatus = (projectId: string, taskId: string | null) => request<GroupStatus>(groupBase(projectId, taskId));
-/** Stores one Owner group message with explicit addressees; it does not start a model turn by itself. */
+/** P047: ONE Owner Send. Stores the message with explicit addressees AND authorizes their replies (one Agent: a direct
+ * reply; two or more: the group allowance N); Core starts the replies asynchronously. */
 export const sendGroupMessage = (projectId: string, taskId: string | null, input: GroupMessageInput) =>
   post<ConversationMessageResult>(`${groupBase(projectId, taskId)}/messages`, input);
 /** Explicit Owner grant of N published replies per listed Worker (or Renew of the current round). */

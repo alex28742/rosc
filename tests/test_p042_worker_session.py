@@ -249,7 +249,11 @@ class ActivationTests(SessionCase):
         self.assertEqual(hooks["type"], "command")
         self.assertIn(str(ACK_SCRIPT), hooks["command"])
         self.assertEqual(set(json.loads(argv[2])), {"hooks"})  # no tools/permissions/model keys touched
-        self.assertEqual(len(argv), 3)  # no extra CLI flags (no model, no permission mode)
+        # No model / permission flags.  P047: the only extra flag is the trusted ROSC Project identity for THIS launch.
+        self.assertEqual(len(argv), 5)
+        self.assertEqual(argv[3], "--append-system-prompt")
+        self.assertIn("Git repository is optional", argv[4])
+        self.assertIn(cwd, argv[4])
         evidence = view["evidence"]
         self.assertEqual((evidence["tmux_alive"], evidence["cli_observable"], evidence["cli_session_initialised"]),
                          (True, True, False))

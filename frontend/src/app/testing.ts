@@ -116,7 +116,7 @@ export const groupStatus = (over: Partial<GroupStatus> = {}): GroupStatus => ({
 });
 
 export const groupControls = (over: Partial<GroupControls> = {}): GroupControls => ({
-  status: 'ready', info: groupStatus(), error: '', busy: null, onReload: vi.fn(),
+  status: 'ready', info: groupStatus(), error: '', busy: null, notice: '', onReload: vi.fn(),
   onPost: vi.fn(async () => null), onAuthorize: vi.fn(async () => null), onStart: vi.fn(async () => null),
   onControls: vi.fn(async () => null), onRelease: vi.fn(async () => null), onKeep: vi.fn(async () => null),
   onCatchup: vi.fn(async () => null), onReconcile: vi.fn(async () => null), ...over,

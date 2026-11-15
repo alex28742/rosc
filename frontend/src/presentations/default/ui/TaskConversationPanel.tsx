@@ -3,8 +3,8 @@ import type { MessageRecipient } from '../../../core/models';
 import type { TaskConversationControls } from '../../../app/presentation/contracts';
 import { architectReason, describeArchitect, describeTaskArchitect } from './architectView';
 import { findMatches, renderBody } from './chatSearch';
-import { ARCHITECT_CHIP, GroupActivityRow, GroupBar, GroupCatchupDialog, GroupParticipants, MessageAddress, RecipientChips,
-  ReleaseOffers, senderName } from './GroupConversation';
+import { ARCHITECT_CHIP, GroupActivityRow, GroupBar, GroupCatchupDialog, MessageAddress, RecipientChips, ReleaseOffers,
+  routeSelection, senderName } from './GroupConversation';
 
 /** Delivery wording is about the stored Owner message, never proof that the Architect answered. */
 const DELIVERY_TEXT: Record<string, string> = {
@@ -40,9 +40,9 @@ export function TaskConversationPanel({ taskId, conversation, collapsed, onColla
   const group = conversation.group;
   const [selected, setSelected] = useState<Set<string>>(() => new Set());
   const [groupOpen, setGroupOpen] = useState(false);
-  const [peopleOpen, setPeopleOpen] = useState(false);
-  const workers = [...selected].filter(id => id !== ARCHITECT_CHIP);
-  const mixed = workers.length > 0 && selected.has(ARCHITECT_CHIP);
+  const routed = routeSelection(group.info, selected);
+  const workers = routed.to;
+  const mixed = routed.problem !== null;
   const recipient: MessageRecipient = selected.has(ARCHITECT_CHIP) ? 'architect' : null;
   const toggle = (id: string) => setSelected(prev => {
     const next = new Set(prev);
@@ -117,9 +117,9 @@ export function TaskConversationPanel({ taskId, conversation, collapsed, onColla
     pending.current = { body, recipient: target, key };
     setFailure('');
     try {
-      // Workers selected: a P046 group message (stored; a model runs only after an explicit round grant + start).
-      // Otherwise the established P038/P039 path (Architect-addressed or unaddressed Task message).
-      const problem = workers.length > 0 ? await group.onPost(body, key, workers) : await conversation.onSend(body, key, recipient);
+      // P047: Workers selected -> ONE Send that stores the message AND authorizes the replies (one Worker: direct reply;
+      // two+ Agents: group). Otherwise the established P038/P039 path (Architect-addressed or unaddressed Task message).
+      const problem = routed.route === 'group' ? await group.onPost(body, key, workers) : await conversation.onSend(body, key, recipient);
       if (problem === null) {
         setDraft(current => current.trim() === body ? '' : current);
         pending.current = null;
@@ -148,7 +148,6 @@ export function TaskConversationPanel({ taskId, conversation, collapsed, onColla
       </div>
     </header>
     <GroupBar group={group} open={groupOpen} onOpenChange={setGroupOpen} />
-    <GroupParticipants group={group} open={peopleOpen} onOpenChange={setPeopleOpen} />
     {searchOpen && <div className="rosc-conversation__search">
       <input type="search" aria-label="Поиск по сообщениям" placeholder="Найти в переписке Task…"
         value={searchTerm} autoFocus
@@ -233,8 +232,7 @@ export function TaskConversationPanel({ taskId, conversation, collapsed, onColla
       <RecipientChips group={group} selected={selected} onToggle={toggle} disabled={locked}
         architect={{ label: 'Architect', available: true,
           title: live ? 'Сообщение будет передано Architect этой задачи' : 'Architect не активен: сообщение сохранится, отправить можно позже' }} />
-      {mixed && <p className="rosc-conversation__error" role="alert">
-        Групповые ходы Architect пока не интегрированы: отправьте сообщение Architect и Workers отдельно.</p>}
+      {mixed && <p className="rosc-conversation__error" role="alert">{routed.problem}</p>}
       <textarea aria-label="Сообщение в Task Conversation" placeholder="Сообщение по этой задаче…" rows={3}
         value={draft} readOnly={locked} aria-busy={locked}
         onChange={event => setDraft(event.target.value)}
@@ -256,13 +254,15 @@ export function TaskConversationPanel({ taskId, conversation, collapsed, onColla
         </div>
         <button type="submit" className="rosc-btn rosc-btn--primary"
           disabled={!draft.trim() || !ready || state.sending || locked || mixed || group.busy === 'post'}>
-          {state.sending || group.busy === 'post' ? 'Отправка…' : workers.length > 0 ? `Отправить · ${workers.length} адресат(а/ов)` : 'Отправить'}</button>
+          {state.sending || group.busy === 'post' ? 'Отправка…' : 'Отправить'}</button>
       </div>
       {failure && <p className="rosc-conversation__error" role="alert">{failure}</p>}
+      {group.notice && <p className="rosc-conversation__hint" role="status">{group.notice}</p>}
       {deliveryFailure && <p className="rosc-conversation__error" role="alert">{deliveryFailure}</p>}
       {!ready && <p className="rosc-conversation__hint">Отправка станет доступна после загрузки истории.</p>}
       <p className="rosc-conversation__hint">
-        {workers.length > 0 ? 'Сообщение сохранится в этой Task Conversation для выбранных Workers. Модель вызывается только после «Разрешить» и «Запустить ход» в блоке «Групповой чат».'
+        {workers.length === 1 ? 'Личное сообщение: адресат ответит один раз, сразу после отправки. Enter — отправить.'
+          : workers.length > 1 ? 'Групповое сообщение: каждый адресат ответит один раз; дальше агенты отвечают друг другу только по @имени, не больше N на агента.'
           : recipient === 'architect'
           ? (live ? 'Опубликуется в Task Conversation и будет передано Architect; ранее сохранённые сообщения не пересылаются.'
             : 'Опубликуется в Task Conversation, но Architect не активен — не доставлено; отправьте ему позже кнопкой «Отправить Architect».')

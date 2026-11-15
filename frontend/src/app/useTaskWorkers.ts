@@ -19,7 +19,8 @@ const inFlight = (item: ProjectWorker) =>
  * Busy state, errors and in-flight guards are keyed by agent_id, so one Worker never blocks or relabels another.
  */
 export function useTaskWorkers(api: CoreApi, projectId: string | null, taskId: string | null): TaskWorkerControls {
-  const scope = projectId && taskId ? `${projectId}/${taskId}` : null;
+  // P047: the same per-Worker controls serve the Project Work Area (taskId null) and the Task Work Area.
+  const scope = projectId ? `${projectId}/${taskId ?? 'PC'}` : null;
   const [cache, setCache] = useState<Cache>(() => empty(scope));
   const scopeRef = useRef(scope);
   scopeRef.current = scope;

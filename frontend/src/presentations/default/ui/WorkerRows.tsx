@@ -6,8 +6,8 @@ const toneClass = (tone: string) => tone === 'ok' ? 'rosc-tag--success' : tone =
 
 /**
  * «Workers проекта» (approved UX v3): every active Project Worker is its own row with independent actions, shown
- * whether or not a Prompt is approved. Names come from the Agent Registry; identity is the stable agent_id, never the
- * displayed @name. No Worker is called chat-ready or run-ready: those transports do not exist yet.
+ * whether or not a Prompt is approved, in the Project AND the Task Work Area. Names come from the Agent Registry;
+ * identity is the stable agent_id. P047: three separate facts — interactive tmux CLI, PC/TC chat, formal Run.
  */
 export function WorkerRows({ controls }: { controls: TaskWorkerControls }) {
   const [helpFor, setHelpFor] = useState<string | null>(null);
@@ -36,14 +36,10 @@ export function WorkerRows({ controls }: { controls: TaskWorkerControls }) {
         const helpOpen = helpFor === id;
         return <li key={id} className={`rosc-worker-row rosc-worker-row--${item.session.state}`} data-worker-row={id}>
           <div className="rosc-worker-row__top">
-            <label className="rosc-worker-row__name">
-              <input type="checkbox" disabled aria-label={`Адресовать ${item.agent.display_name}`}
-                title="Адресная доставка в PC/TC появится позже" />
-              <strong>@{item.agent.display_name}</strong>
-            </label>
+            <span className="rosc-worker-row__name"><strong>@{item.agent.display_name}</strong></span>
             <span className={`rosc-tag ${toneClass(view.tone)}`} aria-live="polite">{view.chip}</span>
           </div>
-          <p className="rosc-worker-row__meta">Worker · {item.agent.runtime_adapter}</p>
+          <p className="rosc-worker-row__meta">Worker · {item.agent.runtime_adapter} · интерактивная CLI (tmux)</p>
           <p className={error || view.tone === 'error' ? 'rosc-task-agents__err' : 'rosc-worker-row__line'} role={error ? 'alert' : undefined}>{error || view.note}</p>
           <p className={`rosc-worker-row__line${boot.tone === 'ok' ? ' rosc-task-agents__ok' : ''}`}>{boot.line}</p>
           <div className="rosc-worker-row__actions">
@@ -76,6 +72,6 @@ export function WorkerRows({ controls }: { controls: TaskWorkerControls }) {
         </li>;
       })}
     </ul>
-    <p className="rosc-task-workers__note">«CLI-сессия активна» — проверенный процесс и hook CLI. «Контекст подготовлен» — отдельное подтверждение чтения entry point. Диалог в PC/TC и Run появятся в следующих срезах.</p>
+    <p className="rosc-task-workers__note">Три отдельных факта: «CLI-сессия активна» — проверенный интерактивный процесс в tmux (для работы в терминале). Чат в Project/Task Conversation идёт через отдельный headless Claude CLI и НЕ требует активации tmux — просто выберите @Worker в чате. Формальный Run запускается только по утверждённому Prompt.</p>
   </section>;
 }

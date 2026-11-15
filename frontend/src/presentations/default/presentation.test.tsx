@@ -85,7 +85,7 @@ describe('Dashboard presentation', () => {
 describe('Work area presentation', () => {
   const projectProps = {
     projectId: 'P0001', project: P1, projectStatus: 'ready' as const, tasks: [T1], tasksStatus: 'ready' as const,
-    feedback, inert: false, scroll, workspace, conversation: conversation(), assignments: assignments(), textScale,
+    feedback, inert: false, scroll, workspace, conversation: conversation(), assignments: assignments(), workers: workerControls(), textScale,
     tab: 'tasks' as const, onSelectTab: vi.fn(), onClose: vi.fn(), onRetry: vi.fn(), onOpenTask: vi.fn(), onNewTask: vi.fn(),
   };
 
@@ -112,7 +112,8 @@ describe('Work area presentation', () => {
     expect(screen.queryByText('Состояние Workspace')).toBeNull();
     expect(screen.queryByText('Architect', { selector: 'dt' })).toBeNull();
     expect(screen.queryByText('Workers', { selector: 'dt' })).toBeNull();
-    expect(screen.getByText('Workers в работе')).toBeTruthy();
+    expect(screen.getByText('Workers', { selector: '.rosc-agent-stat span' })).toBeTruthy();
+    expect(screen.getAllByText('Workers не назначены').length).toBe(2);  // header chip + card  // P047: from the verified /workers read, never a placeholder 0
     expect(screen.getByText('Режим')).toBeTruthy();
     expect(screen.getByText('Подробнее о назначениях — в настройках проекта')).toBeTruthy();
     expect(screen.getByText('Документация', { selector: 'dt' })).toBeTruthy();
@@ -173,7 +174,7 @@ describe('Work area presentation', () => {
 describe('Workspace presentation', () => {
   const baseProject = {
     projectId: 'P0001', projectStatus: 'ready' as const, tasks: [], tasksStatus: 'ready' as const,
-    feedback, inert: false, scroll, conversation: conversation(), assignments: assignments(), textScale,
+    feedback, inert: false, scroll, conversation: conversation(), assignments: assignments(), workers: workerControls(), textScale,
     tab: 'tasks' as const, onSelectTab: vi.fn(), onClose: vi.fn(), onRetry: vi.fn(), onOpenTask: vi.fn(), onNewTask: vi.fn(),
   };
   const controls = () => ({ busy: false, onReconcile: vi.fn(), onRepair: vi.fn() });
@@ -305,7 +306,7 @@ describe('Project assignment presentation', () => {
   it('keeps the Project Conversation mounted while the left Settings tab is selected', () => {
     const props = {
       projectId: 'P0001', project: P1, projectStatus: 'ready' as const, tasks: [T1], tasksStatus: 'ready' as const,
-      feedback, inert: false, scroll, workspace, conversation: conversation(), assignments: assignments(), textScale,
+      feedback, inert: false, scroll, workspace, conversation: conversation(), assignments: assignments(), workers: workerControls(), textScale,
       tab: 'settings' as const, onSelectTab: vi.fn(), onClose: vi.fn(), onRetry: vi.fn(), onOpenTask: vi.fn(), onNewTask: vi.fn(),
     };
     render(<ProjectView {...props} />);
@@ -329,6 +330,7 @@ describe('Project assignment presentation', () => {
         },
         onRetry: vi.fn(), onSave: vi.fn(async () => null), onOpenRegistry: vi.fn(),
       },
+      workers: workerControls(),
       textScale,
       tab: 'settings' as const, onSelectTab: vi.fn(), onClose: vi.fn(), onRetry: vi.fn(), onOpenTask: vi.fn(), onNewTask: vi.fn(),
     };

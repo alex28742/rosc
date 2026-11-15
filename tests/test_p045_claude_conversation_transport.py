@@ -144,13 +144,14 @@ class TransportCase(CoreCase):
 
 class LaneIsolationTests(TransportCase):
     def test_two_rooms_get_distinct_native_sessions_and_repeat_turn_resumes_its_own(self) -> None:
-        pc, _ = self.group([self.A], quota=2, body="PC question")
+        pc, _ = self.group([self.A], quota=1, body="PC question")
         tc, _ = self.group([self.A], quota=1, task_id=1, body="TC question")
         first_pc = self.run_turn(pc)
         first_tc = self.run_turn(tc)
         self.assertEqual(first_pc["final"]["state"], "published")
         self.assertEqual(first_tc["final"]["state"], "published")
-        self.say("PC follow-up", to=[self.A])
+        # P047: the Owner's follow-up Send is itself the authorization for one more direct reply.
+        self.core.post_owner_turn(OWNER, 1, client_key=self.key(), body="PC follow-up", to=[self.A], grant=[self.A])
         second_pc = self.run_turn(pc)
         self.assertEqual(second_pc["final"]["state"], "published")
         natives = [c["native"] for c in self.runner.calls]
@@ -167,22 +168,34 @@ class LaneIsolationTests(TransportCase):
         pc_msgs = self.messages(pc)
         self.assertEqual(pc_msgs[-1][1:3], ("worker", self.A))
         self.assertEqual(pc_msgs[-1][3], f"reply #2 in {natives[0][:8]}")
-        self.assertEqual(self.grants()[self.A], 2)
+        self.assertEqual(self.grants()[self.A], 1)  # the follow-up's own fresh direct round
         self.assertEqual(self.grants(1)[self.A], 1)
 
-    def test_profile_is_chat_only_explicit_model_budget_and_clean_env(self) -> None:
+    def test_profile_keeps_native_tools_with_guarded_auto_permissions_and_clean_env(self) -> None:
+        """P047 (R-15.23): native Claude Code tools stay available; permission limits are declarative role text."""
         room, _ = self.group([self.A], quota=1)
         self.run_turn(room)
         call = self.runner.calls[0]
         argv = call["argv"]
-        self.assertEqual(argv[argv.index("--tools") + 1], "")
+        self.assertNotIn("--tools", argv)  # no physical stripping of Read/Edit/Bash/...
         for flag in ("-p", "--safe-mode", "--strict-mcp-config", "--disable-slash-commands"):
             self.assertIn(flag, argv)
+        self.assertEqual(argv[argv.index("--permission-mode") + 1], "auto")
+        self.assertEqual(argv[argv.index("--permission-prompts") + 1], "none")
+        self.assertEqual(argv[argv.index("--system-prompt-snapshot") + 1], "off")
+        disallowed = argv[argv.index("--disallowedTools") + 1].split(",")
+        for native in ("Read", "Edit", "Write", "Bash", "Grep", "Glob"):
+            self.assertNotIn(native, disallowed)
         self.assertEqual(argv[argv.index("--model") + 1], "haiku")
-        self.assertEqual(argv[argv.index("--max-budget-usd") + 1], "0.10")
+        self.assertEqual(argv[argv.index("--max-budget-usd") + 1], "1.00")
         self.assertEqual(argv[argv.index("--output-format") + 1], "stream-json")
-        self.assertEqual(argv[argv.index("--system-prompt") + 1], SYSTEM_PROMPT)
-        for forbidden in ("--fallback-model", "--dangerously-skip-permissions", "--add-dir", "--mcp-config", "--bare"):
+        role = argv[argv.index("--append-system-prompt") + 1]
+        self.assertNotIn("--system-prompt", argv)
+        self.assertIn("normal Claude Code tools", role)
+        self.assertIn("Git repository is", role)
+        self.assertNotIn("you have no tools", role)
+        for forbidden in ("--fallback-model", "--dangerously-skip-permissions", "--allow-dangerously-skip-permissions",
+                          "bypassPermissions", "--add-dir", "--mcp-config", "--bare"):
             self.assertNotIn(forbidden, argv)
         self.assertNotIn("ROSC_WORKER_ACK_FILE", call["env"])
         self.assertNotIn("CLAUDECODE", call["env"])
@@ -315,7 +328,7 @@ class StatusSemanticsTests(TransportCase):
         self.run_turn(room)
         native = self.runner.calls[0]["native"]
         del self.runner.sessions[native]  # provider-side context vanished
-        self.say("again", to=[self.A])
+        self.core.post_owner_turn(OWNER, 1, client_key=self.key(), body="again", to=[self.A], grant=[self.A])
         result = self.run_turn(room)
         self.assertEqual(result["dispatch"]["state"], "deferred")
         self.assertEqual(result["dispatch"]["error_code"], "native_session_missing")

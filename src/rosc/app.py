@@ -26,7 +26,7 @@ from .agent_registry import (AgentNotFound, AgentRegistryService, AssignmentNotF
 from .architect_latency import LatencyTrace
 from .architect_runtime import ArchitectRuntime, OpenCodeRuntime
 from .architect_rules import ArchitectRulesLoader
-from .architect_service import ArchitectService, runtime_message_id
+from .architect_service import ArchitectGroupTransport, ArchitectService, runtime_message_id
 from .architect_tools import ToolHost
 from .project_context import ProjectContextBroker
 from .task_authoring import (AuthoringError, TaskAuthoringService)
@@ -140,6 +140,8 @@ def project_view(project: Project, workspace_root: Path) -> dict:
         "root_binding": binding_view(binding),
         "mode": project.mode, "docs_entrypoint": project.docs_entrypoint,
         "workspace_state": state, "workspace_problem": problem,
+        # Deprecated placeholders kept only for API compatibility; they are NOT live status.  P047: the UI derives
+        # Architect/Worker state from the verified /architect and /workers reads and never shows these values.
         "architect": "not_active", "active_workers": 0, "created_at": utc_iso(project.created_at),
     }
 
@@ -431,7 +433,7 @@ def create_app(db_path: Path | None = None, workspace_root: Path | None = None, 
     # Python-level composition seam (tests inject a fake process runner); no request can select or configure it.
     group_core = WorkerConversationCore(sessions, policy)
     group = GroupConversationBridge(sessions, policy, group_core, group_transport_factory or claude_transport_factory(
-        sessions, db_path.parent / "conversation-evidence"))
+        sessions, db_path.parent / "conversation-evidence"), architect_transport=ArchitectGroupTransport(architect))
 
     @asynccontextmanager
     async def lifespan(_app: FastAPI):

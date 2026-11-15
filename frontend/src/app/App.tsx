@@ -36,6 +36,8 @@ export function App({ api = coreApi }: { api?: CoreApi }) {
     route.kind === 'task' ? route.taskId : null);
   const taskWorkers = useTaskWorkers(api, route.kind === 'task' ? route.projectId : null,
     route.kind === 'task' ? route.taskId : null);
+  // P047: Project-level Worker controls (read on open; only explicit buttons can start anything).
+  const projectWorkers = useTaskWorkers(api, projectId, null);
   const taskLayerOpen = (route.kind === 'task' || route.kind === 'new-task') && project !== null;
   const modalOpen = core.registrationOpen;
   const workspace = (kind: 'project' | 'task') => ({
@@ -67,6 +69,7 @@ export function App({ api = coreApi }: { api?: CoreApi }) {
       workspace={workspace('project')}
       conversation={core.conversation}
       assignments={core.assignments}
+      workers={projectWorkers}
       textScale={projectTextScale}
       tab={core.projectTab}
       onSelectTab={tab => go({ kind: 'project', projectId, tab: tab === 'settings' ? 'settings' : undefined })}

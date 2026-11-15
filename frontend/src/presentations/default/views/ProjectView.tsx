@@ -9,7 +9,8 @@ import { ProjectAgentsCard } from '../ui/ProjectAgentsCard';
 import { ProjectSettingsPanel } from '../ui/ProjectSettingsPanel';
 import { TaskItemMenu } from '../ui/TaskItemMenu';
 import { TextViewControl } from '../ui/TextViewControl';
-import { architectHeadline } from '../ui/architectView';
+import { architectHeadline, architectTone } from '../ui/architectView';
+import { summarizeWorkers } from '../ui/workerView';
 import { ChevronRightIcon } from '../ui/icons';
 import { useApplyTextScale } from '../ui/useApplyTextScale';
 
@@ -76,7 +77,7 @@ function TaskRows({ tasks, viewMode, onOpenTask }: { tasks: Task[]; viewMode: Ta
  * chat state (draft, collapse, search), list filters and text scale are keyed by Project so switching Projects
  * cannot leak them and a nested Task keeps them intact.
  */
-function ProjectWorkArea({ project, tasks, tasksStatus, feedback, scroll, workspace, conversation, assignments, tab,
+function ProjectWorkArea({ project, tasks, tasksStatus, feedback, scroll, workspace, conversation, assignments, workers, tab,
   onSelectTab, onRetry, onOpenTask, onNewTask }: WorkAreaProps) {
   const [collapsed, setCollapsed] = useState(false);
   const [search, setSearch] = useState('');
@@ -116,7 +117,7 @@ function ProjectWorkArea({ project, tasks, tasksStatus, feedback, scroll, worksp
             <dt>Документация</dt><dd>{project.docs_entrypoint ?? 'не указана'}</dd>
           </dl>
         </section>
-        <ProjectAgentsCard project={project} conversation={conversation} workspace={workspace}
+        <ProjectAgentsCard project={project} conversation={conversation} workspace={workspace} workers={workers}
           onOpenSettings={() => onSelectTab('settings')} />
       </div>
       <div className="rosc-tabs-toolbar">
@@ -192,8 +193,9 @@ function ProjectWorkArea({ project, tasks, tasksStatus, feedback, scroll, worksp
 }
 
 export function ProjectView({ projectId, project, projectStatus, tasks, tasksStatus, feedback, inert, scroll, workspace,
-  conversation, assignments, textScale, tab, onSelectTab, onClose, onRetry, onOpenTask, onNewTask }: ProjectViewProps) {
+  conversation, assignments, workers, textScale, tab, onSelectTab, onClose, onRetry, onOpenTask, onNewTask }: ProjectViewProps) {
   const architect = conversation.architect;
+  const workerSummary = summarizeWorkers(workers.status, workers.workers);
   const scaleRef = useApplyTextScale(textScale.scale);
   const head = <>
     <div className="rosc-drawer__heading">
@@ -202,10 +204,12 @@ export function ProjectView({ projectId, project, projectStatus, tasks, tasksSta
       <p>{project?.root_path ?? 'Проект не загружен'}</p>
     </div>
     <div className="rosc-drawer__controls">
-      <span className="rosc-chip">Project Architect · {architectHeadline(architect.status, architect.info, architect.busy)}</span>
-      {project && <span className="rosc-chip">
+      <span className={`rosc-chip rosc-chip--${architectTone(architect.status, architect.info, architect.busy)}`}>
         <span className="rosc-chip__dot" aria-hidden="true" />
-        Worker: {project.active_workers > 0 ? `${project.active_workers} в работе` : 'не активен'}
+        Project Architect · {architectHeadline(architect.status, architect.info, architect.busy)}</span>
+      {project && <span className={`rosc-chip rosc-chip--${workerSummary.tone}`} title="Интерактивные CLI-сессии Workers (tmux). Чат PC/TC от них не зависит.">
+        <span className="rosc-chip__dot" aria-hidden="true" />
+        {workerSummary.text}
       </span>}
       {project && <span className={project.workspace_state === 'ready' ? 'rosc-tag rosc-tag--success' : 'rosc-tag rosc-tag--warning'}>
         {project.workspace_state === 'ready' ? 'Workspace готов' : 'Нужна сверка'}
@@ -223,6 +227,7 @@ export function ProjectView({ projectId, project, projectStatus, tasks, tasksSta
           : <div className="rosc-state"><p>Проект не найден. Закройте окно и выберите проект на дашборде.</p></div>}
     </div> : <ProjectWorkArea key={project.id} project={project} tasks={tasks} tasksStatus={tasksStatus}
       feedback={feedback} scroll={scroll} workspace={workspace} conversation={conversation} assignments={assignments}
+      workers={workers}
       tab={tab} onSelectTab={onSelectTab} onRetry={onRetry} onOpenTask={onOpenTask} onNewTask={onNewTask} />}
   </Drawer>;
 }

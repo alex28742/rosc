@@ -1,21 +1,24 @@
-"""P046 (P043D): the small Owner-only bridge between the browser and the P043B Core + P043C Claude CLI transport.
+"""P046 (P043D) + P047: the small Owner-only bridge between the browser and the P043B Core + provider transports.
 
 One shared service for the Project Conversation (``task_id=None``) and every Task Conversation; there is no second
 chat store: messages are the canonical ``ConversationMessage`` rows the Core writes.
 
-Execution model (deliberately minimal):
+Execution model (P047 / R-15.24, R-15.25):
 
-* Reads (``status``) never claim, dispatch, reconcile or launch anything; the only provider-side observation they make
-  is a read-only look at the transport's evidence/lease (``activity``) for the turn already holding the room.
-* A provider turn is launched only by ``start`` — an explicit Owner POST — after an explicit Owner round grant.  It runs
-  a bounded in-process driver thread for that room: claim -> dispatch -> evidence-backed publish, repeated only while
-  the Owner's grant still has budget, and it stops at the first non-publishing outcome (awaiting Owner, pause/brake,
-  catch-up decision, UNKNOWN, failure).  One driver per room; nothing re-starts it automatically; no daemon.
-* Restart: the Core state is durable.  ``recover_all`` (application start) turns an interrupted ``submitted`` turn into
-  ``unknown`` without any provider call; resolving it is the explicit Owner ``reconcile`` (evidence lookup, never a
-  re-send).
-* Only Claude Code Workers have a group transport in v1.0.  The Architect (OpenCode) and any other adapter are listed
-  as members-in-scope but are not addressable for group turns here; nothing is routed through Claude on their behalf.
+* The Owner's single Send IS the authorization.  ``post_message`` stores one canonical event with explicit ``to[]`` and,
+  in the SAME transaction, opens a fresh round for the addressed Agents: Owner -> exactly one Agent is DIRECT (one reply
+  authorized); Owner -> two or more Agents is GROUP (the ROSC default N per Agent, reset on every new Owner group
+  message).  It then wakes the room's bounded driver and returns at once; generation is asynchronous.
+* Reads (``status``) never claim, dispatch, reconcile or launch anything.
+* One bounded in-process driver thread per room: claim -> dispatch -> evidence-backed publish, one provider call at a
+  time, stopping at the first non-publishing outcome (pause/brake, catch-up decision, UNKNOWN, failure, nothing left).
+  A wake-up that arrives while the driver is finishing is never lost (``_wanted``).  No daemon, no polling loop.
+* Pause / Emergency Brake block new dispatch, including dispatch on Send; the grant waits visibly for the Owner.
+* Restart: the Core state is durable.  ``recover_all`` turns an interrupted ``submitted`` turn into ``unknown`` without
+  any provider call; resolving it is the explicit Owner ``reconcile`` (evidence lookup, never a re-send).
+* Claude Code Workers use the headless Claude CLI transport; the Project Architect uses the narrow correlated OpenCode
+  bridge (``ArchitectGroupTransport``) over its existing verified session, when one is composed in.  Nothing is ever
+  routed through one Agent on behalf of another.
 """
 from __future__ import annotations
 
@@ -92,13 +95,16 @@ def claude_transport_factory(session_factory: sessionmaker[Session], evidence_di
 
 class GroupConversationBridge:
     def __init__(self, session_factory: sessionmaker[Session], policy: AuthorizationPolicy,
-                 core: WorkerConversationCore, transport_factory: TransportFactory) -> None:
+                 core: WorkerConversationCore, transport_factory: TransportFactory,
+                 architect_transport: object | None = None) -> None:
         self._sessions = session_factory
         self._policy = policy
         self._core = core
         self._factory = transport_factory
+        self._architect = architect_transport
         self._lock = threading.Lock()
         self._drivers: dict[str, threading.Thread] = {}
+        self._wanted: set[str] = set()
         self._last: dict[str, dict] = {}
 
     # ------------------------------------------------------------------ helpers
@@ -116,11 +122,12 @@ class GroupConversationBridge:
                 raise ConversationNotFound("Conversation not found")
             return room.conversation_id
 
-    @staticmethod
-    def _support(agent: AgentDefinition, role: str) -> str | None:
-        """None when the Agent can take real group turns here; otherwise the honest reason it cannot."""
+    def _support(self, agent: AgentDefinition, role: str, project_id: int) -> str | None:
+        """None when the Agent can take a real turn here now; otherwise the honest reason it cannot (read-only)."""
         if role == ROLE_ARCHITECT:
-            return UNSUPPORTED_ARCHITECT
+            if self._architect is None:
+                return UNSUPPORTED_ARCHITECT
+            return self._architect.ready_problem(project_id)
         if agent.runtime_adapter.lower() not in SUPPORTED_ADAPTERS:
             return UNSUPPORTED_ADAPTER
         return None
@@ -138,7 +145,7 @@ class GroupConversationBridge:
             agent = session.get(AgentDefinition, assignment.agent_id)
             if agent is None:
                 continue
-            reason = self._support(agent, assignment.role)
+            reason = self._support(agent, assignment.role, project_id)
             entries[agent.agent_id] = {"agent_id": agent.agent_id, "display_name": agent.display_name,
                                        "icon_label": agent.icon_label, "role": assignment.role,
                                        "runtime_adapter": agent.runtime_adapter, "model_id": agent.model_id,
@@ -147,21 +154,29 @@ class GroupConversationBridge:
 
     def _supported_targets(self, session: Session, project_id: int, task_id: int | None, agents: object) -> list[str]:
         if not isinstance(agents, list) or not agents:
-            raise InvalidConversationInput("Choose at least one Worker")
+            raise InvalidConversationInput("Choose at least one Agent")
         roster = {entry["agent_id"]: entry for entry in self._roster(session, project_id, task_id)}
         for agent_id in agents:
             entry = roster.get(agent_id) if isinstance(agent_id, str) else None
             if entry is None:
                 raise InvalidConversationInput("An addressee is not assigned to this conversation")
             if not entry["group_supported"]:
+                if entry["unsupported_reason"] in ("architect_not_active", "no_active_architect_assignment"):
+                    raise ConversationConflict(f"{entry['display_name']}: Architect is not active; activate it or "
+                                               "remove it from the addressees (nothing was sent)")
                 raise InvalidConversationInput(
-                    f"{entry['display_name']}: group turns are not available ({entry['unsupported_reason']})")
+                    f"{entry['display_name']}: replies are not available ({entry['unsupported_reason']})")
         return list(agents)
 
     def _transport_for(self, session: Session, agent_id: str):
         agent = session.get(AgentDefinition, agent_id)
         if agent is None:
             return UnavailableTransport("agent_missing")
+        architect = session.scalars(select(RoleAssignment.assignment_id).where(
+            RoleAssignment.agent_id == agent_id, RoleAssignment.role == ROLE_ARCHITECT,
+            RoleAssignment.state == ASSIGNMENT_ACTIVE)).first()
+        if architect is not None:
+            return self._architect if self._architect is not None else UnavailableTransport(UNSUPPORTED_ARCHITECT)
         if agent.runtime_adapter.lower() not in SUPPORTED_ADAPTERS:
             return UnavailableTransport(UNSUPPORTED_ADAPTER)
         return self._factory(agent)
@@ -196,12 +211,25 @@ class GroupConversationBridge:
                 ConversationMessage.conversation_id == room.conversation_id,
                 ConversationParticipant.kind == PARTICIPANT_OWNER).limit(1)) is not None
             catchup = self._pending_catchup(session, room.conversation_id) if room is not None else None
+            peer_addressed = room is not None and self._last_agent_message_addresses_peer(session, room.conversation_id)
+            latest_owner = None if room is None else session.scalars(select(ConversationMessage.message_id).join(
+                ConversationParticipant,
+                ConversationParticipant.participant_id == ConversationMessage.sender_participant_id).where(
+                ConversationMessage.conversation_id == room.conversation_id,
+                ConversationParticipant.kind == PARTICIPANT_OWNER).order_by(
+                ConversationMessage.ordinal.desc()).limit(1)).first()
         core = self._core.room_status(actor, project_id, task_id=task_id) if room is not None else None
         activity = None
         if core is not None and core["holding_turn"] is not None:
             activity = self._activity(core["holding_turn"])
         names = {entry["agent_id"]: entry["display_name"] for entry in roster}
+        rnd = core["round"] if core else None
+        # A round is "current conversation mode" only while its authorizing Owner message is the latest Owner message:
+        # a later direct (legacy) message returns the room to 1:1 and hides the group header.
+        grants = len(rnd["grants"]) if rnd and rnd.get("authorizing_message_id") in (None, latest_owner) else 0
+        engagement = "group" if grants >= 2 or peer_addressed else "direct" if grants == 1 else "none"
         return {
+            "engagement": engagement,
             "conversation_id": conversation_id,
             "roster": roster,
             "names": names,
@@ -219,6 +247,20 @@ class GroupConversationBridge:
             "driver": {"running": self.running(conversation_id) if conversation_id else False,
                        "last": self._last.get(conversation_id) if conversation_id else None},
         }
+
+    @staticmethod
+    def _last_agent_message_addresses_peer(session: Session, conversation_id: str) -> bool:
+        """Agent -> another Agent with the Owner observing (R-15.24): the room's latest Agent message names a peer."""
+        from .models import MessageEnvelope, MessageParty
+        row = session.execute(select(ConversationMessage.message_id, MessageEnvelope.sender_agent_id).outerjoin(
+            MessageEnvelope, MessageEnvelope.message_id == ConversationMessage.message_id).where(
+            ConversationMessage.conversation_id == conversation_id).order_by(
+            ConversationMessage.ordinal.desc()).limit(1)).first()
+        if row is None or row[1] is None:
+            return False
+        return session.scalar(select(MessageParty.party_ref).where(
+            MessageParty.message_id == row[0], MessageParty.role == "to", MessageParty.party_kind != "owner",
+            MessageParty.party_ref != row[1]).limit(1)) is not None
 
     def _activity(self, turn: dict) -> str | None:
         state = turn["state"]
@@ -266,16 +308,38 @@ class GroupConversationBridge:
     # ------------------------------------------------------------------ Owner mutations
     def post_message(self, actor: ActorContext, project_id: int, task_id: int | None, *, client_key: object,
                      body: object, to: object, reply_to: object = None) -> dict:
-        """One idempotent Owner group message with trusted structured ``to[]`` (supported Workers only).  Never
-        dispatches: a model is invoked only by an explicit round grant + ``start``."""
+        """P047: ONE Owner Send.  Stores one idempotent canonical message with trusted structured ``to[]`` and, in the same
+        transaction, authorizes the addressed Agents (direct: one reply; group: N each), then wakes the room driver.
+        An identical retry replays the message, authorizes nothing new and only re-wakes the already-authorized queue
+        (which can never re-submit a turn).  Pause / Brake keep the grant waiting for the Owner."""
         self._authorize(actor, CONVERSATION_GROUP_CONTROL, project_id, task_id)
+        if reply_to is not None:
+            raise InvalidConversationInput("reply_to is not supported for Owner messages")
         with self._sessions() as session:
             targets = self._supported_targets(session, project_id, task_id, to)
-        result = self._core.post_owner_message(actor, project_id, client_key=client_key, body=body, to=targets,
-                                               reply_to=reply_to, task_id=task_id)
+        result = self._core.post_owner_turn(actor, project_id, client_key=client_key, body=body, to=targets,
+                                            grant=targets, task_id=task_id)
+        conversation_id = result["message"]["conversation_id"]
         with self._sessions() as session:
-            return {"message": load_message_view(session, result["message"]["message_id"]),
-                    "replayed": result["replayed"]}
+            controls = self._core._controls(session, conversation_id)  # noqa: SLF001
+            held = self._core._holding_turn(session, conversation_id)  # noqa: SLF001
+            message = load_message_view(session, result["message"]["message_id"])
+        blocked = None
+        if controls is not None and controls.emergency_brake:
+            blocked = "emergency_brake"
+        elif controls is not None and controls.paused:
+            blocked = "paused"
+        elif held is not None and held.state == TURN_UNKNOWN:
+            blocked = "unknown_turn"
+        started = False
+        if blocked is None:
+            started = self._kick(conversation_id)
+        rnd = result.get("round")
+        return {"message": message, "replayed": result["replayed"],
+                "dispatch": {"mode": "direct" if len(targets) == 1 else "group", "agents": targets,
+                             "round": None if rnd is None else {"round_id": rnd["round_id"], "round_no": rnd["round_no"],
+                                                                "per_agent_quota": rnd["per_agent_quota"]},
+                             "started": started, "blocked": blocked}}
 
     def authorize_round(self, actor: ActorContext, project_id: int, task_id: int | None, *, agents: object,
                         quota: object = None, renew: bool = False) -> dict:
@@ -295,7 +359,15 @@ class GroupConversationBridge:
                                           authorizing_message_id=latest, task_id=task_id)
 
     def set_controls(self, actor: ActorContext, project_id: int, task_id: int | None, **controls) -> dict:
-        return self._core.set_dispatch_controls(actor, project_id, task_id=task_id, **controls)
+        """Pause / Brake.  Clearing the last one is the Owner's decision to let the ALREADY-authorized queue continue."""
+        result = self._core.set_dispatch_controls(actor, project_id, task_id=task_id, **controls)
+        if not result["paused"] and not result["emergency_brake"] and False in (controls.get("paused"),
+                                                                                controls.get("emergency_brake")):
+            conversation_id = self._room_id(project_id, task_id)
+            with self._sessions() as session:
+                if self._core._current_round(session, conversation_id) is not None:  # noqa: SLF001
+                    self._kick(conversation_id)
+        return result
 
     def release(self, actor: ActorContext, project_id: int, task_id: int | None, agent_id: str) -> dict:
         return self._core.release_member(actor, project_id, agent_id, task_id=task_id)
@@ -309,22 +381,29 @@ class GroupConversationBridge:
 
     # ------------------------------------------------------------------ explicit execution
     def start(self, actor: ActorContext, project_id: int, task_id: int | None) -> dict:
-        """Explicit Owner action: run the room's ALREADY-AUTHORIZED queue on a bounded background driver."""
+        """Explicit Owner resume of the room's ALREADY-AUTHORIZED queue (e.g. after a catch-up decision).  Ordinary
+        sending never needs it: the Send itself wakes the driver."""
         self._authorize(actor, CONVERSATION_GROUP_CONTROL, project_id, task_id)
         conversation_id = self._room_id(project_id, task_id)
         with self._sessions() as session:
             if self._core._current_round(session, conversation_id) is None:  # noqa: SLF001
-                raise ConversationConflict("No authorized round: grant N replies first")
+                raise ConversationConflict("Nothing is authorized in this conversation: send a message first")
+        started = self._kick(conversation_id)
+        return {"started": started, "running": True}
+
+    def _kick(self, conversation_id: str) -> bool:
+        """Wake the room's driver.  True when a new driver thread was started; a running one picks the work up."""
         with self._lock:
+            self._wanted.add(conversation_id)
             thread = self._drivers.get(conversation_id)
             if thread is not None and thread.is_alive():
-                return {"started": False, "running": True}
+                return False
             thread = threading.Thread(target=self._drive, args=(conversation_id,), daemon=True,
                                       name=f"rosc-group-{conversation_id[:8]}")
             self._drivers[conversation_id] = thread
             self._last[conversation_id] = {"state": "running", "at": _now_iso()}
             thread.start()
-        return {"started": True, "running": True}
+            return True
 
     def wait(self, conversation_id: str, timeout: float = 30.0) -> None:
         """Test/ops seam: join the room's driver."""
@@ -333,39 +412,42 @@ class GroupConversationBridge:
         if thread is not None:
             thread.join(timeout)
 
-    def _step_budget(self, conversation_id: str) -> int:
-        with self._sessions() as session:
-            rnd = self._core._current_round(session, conversation_id)  # noqa: SLF001
-            if rnd is None:
-                return 0
-            remaining = sum(max(0, g.quota - g.published_count) for g in session.scalars(
-                select(GroupRoundGrant).where(GroupRoundGrant.round_id == rnd.round_id)))
-        return min(MAX_DRIVER_STEPS, 2 * remaining + 2)  # each slot may take one safe deferred retry
-
     def _drive(self, conversation_id: str) -> None:
-        last: dict = {"state": "stopped", "reason": "budget_exhausted"}
+        last: dict = {"state": "stopped", "reason": "idle"}
+        steps = 0
         try:
-            for _ in range(self._step_budget(conversation_id)):
-                claim = self._core.claim_next(conversation_id)
-                if claim.status != "reserved":
-                    last = {"state": "stopped", "reason": claim.status, "agent_id": claim.agent_id,
-                            "turn_id": claim.turn_id}
-                    break
-                transport = self.transport(claim.agent_id)
-                view = self._core.dispatch(claim.turn_id, transport)
-                view.pop("payload", None)
-                if view["state"] == TURN_ACCEPTED:
-                    view = self._core.reconcile(claim.turn_id, transport)  # evidence lookup -> publish exactly once
-                if view["state"] in (TURN_UNKNOWN, TURN_SUBMITTED, TURN_ACCEPTED):
-                    last = {"state": "stopped", "reason": view["state"], "agent_id": claim.agent_id,
-                            "turn_id": claim.turn_id, "error_code": view.get("error_code")}
-                    break
+            while True:
+                with self._lock:
+                    if conversation_id not in self._wanted:
+                        # Leaving under the lock: a later _kick sees no live driver and starts a new one.
+                        self._drivers.pop(conversation_id, None)
+                        self._last[conversation_id] = {**last, "at": _now_iso()}
+                        return
+                    self._wanted.discard(conversation_id)
+                while steps < MAX_DRIVER_STEPS:
+                    steps += 1
+                    claim = self._core.claim_next(conversation_id)
+                    if claim.status != "reserved":
+                        last = {"state": "stopped", "reason": claim.status, "agent_id": claim.agent_id,
+                                "turn_id": claim.turn_id}
+                        break
+                    transport = self.transport(claim.agent_id)
+                    view = self._core.dispatch(claim.turn_id, transport)
+                    view.pop("payload", None)
+                    if view["state"] == TURN_ACCEPTED:
+                        view = self._core.reconcile(claim.turn_id, transport)  # evidence lookup -> publish once
+                    if view["state"] in (TURN_UNKNOWN, TURN_SUBMITTED, TURN_ACCEPTED):
+                        last = {"state": "stopped", "reason": view["state"], "agent_id": claim.agent_id,
+                                "turn_id": claim.turn_id, "error_code": view.get("error_code")}
+                        break
+                else:
+                    last = {"state": "stopped", "reason": "step_limit"}
         except Exception as exc:  # never crash the server; the Core state stays what it durably is
-            log.warning("Group driver stopped: %s", type(exc).__name__)
-            last = {"state": "stopped", "reason": "driver_error"}
-        finally:
+            log.warning("Group driver stopped: %s", type(exc).__name__, exc_info=True)
             with self._lock:
-                self._last[conversation_id] = {**last, "at": _now_iso()}
+                self._drivers.pop(conversation_id, None)
+                self._wanted.discard(conversation_id)
+                self._last[conversation_id] = {"state": "stopped", "reason": "driver_error", "at": _now_iso()}
 
     def reconcile(self, actor: ActorContext, project_id: int, task_id: int | None) -> dict:
         """Explicit Owner evidence reconciliation of the room's held turn.  Never re-submits; inconclusive evidence

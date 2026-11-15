@@ -61,6 +61,14 @@ export function describeArchitect(info: ArchitectStatus | null, loaded: boolean,
 }
 
 /** Short Project header wording for the same state; a failed load is not presented as a known lifecycle state. */
+/** P047: semantic colour for the Architect header chip: green only for a verified ready session. */
+export function architectTone(status: LoadStatus, info: ArchitectStatus | null, busy: boolean): 'on' | 'off' | 'warn' | 'error' | 'unknown' {
+  if (busy) return 'unknown';
+  if (status === 'failed') return 'warn';
+  if (status !== 'ready' || info === null) return 'unknown';
+  return info.state === 'ready' ? 'on' : info.state === 'error' ? 'error' : 'off';
+}
+
 export function architectHeadline(status: LoadStatus, info: ArchitectStatus | null, busy: boolean): string {
   if (busy) return 'запускается';
   if (status === 'failed') return 'статус не проверен';
