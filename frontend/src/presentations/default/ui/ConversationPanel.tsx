@@ -2,8 +2,8 @@ import { useEffect, useId, useMemo, useRef, useState, type FormEvent } from 'rea
 import type { ConversationControls } from '../../../app/presentation/contracts';
 import { architectReason, describeArchitect } from './architectView';
 import { findMatches, renderBody } from './chatSearch';
-import { GroupActivityRow, GroupBar, GroupCatchupDialog, MessageAddress, RecipientChips, ReleaseOffers, routeSelection,
-  senderName } from './GroupConversation';
+import { ARCHITECT_CHIP, GroupActivityRow, GroupBar, GroupCatchupDialog, MessageAddress, RecipientChips, ReleaseOffers,
+  effectiveSelection, nameOf, routeSelection, senderName, typedAddressees } from './GroupConversation';
 
 type Props = {
   projectId: string;
@@ -57,9 +57,16 @@ export function ConversationPanel({ projectId, conversation, collapsed, onCollap
   const [groupOpen, setGroupOpen] = useState(false);
   /** Addressee chips appear once this room has an in-scope Worker; until then the composer is the plain Architect chat. */
   const hasWorkers = (group.info?.roster ?? []).some(entry => entry.role === 'worker');
-  const routed = routeSelection(group.info, selected);
+  // P052: typed `@DisplayName` is genuinely parsed (Core re-parses authoritatively) and UNITED with the chips.
+  const typed = typedAddressees(group.info, draft);
+  const effective = effectiveSelection(selected, typed.ids);
+  const typedOnly = typed.ids.filter(id => !selected.has(id));
+  const typedProblem = typed.ambiguous.length > 0
+    ? `@${typed.ambiguous[0]} совпадает с несколькими агентами — выберите адресата кнопкой.`
+    : typed.unavailable.length > 0 ? `${typed.unavailable[0]}: ответы недоступны для этого агента.` : null;
+  const routed = routeSelection(group.info, effective);
   const workers = routed.to;
-  const mixed = routed.problem !== null;
+  const mixed = routed.problem !== null || typedProblem !== null;
   const toggle = (id: string) => setSelected(prev => {
     const next = new Set(prev);
     if (next.has(id)) next.delete(id); else next.add(id);
@@ -241,7 +248,9 @@ export function ConversationPanel({ projectId, conversation, collapsed, onCollap
       {hasWorkers && <RecipientChips group={group} selected={selected} onToggle={toggle} disabled={locked}
         architect={{ label: 'Architect', available: true,
           title: live ? 'Сообщение будет передано активному Architect' : 'Architect не активирован: сообщение только сохранится' }} />}
-      {mixed && <p className="rosc-conversation__error" role="alert">{routed.problem}</p>}
+      {mixed && <p className="rosc-conversation__error" role="alert">{typedProblem ?? routed.problem}</p>}
+      {typedOnly.length > 0 && !typedProblem && <p className="rosc-conversation__hint" role="status">
+        Адресаты из текста: {typedOnly.map(id => id === ARCHITECT_CHIP ? '@Architect' : `@${nameOf(group.info, id)}`).join(', ')}</p>}
       <textarea aria-label="Сообщение в Project Conversation" placeholder="Обсудить задачу, задать вопрос…" rows={3}
         value={draft} readOnly={locked} aria-busy={locked}
         onChange={event => setDraft(event.target.value)}

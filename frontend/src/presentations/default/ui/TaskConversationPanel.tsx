@@ -4,7 +4,7 @@ import type { TaskConversationControls } from '../../../app/presentation/contrac
 import { architectReason, describeArchitect, describeTaskArchitect } from './architectView';
 import { findMatches, renderBody } from './chatSearch';
 import { ARCHITECT_CHIP, GroupActivityRow, GroupBar, GroupCatchupDialog, MessageAddress, RecipientChips, ReleaseOffers,
-  routeSelection, senderName } from './GroupConversation';
+  effectiveSelection, nameOf, routeSelection, senderName, typedAddressees } from './GroupConversation';
 
 /** Delivery wording is about the stored Owner message, never proof that the Architect answered. */
 const DELIVERY_TEXT: Record<string, string> = {
@@ -40,10 +40,17 @@ export function TaskConversationPanel({ taskId, conversation, collapsed, onColla
   const group = conversation.group;
   const [selected, setSelected] = useState<Set<string>>(() => new Set());
   const [groupOpen, setGroupOpen] = useState(false);
-  const routed = routeSelection(group.info, selected);
+  // P052: typed `@DisplayName` is genuinely parsed (Core re-parses authoritatively) and UNITED with the chips.
+  const typed = typedAddressees(group.info, draft);
+  const effective = effectiveSelection(selected, typed.ids);
+  const typedOnly = typed.ids.filter(id => !selected.has(id));
+  const typedProblem = typed.ambiguous.length > 0
+    ? `@${typed.ambiguous[0]} совпадает с несколькими агентами — выберите адресата кнопкой.`
+    : typed.unavailable.length > 0 ? `${typed.unavailable[0]}: ответы недоступны для этого агента.` : null;
+  const routed = routeSelection(group.info, effective);
   const workers = routed.to;
-  const mixed = routed.problem !== null;
-  const recipient: MessageRecipient = selected.has(ARCHITECT_CHIP) ? 'architect' : null;
+  const mixed = routed.problem !== null || typedProblem !== null;
+  const recipient: MessageRecipient = effective.has(ARCHITECT_CHIP) ? 'architect' : null;
   const toggle = (id: string) => setSelected(prev => {
     const next = new Set(prev);
     if (next.has(id)) next.delete(id); else next.add(id);
@@ -232,7 +239,9 @@ export function TaskConversationPanel({ taskId, conversation, collapsed, onColla
       <RecipientChips group={group} selected={selected} onToggle={toggle} disabled={locked}
         architect={{ label: 'Architect', available: true,
           title: live ? 'Сообщение будет передано Architect этой задачи' : 'Architect не активен: сообщение сохранится, отправить можно позже' }} />
-      {mixed && <p className="rosc-conversation__error" role="alert">{routed.problem}</p>}
+      {mixed && <p className="rosc-conversation__error" role="alert">{typedProblem ?? routed.problem}</p>}
+      {typedOnly.length > 0 && !typedProblem && <p className="rosc-conversation__hint" role="status">
+        Адресаты из текста: {typedOnly.map(id => id === ARCHITECT_CHIP ? '@Architect' : `@${nameOf(group.info, id)}`).join(', ')}</p>}
       <textarea aria-label="Сообщение в Task Conversation" placeholder="Сообщение по этой задаче…" rows={3}
         value={draft} readOnly={locked} aria-busy={locked}
         onChange={event => setDraft(event.target.value)}

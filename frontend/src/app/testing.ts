@@ -119,7 +119,7 @@ export const groupControls = (over: Partial<GroupControls> = {}): GroupControls 
   status: 'ready', info: groupStatus(), error: '', busy: null, notice: '', onReload: vi.fn(),
   onPost: vi.fn(async () => null), onAuthorize: vi.fn(async () => null), onStart: vi.fn(async () => null),
   onControls: vi.fn(async () => null), onRelease: vi.fn(async () => null), onKeep: vi.fn(async () => null),
-  onCatchup: vi.fn(async () => null), onReconcile: vi.fn(async () => null), ...over,
+  onCatchup: vi.fn(async () => null), onReconcile: vi.fn(async () => null), onContinue: vi.fn(async () => null), ...over,
 });
 
 export function stubApi(over: Partial<{ [K in keyof CoreApi]: ReturnType<typeof vi.fn> }> = {}) {
@@ -144,6 +144,7 @@ export function stubApi(over: Partial<{ [K in keyof CoreApi]: ReturnType<typeof 
     keepGroupMember: vi.fn(async () => ({})),
     chooseGroupCatchup: vi.fn(async () => ({})),
     reconcileGroup: vi.fn(async () => ({ reconciled: [] })),
+    continueGroup: vi.fn(async () => ({ round: {}, conversation_id: 'c', started: true })),
     getTaskConversation: vi.fn(async () => conversationPage({ task_id: 'T0001' })),
     sendTaskConversationMessage: vi.fn(async (_projectId: string, _taskId: string, input: ConversationMessageInput) => ({
       message: conversationMessage(input.body, { recipient: input.recipient ?? null }), replayed: false,

@@ -125,7 +125,8 @@ export function useGroupConversation(api: CoreApi, projectId: string | null, tas
       await api.startGroupTurns(pid, tid);
     }), [act, api]);
   const onReconcile = useCallback(() => act('reconcile', (pid, tid) => api.reconcileGroup(pid, tid)), [act, api]);
+  const onContinue = useCallback(() => act('continue', (pid, tid) => api.continueGroup(pid, tid)), [act, api]);
 
   return { status: visible.status, info: visible.info, error: visible.error, busy: visible.busy, notice: visible.notice, onReload, onPost,
-    onAuthorize, onStart, onControls, onRelease, onKeep, onCatchup, onReconcile };
+    onAuthorize, onStart, onControls, onRelease, onKeep, onCatchup, onReconcile, onContinue };
 }

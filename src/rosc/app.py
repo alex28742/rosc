@@ -252,7 +252,8 @@ class TaskConversationMessageInput(ConversationMessageInput):
 class GroupMessageInput(ConversationMessageInput):
     """P046: an Owner group message with trusted structured addressees (stable Agent ids); never an author or session."""
 
-    to: list[str] = Field(min_length=1, max_length=16)
+    # P052: may be empty when the body itself addresses Agents by typed ``@DisplayName`` (parsed server-side).
+    to: list[str] = Field(default_factory=list, max_length=16)
     reply_to: str | None = Field(default=None, max_length=64)
 
 
@@ -434,6 +435,7 @@ def create_app(db_path: Path | None = None, workspace_root: Path | None = None, 
     group_core = WorkerConversationCore(sessions, policy)
     group = GroupConversationBridge(sessions, policy, group_core, group_transport_factory or claude_transport_factory(
         sessions, db_path.parent / "conversation-evidence"), architect_transport=ArchitectGroupTransport(architect))
+    architect.peer_bridge = group  # P052: an authenticated direct Architect reply may invite in-scope peers once
 
     @asynccontextmanager
     async def lifespan(_app: FastAPI):
@@ -876,6 +878,12 @@ def create_app(db_path: Path | None = None, workspace_root: Path | None = None, 
             pid, tid = scope(project_id, task_id)
             return conversation_call(group.authorize_round, current_actor(), pid, tid, agents=data.agents,
                                      quota=data.quota, renew=data.renew)
+
+        @app.post(f"{prefix}/continue")
+        def group_continue(project_id: str, task_id: str | None = None) -> dict:
+            """P052: explicit Owner continuation of an exhausted discussion with an unanswered addressed Agent."""
+            pid, tid = scope(project_id, task_id)
+            return conversation_call(group.continue_round, current_actor(), pid, tid)
 
         @app.post(f"{prefix}/start")
         def group_start(project_id: str, task_id: str | None = None) -> dict:

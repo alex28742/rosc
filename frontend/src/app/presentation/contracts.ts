@@ -236,6 +236,8 @@ export type GroupControls = {
   /** Owner Send-full / Skip for a large Passive backlog; continues the authorized queue afterwards. */
   onCatchup: (turnId: string, choice: 'send_full' | 'skip_backlog') => Promise<string | null>;
   onReconcile: () => Promise<string | null>;
+  /** P052: Owner-only continuation after the reply limit left an addressed Agent unanswered. */
+  onContinue: () => Promise<string | null>;
 };
 
 export type ConversationControls = {

@@ -25,6 +25,9 @@ export const keepGroupMember = (projectId: string, taskId: string | null, agentI
   post<GroupMember>(`${groupBase(projectId, taskId)}/members/${agentId}/keep`);
 export const chooseGroupCatchup = (projectId: string, taskId: string | null, turnId: string, choice: 'send_full' | 'skip_backlog') =>
   post<unknown>(`${groupBase(projectId, taskId)}/turns/${turnId}/catchup`, { choice });
+/** P052: explicit Owner continuation of a finished discussion whose last @addressee had no reply left. */
+export const continueGroup = (projectId: string, taskId: string | null) =>
+  post<{ round: GroupRound; conversation_id: string; started: boolean }>(`${groupBase(projectId, taskId)}/continue`);
 /** Evidence lookup for a held (UNKNOWN) turn; never re-sends. */
 export const reconcileGroup = (projectId: string, taskId: string | null) =>
   post<{ reconciled: { turn_id: string; state: string; error_code: string | null }[] }>(`${groupBase(projectId, taskId)}/reconcile`);

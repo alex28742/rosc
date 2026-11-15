@@ -137,8 +137,14 @@ export type GroupCatchup = { turn_id: string; agent_id: string; from: number; th
 export type GroupActivity = 'cli_confirmed' | 'awaiting_confirmation' | null;
 /** P047: `group` = Owner + 2+ addressed Agents, or Agent -> Agent with the Owner observing; `direct` = Owner -> one Agent. */
 export type GroupEngagement = 'none' | 'direct' | 'group';
+/** P052: an explicit Agent addressee of the latest Agent message that got no turn, with Core's honest reason. */
+export type GroupUnanswered = { agent_id: string; from_agent_id: string; message_id: string; ordinal: number; reason: string };
+/** P052: why a finished discussion stopped: nobody was addressed (`natural`), a reply limit was reached, or another reason. */
+export type GroupStopReason = 'natural' | 'quota_exhausted' | 'unanswered' | null;
 export type GroupStatus = {
   engagement?: GroupEngagement;
+  unanswered?: GroupUnanswered[];
+  stop_reason?: GroupStopReason;
   conversation_id: string | null;
   roster: GroupRosterEntry[];
   names: Record<string, string>;

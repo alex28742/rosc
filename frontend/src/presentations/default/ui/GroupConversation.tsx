@@ -1,6 +1,7 @@
 import { useEffect, useId, useRef, useState, type ReactNode } from 'react';
 import type { GroupControls } from '../../../app/presentation/contracts';
 import type { ConversationMessage, GroupStatus, GroupTurn } from '../../../core/models';
+import { findMentions } from './mentions';
 
 /**
  * P046 group conversation pieces shared by the Project (PC) and Task (TC) conversation panels. Everything rendered
@@ -46,7 +47,12 @@ function roomState(info: GroupStatus): { tone: 'idle' | 'active' | 'warning' | '
   if (turn && (turn.state === 'accepted' || turn.state === 'reply_captured'))
     return { tone: 'active', text: `${who}: ответ получен, публикация`, live: false };
   if (info.catchup) return { tone: 'warning', text: `Нужно решение Owner: пропущенный контекст ${nameOf(info, info.catchup.agent_id)}`, live: false };
-  if (info.round?.state === 'awaiting_owner') return { tone: 'idle', text: 'Ответы получены · следующее сообщение Owner откроет новое обсуждение', live: false };
+  if (info.round?.state === 'awaiting_owner') {
+    // P052: a natural stop and an exhausted reply limit are different facts; neither claims a model was contacted.
+    if (info.stop_reason === 'quota_exhausted') return { tone: 'warning', text: 'Лимит ответов исчерпан · последнее обращение по @имени осталось без ответа', live: false };
+    if (info.stop_reason === 'unanswered') return { tone: 'warning', text: 'Обсуждение остановлено · последнее обращение по @имени осталось без ответа', live: false };
+    return { tone: 'idle', text: 'Обсуждение завершилось само · следующее сообщение Owner откроет новое', live: false };
+  }
   if (info.round && info.driver.running) return { tone: 'active', text: 'Агенты отвечают по очереди', live: false };
   if (info.round) return { tone: 'idle', text: 'Ответы разрешены · очередь ожидает', live: false };
   return { tone: 'idle', text: 'Нет активного обсуждения', live: false };
@@ -54,6 +60,33 @@ function roomState(info: GroupStatus): { tone: 'idle' | 'active' | 'warning' | '
 
 function Dots({ label }: { label: string }) {
   return <span className="rosc-group-dots" role="img" aria-label={label}><i /><i /><i /></span>;
+}
+
+/** P052: Core's reason an explicitly @addressed Agent got no turn (no model was contacted for it). */
+const UNANSWERED_TEXT: Record<string, string> = {
+  quota_exhausted: 'у него не осталось ответов в этом обсуждении',
+  not_in_this_discussion: 'он не участник этого обсуждения — агенты не могут добавлять участников',
+  reply_too_long: 'сообщение длиннее лимита пересылки агентам',
+  paused: 'доставка на паузе', emergency_brake: 'включён Emergency Brake', awaiting_owner: 'обсуждение ждёт Owner',
+  excluded_after_failures: 'исключён после двух безопасных отказов', released: 'освобождён Owner',
+  unassigned: 'не назначен этой комнате', transport_unknown: 'транспорт недоступен',
+  ...UNSUPPORTED_TEXT,
+};
+
+/** P052: "@X was addressed but did not answer" lines + the Owner-only continuation when a reply limit was the cause. */
+function UnansweredNotes({ group, info }: { group: GroupControls; info: GroupStatus }) {
+  const [problem, setProblem] = useState('');
+  const items = info.unanswered ?? [];
+  if (items.length === 0) return null;
+  const canContinue = info.round?.state === 'awaiting_owner' && items.some(u => u.reason === 'quota_exhausted');
+  return <div className="rosc-group-note rosc-group-note--warning" role="status">
+    {items.map(u => <p key={`${u.message_id}-${u.agent_id}`}>
+      #{u.ordinal}: {nameOf(info, u.from_agent_id)} → @{nameOf(info, u.agent_id)} — без ответа: {UNANSWERED_TEXT[u.reason] ?? u.reason}. Модель не вызывалась.</p>)}
+    {canContinue && <button type="button" className="rosc-btn rosc-btn--small" disabled={group.busy !== null}
+      onClick={async () => setProblem((await group.onContinue()) ?? '')}>Продолжить обсуждение</button>}
+    {canContinue && <small> Откроет новое обсуждение (до {info.settings.group_reply_quota_default ?? 3} ответов на агента); первым ответит адресат последнего сообщения.</small>}
+    {problem && <p className="rosc-conversation__error" role="alert">{problem}</p>}
+  </div>;
 }
 
 /** Small accessible dialog: focus moves inside, Escape and the close button dismiss it. */
@@ -178,6 +211,7 @@ export function GroupBar({ group, open, onOpenChange }: { group: GroupControls; 
     </p>
     {unknownBanner}
     {failedNotes}
+    <UnansweredNotes group={group} info={info} />
     {open && <div className="rosc-group-bar__body">
       {round && <>
         <p className="rosc-group-line">Обсуждение #{round.round_no} · каждое новое групповое сообщение Owner открывает новое обсуждение</p>
@@ -354,6 +388,32 @@ export function MessageAddress({ message, info, refPrefix }: { message: Conversa
 export function senderName(message: ConversationMessage, info: GroupStatus | null): string {
   if (message.sender.kind === 'worker') return message.sender.agent_display_name ?? nameOf(info, message.sender.agent_id);
   return message.sender.display_name;
+}
+
+/**
+ * P052: addressees the Owner typed as `@DisplayName` (preview; Core re-parses). Returns chip ids (the Architect as
+ * `ARCHITECT_CHIP`), ambiguous names, and typed names of Agents in this room that cannot answer now.
+ */
+export function typedAddressees(info: GroupStatus | null, text: string): { ids: string[]; ambiguous: string[]; unavailable: string[] } {
+  const roster = info?.roster ?? [];
+  const candidates: Record<string, string[]> = { owner: ['Owner'] };
+  for (const entry of roster) {
+    const id = entry.role === 'architect' ? ARCHITECT_CHIP : entry.agent_id;
+    candidates[id] = entry.role === 'architect' && !roster.some(e => e.display_name.toLowerCase() === 'architect')
+      ? [entry.display_name, 'Architect'] : [entry.display_name];
+  }
+  const found = findMentions(text, candidates);
+  const ids = found.refs.filter(ref => ref !== 'owner');
+  const unavailable = ids.map(id => roster.find(e => (e.role === 'architect' ? ARCHITECT_CHIP : e.agent_id) === id))
+    .filter(e => e && e.role === 'worker' && !e.group_supported).map(e => e!.display_name);
+  return { ids, ambiguous: found.ambiguous, unavailable };
+}
+
+/** Chips united with typed `@names` (chips first, stable order); never removes a chip the Owner selected. */
+export function effectiveSelection(selected: ReadonlySet<string>, typed: string[]): Set<string> {
+  const merged = new Set(selected);
+  for (const id of typed) merged.add(id);
+  return merged;
 }
 
 /**
