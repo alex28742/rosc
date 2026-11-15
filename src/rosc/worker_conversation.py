@@ -530,12 +530,20 @@ class WorkerConversationCore:
         key, text = _client_key(client_key), _body(body)
         if not isinstance(grant, (list, tuple)) or not isinstance(to, (list, tuple)) or not set(grant) <= set(to):
             raise InvalidConversationInput("granted Agents must be addressees of the message")
+        if PARTY_OWNER_REF in grant:
+            raise InvalidConversationInput("the Owner is never granted an Agent turn")
+        # P052 r02 (Defect A): ``owner`` may be a structured addressee (``@Owner``) but is never resolved, joined or
+        # dispatched as an Agent.  An Owner-only message stores once and grants nothing.
+        agent_to = [ref for ref in to if ref != PARTY_OWNER_REF]
+        to_owner = len(agent_to) != len(to)
+        if not agent_to and not to_owner:
+            raise InvalidConversationInput("Choose at least one addressee")
 
         def write(session: Session) -> dict:
             room = self._room(session, project_id, task_id, create=True, actor=actor)  # type: ignore[arg-type]
             owner = self._owner_participant(session, room.conversation_id)
-            targets = self._resolve_targets(session, room, to)
-            to_refs = [a for a, _ in targets]  # type: ignore[union-attr]
+            targets = self._resolve_targets(session, room, agent_to) if agent_to else []
+            to_refs = [a for a, _ in targets] + ([PARTY_OWNER_REF] if to_owner else [])  # type: ignore[union-attr]
             existing = session.scalars(select(ConversationMessage).where(
                 ConversationMessage.conversation_id == room.conversation_id,
                 ConversationMessage.client_key == key)).first()
@@ -552,7 +560,8 @@ class WorkerConversationCore:
                     rnd = session.get(GroupRound, envelope.round_id)  # a direct request attached to a group round
                 return {"message": view, "replayed": True, "round": None if rnd is None else self._round_view(session, rnd)}
             ordinal = self._max_ordinal(session, room.conversation_id) + 1
-            self._apply_addressing(session, room, targets, actor, ordinal - 1)
+            if targets:  # an Owner-only note changes no roster state
+                self._apply_addressing(session, room, targets, actor, ordinal - 1)
             message = ConversationMessage(
                 message_id=str(uuid.uuid4()), conversation_id=room.conversation_id,
                 sender_participant_id=owner.participant_id, ordinal=ordinal, body=text, client_key=key,
@@ -1061,7 +1070,8 @@ class WorkerConversationCore:
 
         * No in-scope peer @mentioned: nothing changes (legacy shape, no envelope).
         * Otherwise the reply gets its structured ``to[]`` (envelope + parties).  When the Owner message it answers is
-          still the room's latest Owner message, no group discussion is running, dispatch is not paused/braked and the
+          still the room's latest Owner message, no Owner-authorized round or turn is unfinished (P052 r02: neither a
+          direct nor a group round is ever closed by an Agent), dispatch is not paused/braked and the
           reply is within the size rule, ONE round is opened with that Owner message as its durable provenance: every
           participant gets N, the Architect's reply counts as its first published one (N-1 left), and pass 0 queues
           only the invited eligible peers.  A running discussion is never closed or re-granted by an Agent.
@@ -1074,18 +1084,24 @@ class WorkerConversationCore:
         current = self._current_round(session, room.conversation_id)  # type: ignore[union-attr]
         latest = self._latest_owner_message(session, room.conversation_id)  # type: ignore[union-attr]
         invited: list[str] = []
-        if (latest is not None and latest.message_id == owner_message.message_id
-                and not self._is_active_group(session, current)
-                and self._controls_block(session, room.conversation_id) is None  # type: ignore[union-attr]
-                and len(reply.body) <= GROUP_REPLY_CONTINUE_MAX_CHARS):
+        not_invited = None
+        if latest is None or latest.message_id != owner_message.message_id:
+            not_invited = "newer_owner_message"
+        elif self._unfinished_work(session, room.conversation_id, current):  # type: ignore[union-attr]
+            # P052 r02 (Defect B): an Agent's invitation never closes, supersedes or cancels Owner-authorized work that
+            # is still unfinished in this room (an open direct OR group round; any queued / reserved /
+            # submitted / accepted / captured / UNKNOWN turn).  The reply and its to[] are kept; no round is opened.
+            not_invited = "pending_owner_request"
+        elif self._controls_block(session, room.conversation_id) is not None:  # type: ignore[union-attr]
+            not_invited = self._controls_block(session, room.conversation_id)  # type: ignore[union-attr]
+        elif len(reply.body) > GROUP_REPLY_CONTINUE_MAX_CHARS:
+            not_invited = "reply_too_long"
+        else:
             invited = [p for p in peers if self._invite_problem(session, room, p, inviter=agent_id) is None]  # type: ignore[arg-type]
         rnd = None
         if invited:
-            if current is not None:
+            if current is not None:  # finished (awaiting_owner) only: nothing queued or holding can be lost here
                 current.state, current.closed_at = ROUND_CLOSED, _now()
-                for turn in session.scalars(select(GroupTurn).where(GroupTurn.round_id == current.round_id,
-                                                                    GroupTurn.state == TURN_QUEUED)):
-                    turn.state, turn.error_code, turn.updated_at = TURN_CANCELLED, "superseded_by_owner_message", _now()
                 session.flush()
             n = self._setting(session, SETTING_GROUP_QUOTA)
             number = (session.scalar(select(func.max(GroupRound.round_no)).where(
@@ -1111,7 +1127,17 @@ class WorkerConversationCore:
         self._write_parties(session, reply.message_id, room.conversation_id, refs)  # type: ignore[union-attr]
         session.flush()
         return {"conversation_id": room.conversation_id, "round_id": None if rnd is None else rnd.round_id,  # type: ignore[union-attr]
-                "invited": invited}
+                "invited": invited, "not_invited": not_invited}
+
+    @staticmethod
+    def _unfinished_work(session: Session, conversation_id: str, current: GroupRound | None) -> bool:
+        """P052 r02: True while Owner-authorized work in this room may still produce a reply: the current round is
+        ``open`` (direct or group), or any turn is not yet terminal.  ``awaiting_owner`` with no live turn is finished."""
+        if current is not None and current.state == ROUND_OPEN:
+            return True
+        return session.scalars(select(GroupTurn.turn_id).where(
+            GroupTurn.conversation_id == conversation_id,
+            GroupTurn.state.in_((TURN_QUEUED,) + TURN_HOLDING_STATES))).first() is not None
 
     def direct_catchup(self, session: Session, room: Conversation, agent_id: str, through: int) -> dict | None:
         """P052 B6: room events a member Agent's native context has not applied yet, for a legacy direct turn (read-only).

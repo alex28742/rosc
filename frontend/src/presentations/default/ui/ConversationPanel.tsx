@@ -3,7 +3,7 @@ import type { ConversationControls } from '../../../app/presentation/contracts';
 import { architectReason, describeArchitect } from './architectView';
 import { findMatches, renderBody } from './chatSearch';
 import { ARCHITECT_CHIP, GroupActivityRow, GroupBar, GroupCatchupDialog, MessageAddress, RecipientChips, ReleaseOffers,
-  effectiveSelection, nameOf, routeSelection, senderName, typedAddressees } from './GroupConversation';
+  chipTargets, effectiveSelection, nameOf, routeSelection, senderName, typedAddressees, typedProblem as describeTyped } from './GroupConversation';
 
 type Props = {
   projectId: string;
@@ -61,11 +61,12 @@ export function ConversationPanel({ projectId, conversation, collapsed, onCollap
   const typed = typedAddressees(group.info, draft);
   const effective = effectiveSelection(selected, typed.ids);
   const typedOnly = typed.ids.filter(id => !selected.has(id));
-  const typedProblem = typed.ambiguous.length > 0
-    ? `@${typed.ambiguous[0]} совпадает с несколькими агентами — выберите адресата кнопкой.`
-    : typed.unavailable.length > 0 ? `${typed.unavailable[0]}: ответы недоступны для этого агента.` : null;
-  const routed = routeSelection(group.info, effective);
+  const typedProblem = describeTyped(typed);
+  // P052 r02: `@Owner` with no Agent addressee is an Owner note in the room: stored once, nobody is asked to answer.
+  const ownerOnly = typed.owner && effective.size === 0;
+  const routed = ownerOnly ? { route: 'group' as const, to: [] as string[], problem: null } : routeSelection(group.info, effective);
   const workers = routed.to;
+  const sendTo = chipTargets(group.info, selected);
   const mixed = routed.problem !== null || typedProblem !== null;
   const toggle = (id: string) => setSelected(prev => {
     const next = new Set(prev);
@@ -136,14 +137,14 @@ export function ConversationPanel({ projectId, conversation, collapsed, onCollap
     if (!body || !ready || state.sending || inFlight.current || mixed) return;
     inFlight.current = true;
     setLocked(true);
-    const to = workers.join(',');
+    const to = routed.route === 'group' ? `group:${sendTo.join(',')}` : '';
     const key = pending.current?.body === body && pending.current.to === to ? pending.current.key : newClientKey();
     pending.current = { body, to, key };
     setFailure('');
     try {
       // P047: Workers selected -> ONE Send that stores the message AND authorizes the replies (one Worker: direct reply;
       // two+ Agents: group). Otherwise the established Project Conversation path to a verified live Architect.
-      const problem = routed.route === 'group' ? await group.onPost(body, key, workers) : await conversation.onSend(body, key);
+      const problem = routed.route === 'group' ? await group.onPost(body, key, sendTo) : await conversation.onSend(body, key);
       if (problem === null) {
         setDraft(current => current.trim() === body ? '' : current);
         pending.current = null;
@@ -280,7 +281,8 @@ export function ConversationPanel({ projectId, conversation, collapsed, onCollap
       {!ready && <p className="rosc-conversation__hint">Отправка станет доступна после загрузки истории.</p>}
       {deliveryFailure && <p className="rosc-conversation__error" role="alert">{deliveryFailure}</p>}
       <p className="rosc-conversation__hint">
-        {workers.length === 1 ? 'Личное сообщение: адресат ответит один раз, сразу после отправки.'
+        {ownerOnly ? 'Заметка для @Owner: сообщение сохранится в переписке, ни один агент не получит запрос.'
+          : workers.length === 1 ? 'Личное сообщение: адресат ответит один раз, сразу после отправки.'
           : workers.length > 1 ? 'Групповое сообщение: каждый адресат ответит один раз; дальше агенты отвечают друг другу только по @имени, не больше N на агента. Вы видите всё.'
           : live ? 'Новое сообщение сохраняется в ROSC и передаётся Architect. Ранее сохранённые сообщения не пересылаются.'
           : unresolved ? 'Сообщение сохраняется только в ROSC. Runtime требует безопасного разрешения; доставки и ответа не будет.'

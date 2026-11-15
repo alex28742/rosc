@@ -42,7 +42,7 @@ describe('P052 mention rule (UI preview mirror)', () => {
     expect(findMentions('@Claude Opus', c).refs).toEqual(['c']);
     expect(findMentions('@Claudette a@Claude @Claude-3', c).refs).toEqual([]);
     expect(findMentions('@äRCHI!', c).refs).toEqual(['d']);
-    expect(findMentions('@claude', { a: ['Claude'], z: ['CLAUDE'] })).toEqual({ refs: [], ambiguous: ['claude'] });
+    expect(findMentions('@claude', { a: ['Claude'], z: ['CLAUDE'] })).toEqual({ refs: [], ambiguous: ['claude'], unknown: [] });
   });
 });
 
@@ -57,7 +57,7 @@ describe('P052 typed @name addressing in the Project Conversation', () => {
     expect(within(pcPanel()).getByText(/Адресаты из текста: @Claude/)).toBeTruthy();
     fireEvent.click(within(pcPanel()).getByRole('button', { name: 'Отправить' }));
     await waitFor(() => expect(stub.sendGroupMessage).toHaveBeenCalledWith('P0001', null,
-      expect.objectContaining({ body: '@Claude, глянь', to: [CLAUDE] })));
+      expect.objectContaining({ body: '@Claude, глянь', to: [] })));  // P052 r02: Core parses the typed name
     expect(stub.sendConversationMessage).not.toHaveBeenCalled();
   });
 
@@ -66,9 +66,10 @@ describe('P052 typed @name addressing in the Project Conversation', () => {
     render(<App api={stub} />);
     fireEvent.click(await within(await ready(pcPanel)).findByLabelText('Адресовать Claude'));
     type(pcPanel(), 'Сообщение в Project Conversation', '@deepseek и @Architect, обсудите');
+    expect(within(pcPanel()).getByText(/Адресаты из текста: @DeepSeek, @Architect/)).toBeTruthy();
     fireEvent.click(within(pcPanel()).getByRole('button', { name: 'Отправить' }));
     await waitFor(() => expect(stub.sendGroupMessage).toHaveBeenCalledWith('P0001', null,
-      expect.objectContaining({ to: [CLAUDE, DEEP, ARCH] })));
+      expect.objectContaining({ to: [CLAUDE] })));  // P052 r02: explicit ids = chips; Core unites @deepseek/@Architect
   });
 
   it('a typed @Architect alone keeps the established direct Architect path; @Owner adds nobody', async () => {
@@ -131,6 +132,74 @@ describe('P052 typed @name addressing in the Task Conversation', () => {
     type(tcPanel(), label, '@Claude что осталось?');
     fireEvent.click(within(tcPanel()).getByRole('button', { name: 'Отправить' }));
     await waitFor(() => expect(stub.sendGroupMessage).toHaveBeenCalledWith('P0001', 'T0001',
-      expect.objectContaining({ to: [CLAUDE] })));
+      expect.objectContaining({ to: [] })));
+  });
+});
+
+describe('P052 r02 @Owner-only, unknown names and the authoritative route', () => {
+  it('PC: @Owner alone is an Owner note on the room route (no Architect send, no Agent id)', async () => {
+    at('/projects/P0001');
+    const stub = api(room());
+    render(<App api={stub} />);
+    await within(await ready(pcPanel)).findByLabelText('Адресовать Claude');
+    type(pcPanel(), 'Сообщение в Project Conversation', '@Owner Напоминание: проверить отчёт');
+    expect(within(pcPanel()).getByText(/Заметка для @Owner/)).toBeTruthy();
+    fireEvent.click(within(pcPanel()).getByRole('button', { name: 'Отправить' }));
+    await waitFor(() => expect(stub.sendGroupMessage).toHaveBeenCalledWith('P0001', null,
+      expect.objectContaining({ body: '@Owner Напоминание: проверить отчёт', to: [] })));
+    expect(stub.sendConversationMessage).not.toHaveBeenCalled();
+  });
+
+  it('TC: @Owner alone is an Owner note on THIS Task room route, never the Architect save/send path', async () => {
+    at('/projects/P0001/tasks/T0001');
+    const stub = api(room());
+    render(<App api={stub} />);
+    await within(await ready(tcPanel)).findByLabelText('Адресовать Claude');
+    const label = within(tcPanel()).getByRole('textbox', { name: /Task Conversation|Сообщение/ }).getAttribute('aria-label')!;
+    type(tcPanel(), label, '@owner не забыть');
+    fireEvent.click(within(tcPanel()).getByRole('button', { name: 'Отправить' }));
+    await waitFor(() => expect(stub.sendGroupMessage).toHaveBeenCalledWith('P0001', 'T0001',
+      expect.objectContaining({ to: [] })));
+    expect(stub.sendTaskConversationMessage).not.toHaveBeenCalled();
+  });
+
+  it('an unknown explicit @name blocks the Send with a clear reason (never the default Architect route)', async () => {
+    at('/projects/P0001');
+    const stub = api(room());
+    render(<App api={stub} />);
+    await within(await ready(pcPanel)).findByLabelText('Адресовать Claude');
+    type(pcPanel(), 'Сообщение в Project Conversation', '@Claud, проверь');
+    expect(within(pcPanel()).getByRole('alert').textContent).toMatch(/@Claud — нет такого участника/);
+    const send = within(pcPanel()).getByRole('button', { name: 'Отправить' }) as HTMLButtonElement;
+    expect(send.disabled).toBe(true);
+    fireEvent.click(send);
+    expect(stub.sendConversationMessage).not.toHaveBeenCalled();
+    expect(stub.sendGroupMessage).not.toHaveBeenCalled();
+  });
+
+  it('an e-mail or a backticked @fragment stays the plain legacy Architect message', async () => {
+    at('/projects/P0001');
+    const stub = api(room());
+    render(<App api={stub} />);
+    await within(await ready(pcPanel)).findByLabelText('Адресовать Claude');
+    type(pcPanel(), 'Сообщение в Project Conversation', 'пиши на ops@Claude.dev, декоратор `@dataclass`');
+    expect(within(pcPanel()).queryByRole('alert')).toBeNull();
+    fireEvent.click(within(pcPanel()).getByRole('button', { name: 'Отправить' }));
+    await waitFor(() => expect(stub.sendConversationMessage).toHaveBeenCalledTimes(1));
+    expect(stub.sendGroupMessage).not.toHaveBeenCalled();
+  });
+
+  it('mixed @Owner + @Claude goes to the room route; Core adds both addressees', async () => {
+    at('/projects/P0001');
+    const stub = api(room());
+    render(<App api={stub} />);
+    await within(await ready(pcPanel)).findByLabelText('Адресовать Claude');
+    type(pcPanel(), 'Сообщение в Project Conversation', '@Owner @Straße? нет: @CLAUDE, глянь');
+    expect(within(pcPanel()).getByRole('alert').textContent).toMatch(/@Straße/);
+    type(pcPanel(), 'Сообщение в Project Conversation', '@Owner и @CLAUDE, глянь');
+    fireEvent.click(within(pcPanel()).getByRole('button', { name: 'Отправить' }));
+    await waitFor(() => expect(stub.sendGroupMessage).toHaveBeenCalledWith('P0001', null,
+      expect.objectContaining({ to: [] })));
+    expect(stub.sendConversationMessage).not.toHaveBeenCalled();
   });
 });

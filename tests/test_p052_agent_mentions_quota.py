@@ -408,8 +408,8 @@ class TypedOwnerMentionTests(P052Case):
         self.assertEqual(len(self.runner.calls), 1)
 
     def test_owner_only_unknown_ambiguous_unsupported_and_out_of_scope_names(self) -> None:
-        self.assertEqual(self.post("@Owner напоминание", []).status_code, 422)  # nobody to dispatch
-        self.assertEqual(self.post("@Nobody привет", []).status_code, 422)  # plain text, no addressee
+        # P052 r02: an @Owner-only note is stored once and dispatches nobody (covered in test_p052_r02_*).
+        self.assertEqual(self.post("@Nobody привет", []).status_code, 422)  # unknown explicit recipient
         self.assertEqual(self.post("@Codex проверь", []).status_code, 422)  # assigned but unsupported
         ghost = self.registry.register_agent(OWNER, display_name="Ghost", runtime_adapter="claude-code",
                                              provider_id="anthropic", model_id="haiku", capabilities=["task.context.read"])

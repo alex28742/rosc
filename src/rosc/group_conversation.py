@@ -32,14 +32,15 @@ from sqlalchemy import select
 from sqlalchemy.exc import OperationalError
 from sqlalchemy.orm import Session, sessionmaker
 
-from .authorization import (CONVERSATION_GROUP_CONTROL, CONVERSATION_READ, ActorContext, AuthorizationPolicy,
-                            ResourceScope, evaluate)
+from .authorization import (CONVERSATION_GROUP_CONTROL, CONVERSATION_MESSAGE_CREATE, CONVERSATION_READ, ActorContext,
+                            AuthorizationPolicy, ResourceScope, evaluate)
 from .claude_conversation import ClaudeConversationTransport, TransportConfigError
 from .conversation import (ConversationConflict, ConversationDenied, ConversationNotFound, ConversationStoreError,
                            InvalidConversationInput, load_message_view)
-from .models import (ASSIGNMENT_ACTIVE, MEMBER_RELEASED, PARTICIPANT_OWNER, ROLE_ARCHITECT, ROLE_WORKER, ROUND_OPEN,
-                     TURN_ACCEPTED, TURN_HOLDING_STATES, TURN_QUEUED, TURN_SUBMITTED, TURN_UNKNOWN, AgentDefinition,
-                     AgentNativeLane, Conversation, ConversationMessage, ConversationParticipant, GroupRoundGrant,
+from .mentions import find_mentions
+from .models import (ASSIGNMENT_ACTIVE, MEMBER_RELEASED, PARTICIPANT_OWNER, PARTY_OWNER_REF, ROLE_ARCHITECT,
+                     ROLE_WORKER, ROUND_OPEN, TURN_ACCEPTED, TURN_HOLDING_STATES, TURN_QUEUED, TURN_SUBMITTED, TURN_UNKNOWN,
+                     AgentDefinition, AgentNativeLane, Conversation, ConversationMessage, ConversationParticipant, GroupRoundGrant,
                      GroupTurn, MessageEnvelope, RoleAssignment)
 from .worker_conversation import (LOOKUP_UNKNOWN, SETTINGS_SCHEMA, SUBMIT_NOT_ACCEPTED, LookupOutcome, SubmitOutcome,
                                   WorkerConversationCore)
@@ -334,10 +335,20 @@ class GroupConversationBridge:
             raise InvalidConversationInput("reply_to is not supported for Owner messages")
         with self._sessions() as session:
             to = self._with_typed_mentions(session, project_id, task_id, to, body)
-            targets = self._supported_targets(session, project_id, task_id, to)
-        result = self._core.post_owner_turn(actor, project_id, client_key=client_key, body=body, to=targets,
-                                            grant=targets, task_id=task_id)
+            # P052 r02 (Defect A): ``owner`` is a truthful structured addressee, never a model.  An Owner-only message is
+            # stored once and authorizes NO Agent (no grant, round, turn, delivery or provider call).
+            to_owner = isinstance(to, list) and PARTY_OWNER_REF in to
+            agents = [ref for ref in to if ref != PARTY_OWNER_REF] if isinstance(to, list) else to
+            targets = [] if to_owner and not agents else self._supported_targets(session, project_id, task_id, agents)
+        result = self._core.post_owner_turn(actor, project_id, client_key=client_key, body=body,
+                                            to=targets + ([PARTY_OWNER_REF] if to_owner else []), grant=targets,
+                                            task_id=task_id)
         conversation_id = result["message"]["conversation_id"]
+        if not targets:
+            with self._sessions() as session:
+                message = load_message_view(session, result["message"]["message_id"])
+            return {"message": message, "replayed": result["replayed"],
+                    "dispatch": {"mode": "none", "agents": [], "round": None, "started": False, "blocked": None}}
         with self._sessions() as session:
             controls = self._core._controls(session, conversation_id)  # noqa: SLF001
             held = self._core._holding_turn(session, conversation_id)  # noqa: SLF001
@@ -370,23 +381,55 @@ class GroupConversationBridge:
         room = self._room(session, project_id, task_id)
         project_room = room if room is not None else Conversation(
             conversation_id="", project_id=project_id, task_id=task_id, kind="task" if task_id else "project")
-        found = self._core.resolve_mentions(session, project_room, body)
+        found = self._checked_mentions(session, project_room, body)
+        merged = list(to or [])
+        for ref in found.refs:
+            if ref not in merged:
+                merged.append(ref)
+        return merged
+
+    def _checked_mentions(self, session: Session, room: Conversation, body: str):
+        """P052 r02: the authoritative parse of an Owner text.  Refuses (nothing stored) an ambiguous name, the name of
+        a registered Agent not assigned to this room, and any other explicit ``@name`` that matches no participant --
+        an unknown recipient is never silently converted into the default Architect route."""
+        found = self._core.resolve_mentions(session, room, body)
         if found.ambiguous:
             raise InvalidConversationInput("@" + found.ambiguous[0] + " matches more than one Agent; choose the "
                                            "addressee with the chips")
-        scoped = self._core._room_candidates(session, project_room)  # noqa: SLF001
+        scoped = self._core._room_candidates(session, room)  # noqa: SLF001
         scoped_names = {name.casefold() for names in scoped.values() for name in names}
-        from .mentions import find_mentions
         registered = {a.agent_id: a.display_name for a in session.scalars(select(AgentDefinition))
                       if a.agent_id not in scoped and a.display_name.strip().casefold() not in scoped_names}
         foreign = find_mentions(body, registered).refs
         if foreign:
             raise InvalidConversationInput(f"@{registered[foreign[0]]} is not assigned to this conversation")
-        merged = list(to or [])
-        for ref in found.refs:
-            if ref != "owner" and ref not in merged:
-                merged.append(ref)
-        return merged
+        if found.unknown:
+            raise InvalidConversationInput(f"@{found.unknown[0]} is not a participant of this conversation; check the "
+                                           f"name or write it as `@{found.unknown[0]}` (nothing was sent)")
+        return found
+
+    def check_architect_route(self, actor: ActorContext, project_id: int, task_id: int | None, body: object, *,
+                              implicit_architect: bool) -> None:
+        """P052 r02 (Defects A/C): server-side gate of the legacy Owner message routes (Project message + Architect
+        delivery, Task message save), run BEFORE anything is stored or delivered.  The text is parsed authoritatively and
+        refused when a name is ambiguous, out of scope or unknown.  On the route that reaches the Architect WITHOUT an
+        explicit Architect address (``implicit_architect``: the Project Conversation message) a text addressing
+        ``@Owner`` is refused too unless ``@Architect`` is typed: an Owner note must never reach a model (the room route
+        stores it).  Task saves carry an explicit recipient, so their save-vs-send distinction is unchanged.  Plain
+        unaddressed text keeps the legacy behavior, and a text to the Architect naming an in-scope Worker stays the
+        P052 r01 legacy direct message (the Architect may invite it)."""
+        self._authorize(actor, CONVERSATION_MESSAGE_CREATE, project_id, task_id)
+        if not isinstance(body, str) or "@" not in body:
+            return
+        with self._sessions() as session:
+            room = self._room(session, project_id, task_id) or Conversation(
+                conversation_id="", project_id=project_id, task_id=task_id, kind="task" if task_id else "project")
+            found = self._checked_mentions(session, room, body)
+            roster = {entry["agent_id"]: entry for entry in self._roster(session, project_id, task_id)}
+        architect = any(roster.get(ref, {}).get("role") == ROLE_ARCHITECT for ref in found.refs)
+        if PARTY_OWNER_REF in found.refs and not architect and implicit_architect:
+            raise InvalidConversationInput("A message addressed to @Owner is not sent to the Architect unless @Architect "
+                                           "is addressed too; send it as an Owner note (nothing was sent)")
 
     def continue_round(self, actor: ActorContext, project_id: int, task_id: int | None) -> dict:
         """P052 D2: explicit Owner continuation after an exhausted discussion left an addressed Agent unanswered."""

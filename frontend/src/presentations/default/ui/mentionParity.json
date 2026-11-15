@@ -1,0 +1,390 @@
+{
+ "_doc": "P052 r02 shared @mention parity cases: tests/test_p052_r02_corrections.py (authoritative Python) and mentions.test.ts (UI preview) assert the SAME expectations.",
+ "cases": [
+  {
+   "note": "ascii",
+   "text": "@Claude, посмотри",
+   "names": {
+    "a": [
+     "Claude"
+    ]
+   },
+   "refs": [
+    "a"
+   ],
+   "ambiguous": [],
+   "unknown": []
+  },
+  {
+   "note": "case-insensitive, first-mention order, no duplicates",
+   "text": "@claude и @CLAUDE",
+   "names": {
+    "a": [
+     "Claude"
+    ]
+   },
+   "refs": [
+    "a"
+   ],
+   "ambiguous": [],
+   "unknown": []
+  },
+  {
+   "note": "cyrillic",
+   "text": "@борис, @БОРИС!",
+   "names": {
+    "r": [
+     "Борис"
+    ]
+   },
+   "refs": [
+    "r"
+   ],
+   "ambiguous": [],
+   "unknown": []
+  },
+  {
+   "note": "decomposed umlaut is NFC-normalized",
+   "text": "@ÄRCHI!",
+   "names": {
+    "d": [
+     "Ärchi"
+    ]
+   },
+   "refs": [
+    "d"
+   ],
+   "ambiguous": [],
+   "unknown": []
+  },
+  {
+   "note": "decomposed candidate name",
+   "text": "@äRCHI.",
+   "names": {
+    "d": [
+     "Ärchi"
+    ]
+   },
+   "refs": [
+    "d"
+   ],
+   "ambiguous": [],
+   "unknown": []
+  },
+  {
+   "note": "expanding fold: ß == ss",
+   "text": "@STRASSE ok",
+   "names": {
+    "s": [
+     "Straße"
+    ]
+   },
+   "refs": [
+    "s"
+   ],
+   "ambiguous": [],
+   "unknown": []
+  },
+  {
+   "note": "expanding fold, reverse",
+   "text": "@straße, ok",
+   "names": {
+    "s": [
+     "STRASSE"
+    ]
+   },
+   "refs": [
+    "s"
+   ],
+   "ambiguous": [],
+   "unknown": []
+  },
+  {
+   "note": "no prefix match across an expanded fold",
+   "text": "@Straßenbahn",
+   "names": {
+    "s": [
+     "Straße"
+    ]
+   },
+   "refs": [],
+   "ambiguous": [],
+   "unknown": [
+    "Straßenbahn"
+   ]
+  },
+  {
+   "note": "identical case-folded names are ambiguous",
+   "text": "@strasse?",
+   "names": {
+    "x": [
+     "Straße"
+    ],
+    "y": [
+     "STRASSE"
+    ]
+   },
+   "refs": [],
+   "ambiguous": [
+    "strasse"
+   ],
+   "unknown": []
+  },
+  {
+   "note": "dotted capital I",
+   "text": "@İvan, привет",
+   "names": {
+    "i": [
+     "İvan"
+    ]
+   },
+   "refs": [
+    "i"
+   ],
+   "ambiguous": [],
+   "unknown": []
+  },
+  {
+   "note": "dotted I typed as i + combining dot",
+   "text": "@i̇van",
+   "names": {
+    "i": [
+     "İvan"
+    ]
+   },
+   "refs": [
+    "i"
+   ],
+   "ambiguous": [],
+   "unknown": []
+  },
+  {
+   "note": "İ folds to dotted i: not plain Ivan",
+   "text": "@İvan",
+   "names": {
+    "v": [
+     "Ivan"
+    ]
+   },
+   "refs": [],
+   "ambiguous": [],
+   "unknown": [
+    "İvan"
+   ]
+  },
+  {
+   "note": "plain i is not dotted İ",
+   "text": "@ivan",
+   "names": {
+    "i": [
+     "İvan"
+    ]
+   },
+   "refs": [],
+   "ambiguous": [],
+   "unknown": [
+    "ivan"
+   ]
+  },
+  {
+   "note": "final sigma folds to sigma",
+   "text": "@ΣΟΦΙΑΣ",
+   "names": {
+    "g": [
+     "Σοφιας"
+    ]
+   },
+   "refs": [
+    "g"
+   ],
+   "ambiguous": [],
+   "unknown": []
+  },
+  {
+   "note": "ligature expands",
+   "text": "@ﬃx",
+   "names": {
+    "f": [
+     "ffix"
+    ]
+   },
+   "refs": [
+    "f"
+   ],
+   "ambiguous": [],
+   "unknown": []
+  },
+  {
+   "note": "longest overlapping name wins",
+   "text": "@Claude Opus ответь",
+   "names": {
+    "a": [
+     "Claude"
+    ],
+    "c": [
+     "Claude Opus"
+    ]
+   },
+   "refs": [
+    "c"
+   ],
+   "ambiguous": [],
+   "unknown": []
+  },
+  {
+   "note": "suffix -2 is its own name",
+   "text": "@Claude-2 и @claude",
+   "names": {
+    "a": [
+     "Claude"
+    ],
+    "b": [
+     "Claude-2"
+    ]
+   },
+   "refs": [
+    "b",
+    "a"
+   ],
+   "ambiguous": [],
+   "unknown": []
+  },
+  {
+   "note": "'-' continues a name: unknown, never @Claude",
+   "text": "@Claude-3",
+   "names": {
+    "a": [
+     "Claude"
+    ]
+   },
+   "refs": [],
+   "ambiguous": [],
+   "unknown": [
+    "Claude-3"
+   ]
+  },
+  {
+   "note": "no prefix guess",
+   "text": "@Claudette",
+   "names": {
+    "a": [
+     "Claude"
+    ]
+   },
+   "refs": [],
+   "ambiguous": [],
+   "unknown": [
+    "Claudette"
+   ]
+  },
+  {
+   "note": "e-mail is not a mention",
+   "text": "пиши на ops@Claude.dev",
+   "names": {
+    "a": [
+     "Claude"
+    ]
+   },
+   "refs": [],
+   "ambiguous": [],
+   "unknown": []
+  },
+  {
+   "note": "code spans are literal",
+   "text": "смотри `@Claude` и ``@Claud``",
+   "names": {
+    "a": [
+     "Claude"
+    ]
+   },
+   "refs": [],
+   "ambiguous": [],
+   "unknown": []
+  },
+  {
+   "note": "escaped, path and dotted @ are literal",
+   "text": "\\@Claude npm/@types/node x.@Claude",
+   "names": {
+    "a": [
+     "Claude"
+    ]
+   },
+   "refs": [],
+   "ambiguous": [],
+   "unknown": []
+  },
+  {
+   "note": "explicit unknown recipient",
+   "text": "@Claud, привет",
+   "names": {
+    "a": [
+     "Claude"
+    ]
+   },
+   "refs": [],
+   "ambiguous": [],
+   "unknown": [
+    "Claud"
+   ]
+  },
+  {
+   "note": "@ not followed by a letter is not a mention",
+   "text": "встреча @ 15:00, @123",
+   "names": {
+    "a": [
+     "Claude"
+    ]
+   },
+   "refs": [],
+   "ambiguous": [],
+   "unknown": []
+  },
+  {
+   "note": "owner",
+   "text": "@Owner напоминание",
+   "names": {
+    "owner": [
+     "Owner"
+    ],
+    "a": [
+     "Claude"
+    ]
+   },
+   "refs": [
+    "owner"
+   ],
+   "ambiguous": [],
+   "unknown": []
+  },
+  {
+   "note": "mixed owner + agent",
+   "text": "@Owner и @Claude",
+   "names": {
+    "owner": [
+     "Owner"
+    ],
+    "a": [
+     "Claude"
+    ]
+   },
+   "refs": [
+    "owner",
+    "a"
+   ],
+   "ambiguous": [],
+   "unknown": []
+  },
+  {
+   "note": "unaddressed",
+   "text": "no mention here",
+   "names": {
+    "a": [
+     "Claude"
+    ]
+   },
+   "refs": [],
+   "ambiguous": [],
+   "unknown": []
+  }
+ ]
+}

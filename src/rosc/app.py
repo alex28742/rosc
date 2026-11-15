@@ -764,6 +764,9 @@ def create_app(db_path: Path | None = None, workspace_root: Path | None = None, 
         pid = numeric_id(project_id, "P")
         # The sender is the trusted local Owner context, never a request-supplied id, role or session.
         committing = time.monotonic()
+        # P052 r02: the authoritative typed-address gate runs BEFORE storage (an @Owner-addressed, unknown or ambiguous
+        # recipient is never handed to the Architect by this legacy route).
+        conversation_call(group.check_architect_route, current_actor(), pid, None, data.body, implicit_architect=True)
         result = conversation_call(conversation.create_message, current_actor(), pid,
                                    client_key=data.client_key, body=data.body)
         if not result["replayed"] and trace.enabled:
@@ -810,6 +813,7 @@ def create_app(db_path: Path | None = None, workspace_root: Path | None = None, 
                                          response: Response) -> dict:
         pid, tid = numeric_id(project_id, "P"), numeric_id(task_id, "T")
         # Stored only (P039: delivery is the separate explicit /send action): no Architect submit, OpenCode call or queue. The sender is the trusted local Owner context.
+        conversation_call(group.check_architect_route, current_actor(), pid, tid, data.body, implicit_architect=False)
         result = conversation_call(conversation.create_message, current_actor(), pid, client_key=data.client_key,
                                    body=data.body, task_id=tid, recipient=data.recipient)
         if result["replayed"]:

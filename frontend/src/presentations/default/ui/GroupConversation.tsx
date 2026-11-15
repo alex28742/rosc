@@ -392,9 +392,11 @@ export function senderName(message: ConversationMessage, info: GroupStatus | nul
 
 /**
  * P052: addressees the Owner typed as `@DisplayName` (preview; Core re-parses). Returns chip ids (the Architect as
- * `ARCHITECT_CHIP`), ambiguous names, and typed names of Agents in this room that cannot answer now.
+ * `ARCHITECT_CHIP`), whether `@Owner` was typed, ambiguous and unknown names (P052 r02: an unknown explicit `@name` is
+ * refused, never silently sent to the Architect), and typed names of Agents in this room that cannot answer now.
  */
-export function typedAddressees(info: GroupStatus | null, text: string): { ids: string[]; ambiguous: string[]; unavailable: string[] } {
+export function typedAddressees(info: GroupStatus | null, text: string):
+  { ids: string[]; owner: boolean; ambiguous: string[]; unknown: string[]; unavailable: string[] } {
   const roster = info?.roster ?? [];
   const candidates: Record<string, string[]> = { owner: ['Owner'] };
   for (const entry of roster) {
@@ -406,7 +408,30 @@ export function typedAddressees(info: GroupStatus | null, text: string): { ids: 
   const ids = found.refs.filter(ref => ref !== 'owner');
   const unavailable = ids.map(id => roster.find(e => (e.role === 'architect' ? ARCHITECT_CHIP : e.agent_id) === id))
     .filter(e => e && e.role === 'worker' && !e.group_supported).map(e => e!.display_name);
-  return { ids, ambiguous: found.ambiguous, unavailable };
+  return { ids, owner: found.refs.includes('owner'), ambiguous: found.ambiguous, unknown: found.unknown, unavailable };
+}
+
+/** P052 r02: the one truthful problem with the typed addressees, or null. Shared by PC and TC. */
+export function typedProblem(typed: ReturnType<typeof typedAddressees>): string | null {
+  if (typed.ambiguous.length > 0) return `@${typed.ambiguous[0]} совпадает с несколькими агентами — выберите адресата кнопкой.`;
+  if (typed.unknown.length > 0) {
+    return `@${typed.unknown[0]} — нет такого участника в этой переписке. Проверьте имя или выберите адресата кнопкой; `
+      + `чтобы написать «@» как текст, возьмите фрагмент в обратные кавычки.`;
+  }
+  if (typed.unavailable.length > 0) return `${typed.unavailable[0]}: ответы недоступны для этого агента.`;
+  return null;
+}
+
+/**
+ * P052 r02: explicit Agent ids for the room route = the Owner's CHIPS only (Workers, plus the assigned Architect when its
+ * chip is on). Typed names are not sent as ids: Core parses the text authoritatively and unites them, so a preview that
+ * diverges from Core can never address an Agent Core would not.
+ */
+export function chipTargets(info: GroupStatus | null, selected: ReadonlySet<string>): string[] {
+  const to = [...selected].filter(id => id !== ARCHITECT_CHIP);
+  const architect = info?.roster.find(entry => entry.role === 'architect');
+  if (selected.has(ARCHITECT_CHIP) && architect) to.push(architect.agent_id);
+  return to;
 }
 
 /** Chips united with typed `@names` (chips first, stable order); never removes a chip the Owner selected. */
