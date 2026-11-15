@@ -3805,3 +3805,359 @@
     min-height: 36px;
   }
 }
+
+/*
+ * P048 (UX v0.8) compact Project Work Area: «О проекте» replaces the tall overview row, the real Agent runtime
+ * controls live in the «Агенты» tab, and at narrow width the Project and Task Work Areas become two sideways panes.
+ */
+.rosc-about {
+  flex: none;
+  min-width: 0;
+  margin: 0 0 12px;
+  overflow: hidden;
+  border: 1px solid var(--rosc-line);
+  border-radius: 10px;
+  background: var(--rosc-panel);
+}
+
+.rosc-about__toggle {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  width: 100%;
+  min-height: 44px;
+  padding: 9px 13px;
+  border: 0;
+  background: var(--rosc-panel);
+  color: #283846;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.rosc-about__toggle:hover {
+  background: #f9fcfe;
+}
+
+.rosc-about__toggle strong {
+  font-size: calc(13px * var(--rosc-text-scale, 1));
+  white-space: nowrap;
+}
+
+.rosc-about__preview {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  color: #718493;
+  font-size: calc(12px * var(--rosc-text-scale, 1));
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.rosc-about__chevron {
+  color: #678195;
+  font-size: 15px;
+  transition: transform 0.15s;
+}
+
+.rosc-about--open .rosc-about__chevron {
+  transform: rotate(90deg);
+}
+
+.rosc-about__action {
+  color: #266d9b;
+  font-size: calc(11px * var(--rosc-text-scale, 1));
+  white-space: nowrap;
+}
+
+.rosc-about__details {
+  padding: 13px 16px 16px;
+  border-top: 1px solid var(--rosc-line);
+  background: #fcfdfe;
+}
+
+.rosc-about__details[hidden] {
+  display: none;
+}
+
+.rosc-about__description {
+  margin-bottom: 12px;
+  padding-bottom: 12px;
+  border-bottom: 1px solid #e7edf1;
+}
+
+.rosc-about__details small,
+.rosc-about__summary dt {
+  display: block;
+  margin-bottom: 5px;
+  color: #8596a2;
+  font-size: calc(11px * var(--rosc-text-scale, 1));
+}
+
+.rosc-about__description p {
+  margin: 0 0 6px;
+  color: #304458;
+  font-size: calc(13px * var(--rosc-text-scale, 1));
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+  white-space: pre-line;
+}
+
+.rosc-about__description .rosc-about__meta {
+  margin: 0;
+  color: #8495a1;
+  font-size: calc(11px * var(--rosc-text-scale, 1));
+}
+
+.rosc-about__summary {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 10px;
+  margin: 0;
+}
+
+.rosc-about__summary > div {
+  padding-left: 11px;
+  border-left: 2px solid #dbe7f0;
+}
+
+.rosc-about__summary dd {
+  margin: 0;
+  font-size: calc(12px * var(--rosc-text-scale, 1));
+  line-height: 1.5;
+}
+
+/* «Агенты» tab: current states and actions first, longer explanations below. */
+.rosc-project-agents .rosc-agents-card {
+  padding: 15px 17px;
+  border: 1px solid var(--rosc-line);
+  border-radius: 10px;
+  background: var(--rosc-panel);
+}
+
+.rosc-agents-card__top {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
+.rosc-agents-card__top h3 {
+  margin: 0 0 3px;
+  font-size: calc(16px * var(--rosc-text-scale, 1));
+}
+
+.rosc-agents-card__top p {
+  margin: 0;
+  font-size: calc(11px * var(--rosc-text-scale, 1));
+}
+
+.rosc-agents-card__metrics {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin: 12px 0 2px;
+}
+
+.rosc-agents-card__metrics .rosc-agent-stat {
+  margin: 0;
+  padding: 7px 10px;
+  border: 1px solid #e3e9ed;
+  border-radius: 7px;
+  background: #f6f9fa;
+}
+
+.rosc-agents-card__block {
+  margin: 10px 0 0;
+  padding: 12px 14px;
+  border: 1px solid #e1e8ec;
+  border-radius: 9px;
+  background: var(--rosc-panel);
+}
+
+.rosc-agents-card__block .rosc-agents-card__actions {
+  margin-top: 6px;
+}
+
+.rosc-agents-card__block .rosc-task-workers {
+  margin: 0;
+}
+
+/* WorkerRows brings its own frame; do not box it twice. */
+.rosc-agents-card__block:has(> .rosc-task-workers) {
+  padding: 0;
+  border: 0;
+}
+
+.rosc-agents-card__overline {
+  display: block;
+  color: #8495a3;
+  font-size: calc(11px * var(--rosc-text-scale, 1));
+  font-weight: 700;
+}
+
+.rosc-agents-card .rosc-agents-card__workspace {
+  border-top: 1px solid #e1e8ec;
+  background: #f8fafb;
+}
+
+.rosc-agents-card .rosc-access {
+  margin-top: 10px;
+}
+
+.rosc-pane-switch {
+  display: none;
+}
+
+/*
+ * Narrow width: a two-pane deck instead of vertical stacking. The switch strip is the workspace's next sibling,
+ * positioned against the drawer body, so the workspace children stay exactly [work pane, conversation]. Both panes stay mounted (drafts, history, filters and
+ * scroll survive); only their transform/visibility changes. The hidden pane is `visibility: hidden` after the slide,
+ * so it leaves the tab order and the accessibility tree. The desktop chat collapse controls are not used here.
+ */
+@media (max-width: 800px) {
+  .rosc-drawer .rosc-panes {
+    --pane-rail: 40px;
+    position: relative;
+    display: block;
+    flex: 1;
+    width: 100%;
+    min-width: 0;
+    min-height: 0;
+    overflow: hidden;
+  }
+
+  .rosc-drawer .rosc-drawer__scroll--fill:has(> .rosc-panes) {
+    position: relative;
+    overflow: hidden;
+  }
+
+  .rosc-drawer .rosc-panes > .rosc-panes__work,
+  .rosc-drawer .rosc-panes > .rosc-conversation {
+    position: absolute;
+    top: 0;
+    bottom: 0;
+    width: calc(100% - var(--pane-rail));
+    height: auto;
+    min-height: 0;
+    flex: none;
+  }
+
+  .rosc-drawer .rosc-panes > .rosc-panes__work {
+    left: 0;
+    z-index: 1;
+    padding: 10px;
+    overflow-y: auto;
+    visibility: visible;
+    transform: translate3d(0, 0, 0);
+    transition: transform 0.3s cubic-bezier(0.22, 0.78, 0.23, 1), visibility 0s;
+  }
+
+  .rosc-drawer .rosc-panes > .rosc-conversation {
+    left: var(--pane-rail);
+    z-index: 2;
+    border-top: 0;
+    border-left: 1px solid var(--rosc-line-strong);
+    visibility: hidden;
+    transform: translate3d(100%, 0, 0);
+    transition: transform 0.3s cubic-bezier(0.22, 0.78, 0.23, 1), visibility 0s linear 0.3s;
+  }
+
+  .rosc-drawer .rosc-panes--chat > .rosc-panes__work {
+    visibility: hidden;
+    transform: translate3d(calc(-100% + var(--pane-rail)), 0, 0);
+    transition: transform 0.3s cubic-bezier(0.22, 0.78, 0.23, 1), visibility 0s linear 0.3s;
+  }
+
+  .rosc-drawer .rosc-panes--chat > .rosc-conversation {
+    visibility: visible;
+    transform: translate3d(0, 0, 0);
+    transition: transform 0.3s cubic-bezier(0.22, 0.78, 0.23, 1), visibility 0s;
+  }
+
+  .rosc-drawer .rosc-panes .rosc-conversation__collapse,
+  .rosc-drawer .rosc-panes .rosc-conversation__rail {
+    display: none;
+  }
+
+  .rosc-drawer .rosc-panes + .rosc-pane-switch {
+    position: absolute;
+    top: 0;
+    right: 0;
+    bottom: 0;
+    z-index: 5;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 12px;
+    width: var(--pane-rail);
+    padding: 10px 0;
+    border: 0;
+    border-left: 1px solid #cbdfe9;
+    background: #edf6fb;
+    color: #2e719b;
+    cursor: pointer;
+    transition: right 0.3s cubic-bezier(0.22, 0.78, 0.23, 1);
+  }
+
+  .rosc-drawer .rosc-panes--chat + .rosc-pane-switch {
+    right: calc(100% - var(--pane-rail));
+    border-left: 0;
+    border-right: 1px solid #cbdfe9;
+  }
+
+  .rosc-pane-switch:focus-visible {
+    outline: 2px solid #2074a6;
+    outline-offset: -3px;
+  }
+
+  .rosc-pane-switch__arrow {
+    font-size: 22px;
+    line-height: 1;
+  }
+
+  .rosc-pane-switch__label {
+    font-size: 10px;
+    font-weight: 800;
+    letter-spacing: 1.2px;
+    writing-mode: vertical-rl;
+  }
+
+  /* Project left pane: Tasks / Агенты / Settings fill the pane; the pane itself scrolls only if space runs out. */
+  .rosc-drawer .rosc-panes .rosc-task-panel,
+  .rosc-drawer .rosc-panes .rosc-project-settings {
+    flex: 1 1 auto;
+    min-height: 260px;
+    max-height: none;
+  }
+
+  .rosc-about__summary {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  /* Task left pane keeps its own inner layout; only the outer pane geometry changes. */
+  .rosc-drawer .rosc-panes > .rosc-task-left {
+    gap: 9px;
+  }
+
+  .rosc-drawer .rosc-panes .rosc-task-lower {
+    display: flex;
+    flex-direction: column;
+  }
+}
+
+@media (max-width: 440px) {
+  .rosc-drawer .rosc-panes {
+    --pane-rail: 36px;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .rosc-drawer .rosc-panes > .rosc-panes__work,
+  .rosc-drawer .rosc-panes > .rosc-conversation,
+  .rosc-drawer .rosc-panes + .rosc-pane-switch {
+    transition: none;
+  }
+}

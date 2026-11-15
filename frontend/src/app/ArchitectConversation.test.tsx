@@ -35,6 +35,7 @@ describe('Architect activation control', () => {
   });
 
   it('activates only on the explicit button, shows activating, then verified active', async () => {
+    at('/projects/P0001/agents');  // P048: the Agent runtime controls live in the «Агенты» tab
     const pending = deferred<ReturnType<typeof architectStatus>>();
     const api = open({ activateArchitect: vi.fn(() => pending.promise) });
     render(<App api={api} />);
@@ -50,6 +51,7 @@ describe('Architect activation control', () => {
   });
 
   it('never presents an unconfigured, unavailable or failed runtime as active', async () => {
+    at('/projects/P0001/agents');  // P048: the Agent runtime controls live in the «Агенты» tab
     const api = open({ getArchitect: vi.fn(async () => architectStatus({
       state: 'not_configured', detail: 'runtime_credential_missing', can_activate: false })) });
     render(<App api={api} />);
@@ -60,6 +62,7 @@ describe('Architect activation control', () => {
   });
 
   it('reports a failed activation with a recovery action and keeps the Owner conversation usable', async () => {
+    at('/projects/P0001/agents');  // P048: the Agent runtime controls live in the «Агенты» tab
     const activateArchitect = vi.fn()
       .mockResolvedValueOnce(architectStatus({ state: 'error', detail: 'start_timeout' }))
       .mockResolvedValueOnce(architectStatus({ state: 'ready', can_activate: false, can_deactivate: true }));
@@ -72,6 +75,7 @@ describe('Architect activation control', () => {
   });
 
   it('renders an unresolved lifecycle as blocked and offers only explicit stop', async () => {
+    at('/projects/P0001/agents');  // P048: the Agent runtime controls live in the «Агенты» tab
     const api = open({ getArchitect: vi.fn(async () => architectStatus({
       state: 'error', detail: 'stop_unconfirmed', can_activate: false, can_deactivate: true,
     })) });
@@ -84,6 +88,7 @@ describe('Architect activation control', () => {
   });
 
   it('surfaces an API failure of activation without claiming activity', async () => {
+    at('/projects/P0001/agents');  // P048: the Agent runtime controls live in the «Агенты» tab
     const activateArchitect = vi.fn().mockRejectedValue(new ApiError('Не удалось связаться с ядром ROSC.', 'network', null));
     render(<App api={open({ activateArchitect })} />);
     fireEvent.click(await screen.findByText('Активировать Architect'));
@@ -108,6 +113,7 @@ describe('Project "Агенты проекта" card', () => {
   const card = () => screen.getByLabelText('Агенты проекта') as HTMLElement;
 
   it('keeps Architect lifecycle controls in the card, not in the conversation panel', async () => {
+    at('/projects/P0001/agents');  // P048: the Agent runtime controls live in the «Агенты» tab
     const api = open();
     render(<App api={api} />);
     await screen.findByText('Project Architect · не активирован');
@@ -123,6 +129,7 @@ describe('Project "Агенты проекта" card', () => {
   });
 
   it('re-probes only the Architect status after a failed load and never touches history or runtime', async () => {
+    at('/projects/P0001/agents');  // P048: the Agent runtime controls live in the «Агенты» tab
     const getArchitect = vi.fn()
       .mockRejectedValueOnce(new ApiError('Ядро недоступно.', 'network', null))
       .mockResolvedValue(architectStatus());
@@ -141,6 +148,7 @@ describe('Project "Агенты проекта" card', () => {
   });
 
   it('links to the existing Project Settings tab without activating or saving', async () => {
+    at('/projects/P0001/agents');  // P048: the Agent runtime controls live in the «Агенты» tab
     const api = open();
     render(<App api={api} />);
     await screen.findByText('Сообщений пока нет.');

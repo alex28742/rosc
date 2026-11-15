@@ -123,7 +123,7 @@ describe('Engine popups: Architect tools and session', () => {
       getArchitect: vi.fn(async () => readyArchitect),
       getContextAccess: vi.fn(async () => contextAccess({ tools: { transport: 'not_available', names: [] } })),
     });
-    at('/projects/P0001');
+    at('/projects/P0001/agents');
     render(<App api={api} />);
 
     expect(await screen.findByText(/Runtime не поддерживает ROSC Tools/)).toBeTruthy();

@@ -77,7 +77,7 @@ describe('loading and retry', () => {
     const drawer = screen.getByLabelText('Project Work Area');
     expect(within(drawer).getByRole('alert').textContent).toContain('Не удалось связаться с ядром ROSC');
     fireEvent.click(within(drawer).getByText('Повторить'));
-    expect(await screen.findByText('Контекст проекта')).toBeTruthy();
+    expect(await screen.findByText('О проекте')).toBeTruthy();
     expect(screen.queryByRole('alert')).toBeNull();
   });
 
@@ -89,7 +89,7 @@ describe('loading and retry', () => {
     fireEvent.click(await screen.findByText('Project P0001'));
     fireEvent.click(screen.getByLabelText('Закрыть проект'));
     fireEvent.click(screen.getByText('Project P0002'));
-    await screen.findByText('Контекст проекта');
+    await screen.findByText('О проекте');
     await act(async () => { b.resolve([]); await b.promise; });
     await act(async () => { a.resolve([task('T0009', 'P0001', { title: 'Belongs to A' })]); await a.promise; });
     expect(screen.queryByText(/Belongs to A/)).toBeNull();
@@ -264,7 +264,7 @@ describe('Workspace repair', () => {
     const repairProject = vi.fn(async () => ({ ...P1, repair: { backup_id: 'B-1' } }));
     const listProjects = vi.fn().mockResolvedValueOnce([corrupt]).mockResolvedValue([P1]);
     const api = stubApi({ listProjects, repairProject });
-    at('/projects/P0001');
+    at('/projects/P0001/agents');
     render(<App api={api} />);
     const button = await screen.findByText('Восстановить манифест');
     fireEvent.click(button);
@@ -280,7 +280,7 @@ describe('Workspace repair', () => {
   it('never shows a success notice when the repair outcome is uncertain (503)', async () => {
     const detail = 'Workspace repair outcome is uncertain: fsync failed';
     const api = stubApi({ listProjects: vi.fn(async () => [corrupt]), repairProject: vi.fn(async () => { throw new ApiError(detail, 'server', 503); }) });
-    at('/projects/P0001');
+    at('/projects/P0001/agents');
     render(<App api={api} />);
     fireEvent.click(await screen.findByLabelText(/Подтверждаю замену манифеста/));
     fireEvent.click(screen.getByText('Восстановить манифест'));
@@ -290,7 +290,7 @@ describe('Workspace repair', () => {
 
   it.each(['oversized', 'foreign', 'unsafe'] as const)('offers no automatic action for %s manifests', async problem => {
     const api = stubApi({ listProjects: vi.fn(async () => [project('P0001', { workspace_state: 'needs_reconciliation', workspace_problem: problem })]) });
-    at('/projects/P0001');
+    at('/projects/P0001/agents');
     render(<App api={api} />);
     expect((await screen.findAllByText(/нужно ручное разрешение/)).length).toBe(1);
     expect(screen.queryByText('Восстановить манифест')).toBeNull();

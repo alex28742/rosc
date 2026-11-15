@@ -1,6 +1,6 @@
 // Route ownership: URL <-> Route. Pure functions only; history/popstate wiring lives in navigation.ts.
 
-export type ProjectTab = 'tasks' | 'settings';
+export type ProjectTab = 'tasks' | 'agents' | 'settings';
 
 export type Route =
   | { kind: 'dashboard' }
@@ -17,7 +17,7 @@ function decode(piece: string): string | null {
 }
 
 /**
- * Supported: /, /settings/agents (or /settings), /projects/:id, /projects/:id/settings,
+ * Supported: /, /settings/agents (or /settings), /projects/:id, /projects/:id/settings, /projects/:id/agents,
  * /projects/:id/new-task, /projects/:id/tasks/:taskId (one trailing slash tolerated).
  * Anything else falls back to the Dashboard instead of being coerced into a Project or Task view.
  */
@@ -33,6 +33,7 @@ export function parseRoute(pathname: string): Route {
   const projectId = ids[0]!;
   if (pieces.length === 2) return { kind: 'project', projectId };
   if (pieces.length === 3 && pieces[2] === 'settings') return { kind: 'project', projectId, tab: 'settings' };
+  if (pieces.length === 3 && pieces[2] === 'agents') return { kind: 'project', projectId, tab: 'agents' };
   if (pieces.length === 3 && pieces[2] === 'new-task') return { kind: 'new-task', projectId };
   if (pieces.length === 4 && pieces[2] === 'tasks') return { kind: 'task', projectId, taskId: ids[2]! };
   return DASHBOARD;
@@ -43,7 +44,7 @@ export function routePath(route: Route): string {
     case 'dashboard': return '/';
     case 'settings': return '/settings/agents';
     case 'project':
-      return `/projects/${encodeURIComponent(route.projectId)}${route.tab === 'settings' ? '/settings' : ''}`;
+      return `/projects/${encodeURIComponent(route.projectId)}${route.tab === 'settings' || route.tab === 'agents' ? `/${route.tab}` : ''}`;
     case 'new-task': return `/projects/${encodeURIComponent(route.projectId)}/new-task`;
     case 'task': return `/projects/${encodeURIComponent(route.projectId)}/tasks/${encodeURIComponent(route.taskId)}`;
   }

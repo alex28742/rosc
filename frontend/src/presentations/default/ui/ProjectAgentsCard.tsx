@@ -19,8 +19,10 @@ type Props = {
 };
 
 /**
- * Project overview card: the verified Architect session with its explicit lifecycle actions, and (P047) every Project
- * Worker with its own verified CLI status and explicit actions. Opening the card, or the Project, never starts a runtime.
+ * P048 «Агенты» tab of the Project Work Area (UX v0.8). It carries every real control of the former overview card:
+ * the verified Architect session with its explicit lifecycle actions, each Project Worker with its own verified CLI
+ * status and actions, the Architect context-access summary and Workspace readiness/repair. Current states and actions
+ * come first; longer explanations sit below. Opening the tab, or the Project, never starts a runtime.
  */
 export function ProjectAgentsCard({ project, conversation, workspace, workers: workerControls, onOpenSettings }: Props) {
   const architect = conversation.architect;
@@ -32,36 +34,48 @@ export function ProjectAgentsCard({ project, conversation, workspace, workers: w
   const summary = summarizeWorkers(workerControls.status, workerControls.workers);
   const summaryClass = summary.tone === 'on' ? 'on' : summary.tone === 'warn' ? 'error' : 'off';
 
-  return <section className="rosc-panel-card rosc-agents-card" aria-label="Агенты проекта">
-    <h3>Агенты проекта</h3>
-    <div className="rosc-agent-stat">
-      <span>Architect</span>
-      <strong className={`rosc-agent-state rosc-agent-state--${view.tone}`} aria-live="polite">{view.state}</strong>
+  return <section className="rosc-agents-card" aria-label="Агенты проекта">
+    <header className="rosc-agents-card__top">
+      <div>
+        <h3>Агенты проекта</h3>
+        <p className="rosc-muted">Состояние сессий и явные действия. Открытие вкладки ничего не запускает.</p>
+      </div>
+      <button type="button" className="rosc-btn rosc-btn--small" onClick={onOpenSettings}>Настройки назначений</button>
+    </header>
+    <div className="rosc-agents-card__metrics">
+      <div className="rosc-agent-stat">
+        <span>Architect</span>
+        <strong className={`rosc-agent-state rosc-agent-state--${view.tone}`} aria-live="polite">{view.state}</strong>
+      </div>
+      <div className="rosc-agent-stat">
+        <span>Workers</span>
+        <strong className={`rosc-agent-state rosc-agent-state--${summaryClass}`} aria-live="polite">{summary.text}</strong>
+      </div>
+      <div className="rosc-agent-stat">
+        <span>Режим</span>
+        <strong className="rosc-agent-state rosc-agent-state--neutral">{MODE_LABEL[project.mode]}</strong>
+      </div>
     </div>
-    <div className="rosc-agent-stat">
-      <span>Workers</span>
-      <strong className={`rosc-agent-state rosc-agent-state--${summaryClass}`} aria-live="polite">{summary.text}</strong>
+    <section className="rosc-agents-card__block" aria-label="Project Architect">
+      <span className="rosc-agents-card__overline">Project Architect</span>
+      <div className="rosc-agents-card__actions">
+        {architect.info?.can_activate && !architect.busy && <button type="button" className="rosc-btn rosc-btn--small"
+          onClick={async () => setFailure(await conversation.onActivate() ?? '')}>
+          {architect.info.state === 'error' ? 'Повторить активацию Architect' : 'Активировать Architect'}
+        </button>}
+        {architect.info?.can_deactivate && !architect.busy && <button type="button" className="rosc-btn rosc-btn--small"
+          onClick={async () => setFailure(await conversation.onDeactivate() ?? '')}>Остановить Architect</button>}
+        {architect.status === 'failed' && <button type="button" className="rosc-btn rosc-btn--small"
+          onClick={conversation.onRefreshArchitect}>Проверить статус</button>}
+      </div>
+      {(view.hint || architect.error || failure) && <p className="rosc-agents-card__hint" role="alert">
+        {[view.hint, architect.error, failure].filter(Boolean).join(' ')}
+      </p>}
+    </section>
+    <div className="rosc-agents-card__block">
+      <WorkerRows controls={workerControls} />
     </div>
-    <div className="rosc-agent-stat">
-      <span>Режим</span>
-      <strong className="rosc-agent-state rosc-agent-state--neutral">{MODE_LABEL[project.mode]}</strong>
-    </div>
-    <div className="rosc-agents-card__actions">
-      {architect.info?.can_activate && !architect.busy && <button type="button" className="rosc-btn rosc-btn--small"
-        onClick={async () => setFailure(await conversation.onActivate() ?? '')}>
-        {architect.info.state === 'error' ? 'Повторить активацию Architect' : 'Активировать Architect'}
-      </button>}
-      {architect.info?.can_deactivate && !architect.busy && <button type="button" className="rosc-btn rosc-btn--small"
-        onClick={async () => setFailure(await conversation.onDeactivate() ?? '')}>Остановить Architect</button>}
-      {architect.status === 'failed' && <button type="button" className="rosc-btn rosc-btn--small"
-        onClick={conversation.onRefreshArchitect}>Проверить статус</button>}
-    </div>
-    {(view.hint || architect.error || failure) && <p className="rosc-agents-card__hint" role="alert">
-      {[view.hint, architect.error, failure].filter(Boolean).join(' ')}
-    </p>}
-    <WorkerRows controls={workerControls} />
-    <ContextAccessSummary contextAccess={conversation.contextAccess} />
-    <div className="rosc-agents-card__workspace">
+    <div className="rosc-agents-card__block rosc-agents-card__workspace">
       <strong className="rosc-agents-card__label">Workspace</strong>
       {/* Read-only Core fact: a healthy Workspace has no action, only the state it reports. */}
       {project.workspace_state === 'ready'
@@ -69,6 +83,7 @@ export function ProjectAgentsCard({ project, conversation, workspace, workers: w
         : <WorkspaceActions key={`${project.id}:${project.workspace_problem}`} state={project.workspace_state}
           problem={project.workspace_problem} controls={workspace} />}
     </div>
+    <ContextAccessSummary contextAccess={conversation.contextAccess} />
     <button type="button" className="rosc-agents-card__link" onClick={onOpenSettings}>
       Подробнее о назначениях — в настройках проекта
     </button>

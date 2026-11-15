@@ -72,7 +72,7 @@ export function App({ api = coreApi }: { api?: CoreApi }) {
       workers={projectWorkers}
       textScale={projectTextScale}
       tab={core.projectTab}
-      onSelectTab={tab => go({ kind: 'project', projectId, tab: tab === 'settings' ? 'settings' : undefined })}
+      onSelectTab={tab => go({ kind: 'project', projectId, tab: tab === 'tasks' ? undefined : tab })}
       onClose={close}
       onRetry={() => void actions.retry()}
       onOpenTask={taskId => go({ kind: 'task', projectId, taskId })}

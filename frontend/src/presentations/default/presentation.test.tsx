@@ -100,14 +100,14 @@ describe('Work area presentation', () => {
 
   it('shows the Project description, path and workspace facts from the view model', () => {
     render(<ProjectView {...projectProps} />);
-    expect(screen.getByText('Контекст проекта')).toBeTruthy();
-    expect(screen.getByText('Ядро платформы')).toBeTruthy();
+    expect(screen.getByText('О проекте')).toBeTruthy();
+    expect(screen.getAllByText('Ядро платформы').length).toBeGreaterThan(0);  // P048: preview line + expandable details
     expect(screen.getByText('/tmp/rosc')).toBeTruthy();
     expect(screen.getByText('README.md')).toBeTruthy();
   });
 
   it('renders the approved "Агенты проекта" overview card without duplicating its facts in the first card', () => {
-    render(<ProjectView {...projectProps} />);
+    render(<ProjectView {...projectProps} tab="agents" />);
     expect(screen.getByText('Агенты проекта', { selector: 'h3' })).toBeTruthy();
     expect(screen.queryByText('Состояние Workspace')).toBeNull();
     expect(screen.queryByText('Architect', { selector: 'dt' })).toBeNull();
@@ -175,7 +175,8 @@ describe('Workspace presentation', () => {
   const baseProject = {
     projectId: 'P0001', projectStatus: 'ready' as const, tasks: [], tasksStatus: 'ready' as const,
     feedback, inert: false, scroll, conversation: conversation(), assignments: assignments(), workers: workerControls(), textScale,
-    tab: 'tasks' as const, onSelectTab: vi.fn(), onClose: vi.fn(), onRetry: vi.fn(), onOpenTask: vi.fn(), onNewTask: vi.fn(),
+    tab: 'agents' as const,  // P048: Workspace readiness/repair lives in the «Агенты» tab
+    onSelectTab: vi.fn(), onClose: vi.fn(), onRetry: vi.fn(), onOpenTask: vi.fn(), onNewTask: vi.fn(),
   };
   const controls = () => ({ busy: false, onReconcile: vi.fn(), onRepair: vi.fn() });
 

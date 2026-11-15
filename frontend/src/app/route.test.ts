@@ -9,6 +9,7 @@ describe('parseRoute', () => {
     ['/projects/P0001', { kind: 'project', projectId: 'P0001' }],
     ['/projects/P0001/', { kind: 'project', projectId: 'P0001' }],
     ['/projects/P0001/settings', { kind: 'project', projectId: 'P0001', tab: 'settings' }],
+    ['/projects/P0001/agents', { kind: 'project', projectId: 'P0001', tab: 'agents' }],
     ['/projects/P0001/new-task', { kind: 'new-task', projectId: 'P0001' }],
     ['/projects/P0001/tasks/T0007', { kind: 'task', projectId: 'P0001', taskId: 'T0007' }],
     ['/projects/P%2F1', { kind: 'project', projectId: 'P/1' }],
@@ -25,6 +26,7 @@ describe('routePath', () => {
     const routes: Route[] = [
       { kind: 'dashboard' }, { kind: 'settings' }, { kind: 'project', projectId: 'P0001' },
       { kind: 'project', projectId: 'P0001', tab: 'settings' }, { kind: 'new-task', projectId: 'P0001' },
+      { kind: 'project', projectId: 'P0001', tab: 'agents' },
       { kind: 'task', projectId: 'P0001', taskId: 'T0002' }, { kind: 'project', projectId: 'a b/c' },
     ];
     for (const r of routes) expect(parseRoute(routePath(r))).toEqual(r);

@@ -164,7 +164,7 @@ describe('P034 Conversation footer and duplicate Architect chip', () => {
     await screen.findByText('Project Architect · не активирован');
     expect(within(panel()).queryByText(/^Architect:/)).toBeNull();
     expect(within(panel()).queryByRole('button', { name: 'Поиск по сообщениям' })).toBeTruthy();
-    expect(screen.getByLabelText('Агенты проекта')).toBeTruthy();
+    expect(screen.getByRole('tab', { name: 'Агенты' })).toBeTruthy();  // P048: the card moved into the «Агенты» tab
   });
 
   it('shows attachment and recipient affordances as visible, disabled and honest', async () => {

@@ -7,7 +7,7 @@ const at = (path: string) => history.replaceState(null, '', path);
 const P1 = project('P0001');
 const agentsCard = () => document.querySelector('section[aria-label="Агенты проекта"]') as HTMLElement;
 
-beforeEach(() => at('/projects/P0001'));
+beforeEach(() => at('/projects/P0001/agents'));  // P048: card content lives in the «Агенты» tab
 afterEach(() => cleanup());
 
 describe('Architect context access summary (P019)', () => {

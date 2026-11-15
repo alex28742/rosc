@@ -60,7 +60,7 @@ export function capabilityPreset(capabilities: readonly string[]): CapabilityPre
   return names === both ? 'both' : 'custom';
 }
 
-export type ProjectTab = 'tasks' | 'settings';
+export type ProjectTab = 'tasks' | 'agents' | 'settings';
 
 /** The five approved `Aa · Вид` steps. It is local UI state, never Core data. */
 export const TEXT_SCALE_STEPS = [90, 100, 110, 120, 130] as const;

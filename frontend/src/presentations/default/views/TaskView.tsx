@@ -2,6 +2,7 @@ import { useCallback, useRef, useState } from 'react';
 import type { SpecRevision } from '../../../core/models';
 import { describeTaskArchitect } from '../ui/architectView';
 import { WorkerRows } from '../ui/WorkerRows';
+import { MobilePaneSwitch } from '../ui/MobilePaneSwitch';
 import { PromptDraftDrawer } from '../ui/PromptDraftDrawer';
 import { RichEditor, RichToolbar, RichView, type RichEditorHandle } from '../ui/RichText';
 import type { TaskViewProps } from '../../../app/presentation/contracts';
@@ -27,6 +28,8 @@ function Later({ children, label }: { children: string; label?: string }) {
 export function TaskView({ projectName, taskId, task, tasksStatus, feedback, inert, scroll, workspace, conversation, authoring, workers, textScale, onClose, onRetry }: TaskViewProps) {
   const scaleRef = useApplyTextScale(textScale.scale);
   const [chatCollapsed, setChatCollapsed] = useState(false);
+  /** P048: narrow-width pane (Task work vs. Task Conversation); independent of the Project's own pane state. */
+  const [mobilePane, setMobilePane] = useState<'work' | 'chat'>('work');
   const [specCollapsed, setSpecCollapsed] = useState(false);
   const [draftOpen, setDraftOpen] = useState(false);
   const [specNote, setSpecNote] = useState('');
@@ -103,8 +106,9 @@ export function TaskView({ projectName, taskId, task, tasksStatus, feedback, ine
   return <Drawer variant="task" label="Task Work Area" closeLabel="Закрыть задачу" inert={inert} onClose={onClose}
     head={head} rootRef={scaleRef} fill footer={task ? footer : undefined}>
     {!task ? <div className="rosc-task-state"><Feedback {...feedback} />{state}</div>
-      : <div className={chatCollapsed ? 'rosc-task-workspace rosc-task-workspace--collapsed' : 'rosc-task-workspace'}>
-        <div className="rosc-task-left" ref={scroll.region(`task:${taskId}`)}>
+      : <div className={['rosc-task-workspace', 'rosc-panes', chatCollapsed && 'rosc-task-workspace--collapsed',
+        mobilePane === 'chat' && 'rosc-panes--chat'].filter(Boolean).join(' ')}>
+        <div className="rosc-task-left rosc-panes__work" ref={scroll.region(`task:${taskId}`)}>
           <Feedback {...feedback} />
           <div className="rosc-task-heading">
             <div>
@@ -241,8 +245,11 @@ export function TaskView({ projectName, taskId, task, tasksStatus, feedback, ine
           </div>
         </div>
         <TaskConversationPanel key={`${task.project_id}/${task.id}`} taskId={task.id} conversation={conversation}
-          collapsed={chatCollapsed} onCollapsedChange={setChatCollapsed} />
+          collapsed={chatCollapsed}
+          onCollapsedChange={value => { setChatCollapsed(value); if (value) setMobilePane('work'); }} />
         {draftOpen && <PromptDraftDrawer key={`${task.project_id}/${task.id}`} taskId={task.id} authoring={authoring} onClose={() => setDraftOpen(false)} />}
       </div>}
+    {task && <MobilePaneSwitch pane={mobilePane} workLabel="TASK" workName="рабочей области задачи" chatName="Task Conversation"
+      onSwitch={next => { if (next === 'chat') setChatCollapsed(false); setMobilePane(next); }} />}
   </Drawer>;
 }

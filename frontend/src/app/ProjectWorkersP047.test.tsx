@@ -11,7 +11,7 @@ const api = (workers: ReturnType<typeof projectWorker>[], extra = {}) => stubApi
 });
 
 afterEach(() => { cleanup(); document.body.style.overflow = ''; });
-beforeEach(() => at('/projects/P0001'));
+beforeEach(() => at('/projects/P0001/agents'));  // P048: card content lives in the «Агенты» tab
 
 describe('P047 Project Work Area Workers', () => {
   it('offers the Task per-Worker lifecycle controls in the Project card without visiting a Task', async () => {

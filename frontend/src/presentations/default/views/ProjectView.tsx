@@ -12,6 +12,7 @@ import { TextViewControl } from '../ui/TextViewControl';
 import { architectHeadline, architectTone } from '../ui/architectView';
 import { summarizeWorkers } from '../ui/workerView';
 import { ChevronRightIcon } from '../ui/icons';
+import { MobilePaneSwitch } from '../ui/MobilePaneSwitch';
 import { useApplyTextScale } from '../ui/useApplyTextScale';
 
 type WorkAreaProps = Omit<ProjectViewProps, 'project' | 'projectStatus' | 'onClose' | 'projectId' | 'inert' | 'textScale'> & {
@@ -19,6 +20,7 @@ type WorkAreaProps = Omit<ProjectViewProps, 'project' | 'projectStatus' | 'onClo
 };
 
 type TaskViewMode = 'list' | 'cards';
+type MobilePane = 'work' | 'chat';
 
 const PAGE_SIZE = 10;
 const STATUS_ALL = 'all';
@@ -72,14 +74,48 @@ function TaskRows({ tasks, viewMode, onOpenTask }: { tasks: Task[]; viewMode: Ta
 }
 
 /**
- * Approved v0.6 Project Work Area composition: left overview + tabs + Tasks/Settings, right persistent Project
- * Conversation. The task header and footer are fixed; only the task list or Settings content scrolls. UI-local
+ * P048 «О проекте» (UX v0.8): collapsed by default to one truncated line of the real description. Expanded, it shows
+ * the full description, the docs entrypoint and the three progress fields. Core has no source for the progress fields
+ * yet, so they honestly read «Нет данных» instead of borrowing a Task status or demo text. Toggling starts nothing.
+ */
+function ProjectAbout({ project, open, onToggle }: { project: WorkAreaProps['project']; open: boolean; onToggle: () => void }) {
+  const description = project.description.trim();
+  const detailsId = `project-about-${project.id}`;
+  return <section className={open ? 'rosc-about rosc-about--open' : 'rosc-about'} aria-label="О проекте">
+    <button type="button" className="rosc-about__toggle" aria-expanded={open} aria-controls={detailsId} onClick={onToggle}>
+      <span className="rosc-about__chevron" aria-hidden="true">▸</span>
+      <strong>О проекте</strong>
+      <span className="rosc-about__preview">{description || 'Описание не указано'}</span>
+      <span className="rosc-about__action">{open ? 'Свернуть' : 'Развернуть'}</span>
+    </button>
+    <div className="rosc-about__details" id={detailsId} hidden={!open}>
+      <div className="rosc-about__description">
+        <small>Описание</small>
+        <p>{description || 'Описание не указано'}</p>
+        <dl className="rosc-facts">
+          <dt>Документация</dt><dd>{project.docs_entrypoint ?? 'не указана'}</dd>
+        </dl>
+      </div>
+      <dl className="rosc-about__summary" aria-label="Прогресс проекта">
+        {ABOUT_PROGRESS.map(label => <div key={label}><dt>{label}</dt><dd className="rosc-muted">Нет данных</dd></div>)}
+      </dl>
+    </div>
+  </section>;
+}
+
+const ABOUT_PROGRESS = ['Последнее достижение', 'Где остановились', 'Следующий шаг'] as const;
+
+/**
+ * Project Work Area (v0.6 composition, compacted by P048 / UX v0.8): left «О проекте» + tabs + Tasks/Агенты/Settings,
+ * right persistent Project Conversation. At narrow width the two columns become sideways-switchable panes. The task header and footer are fixed; only the task list or Settings content scrolls. UI-local
  * chat state (draft, collapse, search), list filters and text scale are keyed by Project so switching Projects
  * cannot leak them and a nested Task keeps them intact.
  */
 function ProjectWorkArea({ project, tasks, tasksStatus, feedback, scroll, workspace, conversation, assignments, workers, tab,
   onSelectTab, onRetry, onOpenTask, onNewTask }: WorkAreaProps) {
   const [collapsed, setCollapsed] = useState(false);
+  const [aboutOpen, setAboutOpen] = useState(false);
+  const [mobilePane, setMobilePane] = useState<MobilePane>('work');
   const [search, setSearch] = useState('');
   const [statusFilter, setStatusFilter] = useState(STATUS_ALL);
   const [viewMode, setViewMode] = useState<TaskViewMode>('list');
@@ -106,25 +142,19 @@ function ProjectWorkArea({ project, tasks, tasksStatus, feedback, scroll, worksp
   const currentPage = Math.min(Math.max(page, 1), pageCount);
   const visible = filtered.slice((currentPage - 1) * PAGE_SIZE, currentPage * PAGE_SIZE);
 
-  return <div className={collapsed ? 'rosc-project-workspace rosc-project-workspace--collapsed' : 'rosc-project-workspace'}>
-    <section className="rosc-project-left" aria-label="Обзор проекта и задачи">
+  const workspaceClass = ['rosc-project-workspace', 'rosc-panes', collapsed && 'rosc-project-workspace--collapsed',
+    mobilePane === 'chat' && 'rosc-panes--chat'].filter(Boolean).join(' ');
+  return <><div className={workspaceClass}>
+    <section className="rosc-project-left rosc-panes__work" aria-label="Обзор проекта и задачи">
       <Feedback {...feedback} />
-      <div className="rosc-hero">
-        <section className="rosc-panel-card">
-          <h3>Контекст проекта</h3>
-          <p>{project.description}</p>
-          <dl className="rosc-facts">
-            <dt>Документация</dt><dd>{project.docs_entrypoint ?? 'не указана'}</dd>
-          </dl>
-        </section>
-        <ProjectAgentsCard project={project} conversation={conversation} workspace={workspace} workers={workers}
-          onOpenSettings={() => onSelectTab('settings')} />
-      </div>
+      <ProjectAbout project={project} open={aboutOpen} onToggle={() => setAboutOpen(value => !value)} />
       <div className="rosc-tabs-toolbar">
         <div className="rosc-tabs" role="tablist" aria-label="Разделы проекта">
           <button className={tab === 'tasks' ? 'rosc-tab rosc-tab--active' : 'rosc-tab'} role="tab"
             aria-selected={tab === 'tasks'} onClick={() => onSelectTab('tasks')}>Tasks ({tasks.length})</button>
           <button className="rosc-tab" role="tab" aria-selected="false" disabled>Activity</button>
+          <button className={tab === 'agents' ? 'rosc-tab rosc-tab--active' : 'rosc-tab'} role="tab"
+            aria-selected={tab === 'agents'} onClick={() => onSelectTab('agents')}>Агенты</button>
           <button className={tab === 'settings' ? 'rosc-tab rosc-tab--active' : 'rosc-tab'} role="tab"
             aria-selected={tab === 'settings'} onClick={() => onSelectTab('settings')}>Настройки проекта</button>
         </div>
@@ -134,7 +164,12 @@ function ProjectWorkArea({ project, tasks, tasksStatus, feedback, scroll, worksp
         ? <div className="rosc-project-settings" ref={scroll.region(`project:${project.id}:settings`)}>
           <ProjectSettingsPanel key={`${project.id}:settings`} projectId={project.id} controls={assignments} />
         </div>
-        : <div className="rosc-task-panel">
+        : tab === 'agents'
+          ? <div className="rosc-project-settings rosc-project-agents" ref={scroll.region(`project:${project.id}:agents`)}>
+            <ProjectAgentsCard project={project} conversation={conversation} workspace={workspace} workers={workers}
+              onOpenSettings={() => onSelectTab('settings')} />
+          </div>
+          : <div className="rosc-task-panel">
           <div className="rosc-task-panel__head">
             <h3>Задачи проекта <span className="rosc-counter">{filtered.length} из {tasks.length}</span></h3>
             <div className="rosc-task-tools">
@@ -188,8 +223,12 @@ function ProjectWorkArea({ project, tasks, tasksStatus, feedback, scroll, worksp
       </footer>
     </section>
     <ConversationPanel key={project.id} projectId={project.id}
-      conversation={conversation} collapsed={collapsed} onCollapsedChange={setCollapsed} />
-  </div>;
+      conversation={conversation} collapsed={collapsed}
+      onCollapsedChange={value => { setCollapsed(value); if (value) setMobilePane('work'); }} />
+  </div>
+  <MobilePaneSwitch pane={mobilePane} workLabel="TASKS" workName="задачам проекта" chatName="Project Conversation"
+    onSwitch={next => { if (next === 'chat') setCollapsed(false); setMobilePane(next); }} />
+  </>;
 }
 
 export function ProjectView({ projectId, project, projectStatus, tasks, tasksStatus, feedback, inert, scroll, workspace,
