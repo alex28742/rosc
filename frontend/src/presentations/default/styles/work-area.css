@@ -4018,7 +4018,6 @@
  */
 @media (max-width: 800px) {
   .rosc-drawer .rosc-panes {
-    --pane-rail: 40px;
     position: relative;
     display: block;
     flex: 1;
@@ -4028,8 +4027,13 @@
     overflow: hidden;
   }
 
+  /* Common parent of the panes and the switch: the only source of --pane-rail, so both inherit the same value.
+     Padding 0 (the fill surface's own rule, otherwise overridden by the narrow .rosc-drawer__scroll padding) keeps
+     the switch flush with the workspace edge, as in the v0.8 reference. */
   .rosc-drawer .rosc-drawer__scroll--fill:has(> .rosc-panes) {
+    --pane-rail: 40px;
     position: relative;
+    padding: 0;
     overflow: hidden;
   }
 
@@ -4149,7 +4153,7 @@
 }
 
 @media (max-width: 440px) {
-  .rosc-drawer .rosc-panes {
+  .rosc-drawer .rosc-drawer__scroll--fill:has(> .rosc-panes) {
     --pane-rail: 36px;
   }
 }
