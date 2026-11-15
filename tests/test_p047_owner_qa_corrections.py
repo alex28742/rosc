@@ -173,6 +173,16 @@ class DirectAndGroupTests(P047Case):
         self.assertIn("Never reject the project, rename the directory or run `git init`", role)
 
 
+class TaskContextTests(P047Case):
+    def test_task_room_role_names_only_this_task_with_its_acceptance_criteria(self) -> None:
+        self.run_room([self.claude_agent], task="T0001", body="Что нужно сделать?")
+        role = self.runner.calls[0]["argv"][self.runner.calls[0]["argv"].index("--append-system-prompt") + 1]
+        task = self.api.get("/api/projects/P0001/tasks").json()[0]
+        self.assertIn("Task Conversation of T0001", role)
+        self.assertIn(f"Acceptance criteria: {task['acceptance_criteria']!r}", role)
+        self.assertNotIn("T0002", role)
+
+
 class ArchitectGroupBridgeTests(P047Case):
     def make_client(self, **kw):
         self.arch_runtime = FakeRuntime()

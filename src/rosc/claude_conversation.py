@@ -113,7 +113,12 @@ the Owner uses."""
 
 def role_text(context: dict) -> str:
     task = context.get("task_id")
-    task_line = (f"- This is the Task Conversation of T{task:04d}: {context.get('task_title', '')!r}\n" if task else "")
+    task_line = ""
+    if task:
+        # Bounded, trusted Task context of THIS Task only (never another Task's text or history).
+        task_line = (f"- This is the Task Conversation of T{task:04d}: {context.get('task_title', '')!r}\n"
+                     f"  Task description: {context.get('task_description', '')!r}\n"
+                     f"  Acceptance criteria: {context.get('task_acceptance', '')!r}\n")
     return ROLE_TEXT.format(agent_name=context.get("agent_name") or "a Worker",
                             room_kind="Task" if task else "Project",
                             project_ref=context["project_ref"], project_name=context.get("project_name", ""),
@@ -455,6 +460,8 @@ class ClaudeConversationTransport:
             return None, {"root": str(root), "project_ref": f"P{project.id:04d}", "task_id": room.task_id,
                           "project_name": project.name, "project_uuid": project.project_uuid,
                           "binding_version": binding.version, "task_title": task.title[:160] if task else "",
+                          "task_description": task.description[:1500] if task else "",
+                          "task_acceptance": task.acceptance_criteria[:1500] if task else "",
                           "agent_name": agent.display_name if agent else lane.agent_id, "names": names}
 
     def _established(self, lane: LaneRef, exclude: Path) -> bool:
