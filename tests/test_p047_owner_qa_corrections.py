@@ -90,7 +90,8 @@ class DirectAndGroupTests(P047Case):
 
     def test_peer_mention_earns_a_bounded_follow_up_and_stops_without_new_addressed_input(self) -> None:
         names = {self.claude_agent: "Claude", self.second: "Claude-2"}
-        self.runner.replies = ["@{other} what do you think?", "@{other} I disagree, here is why.", "Agreed, done."]
+        self.runner.replies = ["@{other} what do you think?", "@{other} I disagree, here is why.",
+                               'Agreed, done.\n<rosc-control next="finish"/>']
         calls_order: list[str] = []
 
         original = self.runner.spawn
@@ -107,12 +108,14 @@ class DirectAndGroupTests(P047Case):
         self.runner.spawn = spawn
         self.run_room([self.claude_agent, self.second], body="Решите между собой")
         # Pass 0: both answer (first mentions the second, second mentions the first); pass 1: only the first, who was
-        # addressed after its turn, answers "Agreed" without a mention -> nothing more, although quota remains.
+        # addressed after its turn, answers "Agreed" without a mention.  P052 r04: that answer goes to its requester (the
+        # second Worker), but it explicitly finishes -> nothing more, although quota remains.
         self.assertEqual(len(calls_order), 3)
         self.assertEqual(calls_order[2], calls_order[0])
         msgs = self.messages()
         self.assertEqual(msgs[1]["group"]["to"], [calls_order[1]])  # structured addressee from the @mention
-        self.assertEqual(msgs[-1]["group"]["to"], ["owner"])
+        self.assertEqual(msgs[-1]["group"]["to"], [calls_order[1]])  # r04: default recipient = the requester
+        self.assertEqual(msgs[-1]["body"], "Agreed, done.")  # the control line is not part of the visible message
         status = self.api.get(self.url()).json()
         self.assertEqual(status["round"]["state"], "awaiting_owner")
         self.assertEqual(status["round"]["grants"][calls_order[0]]["published"], 2)
@@ -202,6 +205,9 @@ class ArchitectGroupBridgeTests(P047Case):
         self.app.state.architect.drain()
         asked_before = len(self.arch_runtime.asked)
         self.arch_runtime.reply = "Architect: предлагаю вариант B, @Claude проверь."
+        # P052 r04: pass order is random; when Claude answers the Architect's question its reply goes to the
+        # Architect and could continue, so the fake Claude gives explicit final answers to keep this test bounded.
+        self.runner.replies = ['Проверил.\n<rosc-control next="finish"/>'] * 2
         sent = self.post("Architect и Claude, обсудите", [self.arch, self.claude_agent])
         self.assertEqual(sent.status_code, 201, sent.text)
         self.wait_room()

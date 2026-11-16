@@ -74,6 +74,8 @@ export type MessageGroup = {
   round_id: string | null;
   turn_id: string | null;
   sender_agent_id: string | null;
+  /** P052 r04: continuation intent of an Agent turn's reply (`finish` = explicit final answer); null for other messages. */
+  next?: 'continue' | 'finish' | null;
 };
 
 /** Delivery of one Owner message to the Project Architect (P015). `not_sent` means it was only stored in ROSC. */
@@ -139,8 +141,9 @@ export type GroupActivity = 'cli_confirmed' | 'awaiting_confirmation' | null;
 export type GroupEngagement = 'none' | 'direct' | 'group';
 /** P052: an explicit Agent addressee of the latest Agent message that got no turn, with Core's honest reason. */
 export type GroupUnanswered = { agent_id: string; from_agent_id: string; message_id: string; ordinal: number; reason: string };
-/** P052: why a finished discussion stopped: nobody was addressed (`natural`), a reply limit was reached, or another reason. */
-export type GroupStopReason = 'natural' | 'quota_exhausted' | 'unanswered' | null;
+/** P052: why a finished discussion stopped: nobody was addressed (`natural`), an Agent gave an explicit final answer
+ * (`finished`, P052 r04), a reply limit was reached, or another reason. */
+export type GroupStopReason = 'natural' | 'finished' | 'quota_exhausted' | 'unanswered' | null;
 /** P052 r03: the recorded outcome of a legacy direct Architect reply's invitation check (no body, no trace needed). */
 export type GroupInvitation = {
   message_id: string; ordinal: number; decision: 'accepted' | 'declined' | 'unrecorded'; reason: string | null;

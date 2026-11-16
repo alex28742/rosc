@@ -27,17 +27,23 @@ Invariants (each is backed by a DB constraint or a single ``BEGIN IMMEDIATE`` tr
   a round, renew a grant or add participants to an existing discussion.  Every dispatched turn carries a trusted,
   advisory room-wide quota snapshot (``TurnPayload.quota``).  A peer reply longer than
   ``GROUP_REPLY_CONTINUE_MAX_CHARS`` is published in full but never earns another Agent turn (deterministic size rule).
+* P052 r04 (R-15.26): every queued turn records its causal trigger (``captured_reply_to``); a reply's ``reply_to`` is
+  that trigger and its default ``to`` is the requester (explicit ``@name`` redirects).  Continuation (``continue`` /
+  ``finish``, ``parse_reply_control``) is separate from body, ``to`` and ``reply_to``; only the recipient of a
+  non-finish reply of the SAME round can earn a next turn.  An Owner authorization is single-use (a legacy bridged
+  invitation from an Owner message that already authorized any round is ``authorization_spent``).  No migration.
 """
 from __future__ import annotations
 
 import json
 import random
+import re
 import threading
 import time
 import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
-from typing import Callable, Protocol, Sequence
+from typing import Callable, NamedTuple, Protocol, Sequence
 
 from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError, OperationalError
@@ -87,6 +93,43 @@ CLIENT_KEY_REPLY_PREFIX = "group-reply:"
 # stored and shown in full (never truncated, never regenerated) but cannot invite a peer or earn another Agent turn.
 GROUP_REPLY_GUIDE_CHARS = 1200
 GROUP_REPLY_CONTINUE_MAX_CHARS = 3000
+
+# -- P052 r04 (R-15.26): continuation control, separate from body, ``to`` and ``reply_to`` ------------------------------
+# One provider-neutral line, the LAST non-empty line of a reply:  <rosc-control next="continue"/>  or  next="finish".
+# It is parsed by the Core (the same for the Claude CLI Worker and the OpenCode Architect) and removed from the visible
+# message.  Absent (legacy plaintext) = ``continue``: the recipient MAY get a next turn, only if the trusted Core finds a
+# valid round, causal predecessor, quota, permission and a ready participant.  A malformed control line is removed too
+# and fails safe as ``finish`` (fewer model calls, never more).  Models never grant or renew authority with it.
+INTENT_CONTINUE, INTENT_FINISH = "continue", "finish"
+CONTROL_EXPLICIT, CONTROL_ABSENT, CONTROL_INVALID = "explicit", "absent", "invalid"
+_CONTROL_LINE = re.compile(r"^\s*<\s*rosc-control\b(?P<attrs>[^<>]*?)/?\s*>\s*$", re.IGNORECASE)
+_CONTROL_NEXT = re.compile(r'^\s*next\s*=\s*"(?P<next>continue|finish)"\s*$', re.IGNORECASE)
+_CONTROL_PREFIX = re.compile(r"^\s*<\s*/?\s*rosc-control\b", re.IGNORECASE)
+
+
+class ReplyControl(NamedTuple):
+    body: str
+    intent: str  # continue | finish
+    source: str  # explicit | absent | invalid
+
+
+def parse_reply_control(text: str) -> ReplyControl:
+    """Split the trailing ROSC control line off a provider reply (see the constants above).  Only the last non-empty
+    line is considered, so a control-like line quoted earlier in a message is ordinary content."""
+    if not isinstance(text, str):
+        return ReplyControl(text, INTENT_CONTINUE, CONTROL_ABSENT)  # type: ignore[arg-type]
+    lines = text.rstrip().split("\n")
+    last = lines[-1] if lines else ""
+    if not _CONTROL_PREFIX.match(last):
+        return ReplyControl(text, INTENT_CONTINUE, CONTROL_ABSENT)
+    body = "\n".join(lines[:-1]).rstrip()
+    match = _CONTROL_LINE.match(last)
+    nxt = _CONTROL_NEXT.match(match.group("attrs")) if match else None
+    if not body.strip():
+        return ReplyControl(text, INTENT_FINISH, CONTROL_INVALID)  # nothing visible would remain: keep the text
+    if nxt is None:
+        return ReplyControl(body, INTENT_FINISH, CONTROL_INVALID)
+    return ReplyControl(body, nxt.group("next").lower(), CONTROL_EXPLICIT)
 
 
 def _now() -> datetime:
@@ -149,6 +192,9 @@ class LookupOutcome:
     text: str | None = None
     to: tuple[str, ...] | None = None
     reply_to: str | None = None
+    # P052 r04: a transport with a native structured channel may pass the continuation intent here; otherwise the Core
+    # parses the trailing control line of ``text`` (``parse_reply_control``).
+    intent: str | None = None
 
 
 class ConversationTransport(Protocol):
@@ -691,7 +737,7 @@ class WorkerConversationCore:
         session.add(GroupTurn(turn_id=str(uuid.uuid4()), round_id=rnd.round_id, conversation_id=rnd.conversation_id,
                               agent_id=agent_id, pass_no=rnd.current_pass, position=0 if last is None else last + 1,
                               attempt=1, state=TURN_QUEUED, correlation_id=str(uuid.uuid4()), created_at=_now(),
-                              updated_at=_now()))
+                              updated_at=_now(), captured_reply_to=envelope.message_id))  # P052 r04: causal trigger
         envelope.round_id = rnd.round_id
         session.flush()
         return rnd
@@ -939,7 +985,11 @@ class WorkerConversationCore:
         ).order_by(ConversationMessage.ordinal.desc()).limit(1)).first()
         return None if row is None else row[0]
 
-    def _create_pass(self, session: Session, rnd: GroupRound, pass_no: int, agent_ids: list[str]) -> list[str]:
+    def _create_pass(self, session: Session, rnd: GroupRound, pass_no: int, agent_ids: list[str],
+                     triggers: dict[str, str | None] | None = None) -> list[str]:
+        """Queue one pass.  P052 r04: every queued turn durably records its CAUSAL TRIGGER (the specific message it
+        answers) in ``captured_reply_to`` at queue time: given explicitly, else the round's authorizing Owner message.
+        It later becomes the reply's ``reply_to`` and decides its default ``to`` (the requester)."""
         order = sorted(agent_ids)
         self._rng.shuffle(order)
         last = self._last_published_agent(session, rnd.conversation_id)
@@ -948,41 +998,92 @@ class WorkerConversationCore:
             order[0], order[swap] = order[swap], order[0]
         for position, agent_id in enumerate(order):
             turn_id = str(uuid.uuid4())
+            trigger = (triggers or {}).get(agent_id) or rnd.authorizing_message_id
             session.add(GroupTurn(turn_id=turn_id, round_id=rnd.round_id, conversation_id=rnd.conversation_id,
                                   agent_id=agent_id, pass_no=pass_no, position=position, attempt=1, state=TURN_QUEUED,
-                                  correlation_id=str(uuid.uuid4()), created_at=_now(), updated_at=_now()))
+                                  correlation_id=str(uuid.uuid4()), created_at=_now(), updated_at=_now(),
+                                  captured_reply_to=trigger))
             self._note(session, "turn_queued", rnd.conversation_id, turn_id=turn_id, round_id=rnd.round_id,
-                       round_no=rnd.round_no, agent_id=agent_id, pass_no=pass_no, position=position, attempt=1)
+                       round_no=rnd.round_no, agent_id=agent_id, pass_no=pass_no, position=position, attempt=1,
+                       reply_to_id=trigger)
         rnd.current_pass = pass_no
         return order
 
-    def _eligible_for_next_pass(self, session: Session, rnd: GroupRound) -> list[str]:
-        result = []
+    def _next_pass_triggers(self, session: Session, rnd: GroupRound) -> tuple[dict[str, str], dict[str, str]]:
+        """(eligible Agent -> causal trigger message id, ineligible granted Agent -> reason).  Read-only decision of the
+        trusted Core: a model's wording alone never earns a turn."""
+        eligible: dict[str, str] = {}
+        refused: dict[str, str] = {}
+        room = session.get(Conversation, rnd.conversation_id)
         for grant in session.scalars(select(GroupRoundGrant).where(GroupRoundGrant.round_id == rnd.round_id)):
             member = self._member(session, rnd.conversation_id, grant.agent_id)
-            room = session.get(Conversation, rnd.conversation_id)
-            if (grant.published_count < grant.quota and not grant.failed and member is not None
-                    and member.state != MEMBER_RELEASED and self._assignment(session, room, grant.agent_id) is not None
-                    and self._addressed_by_peer(session, rnd, grant.agent_id)):
-                result.append(grant.agent_id)
-        return result
+            trigger, why = self._continuation_trigger(session, rnd, grant.agent_id)
+            if trigger is None:
+                refused[grant.agent_id] = why
+            elif grant.published_count >= grant.quota:
+                refused[grant.agent_id] = "quota_exhausted"
+            elif grant.failed:
+                refused[grant.agent_id] = "excluded_after_failures"
+            elif member is None or member.state == MEMBER_RELEASED:
+                refused[grant.agent_id] = "released"
+            elif self._assignment(session, room, grant.agent_id) is None:  # type: ignore[arg-type]
+                refused[grant.agent_id] = "unassigned"
+            else:
+                eligible[grant.agent_id] = trigger
+        return eligible, refused
 
-    def _addressed_by_peer(self, session: Session, rnd: GroupRound, agent_id: str) -> bool:
-        """P047: a later pass is earned only by real input — a peer Agent's published message that explicitly names this
-        Agent in ``to`` after the last snapshot this Agent's turn in this round already consumed (or after the round's
-        authorizing message).  No new addressed peer turn = no new generation, whatever quota remains."""
+    def _eligible_for_next_pass(self, session: Session, rnd: GroupRound) -> list[str]:
+        return list(self._next_pass_triggers(session, rnd)[0])
+
+    def _continuation_trigger(self, session: Session, rnd: GroupRound, agent_id: str) -> tuple[str | None, str]:
+        """P047 + P052 r04: a later pass is earned only by real input — a peer Agent's published message OF THIS ROUND
+        whose structured ``to`` names this Agent (by an explicit @mention or as the default requester), after the last
+        snapshot this Agent's turn in this round already consumed (or after the round's floor), within the size rule,
+        and whose continuation intent is not ``finish``.  Returns (latest such message id, None) or (None, reason).
+        A message charged to another (closed / older) round never earns a turn here (stale-epoch guard)."""
         after = session.scalar(select(func.max(GroupTurn.input_through_ordinal)).where(
             GroupTurn.round_id == rnd.round_id, GroupTurn.agent_id == agent_id))
         if after is None:
             after = self._round_floor(session, rnd)
-        hit = session.scalar(select(ConversationMessage.message_id).join(
+        rows = session.execute(select(ConversationMessage.message_id, ConversationMessage.body,
+                                      MessageEnvelope.turn_id).join(
             MessageEnvelope, MessageEnvelope.message_id == ConversationMessage.message_id).join(
             MessageParty, MessageParty.message_id == ConversationMessage.message_id).where(
             ConversationMessage.conversation_id == rnd.conversation_id, ConversationMessage.ordinal > after,
+            MessageEnvelope.round_id == rnd.round_id,
             MessageEnvelope.sender_agent_id.is_not(None), MessageEnvelope.sender_agent_id != agent_id,
-            func.length(ConversationMessage.body) <= GROUP_REPLY_CONTINUE_MAX_CHARS,
-            MessageParty.role == "to", MessageParty.party_ref == agent_id).limit(1))
-        return hit is not None
+            MessageParty.role == "to", MessageParty.party_ref == agent_id).order_by(
+            ConversationMessage.ordinal.desc())).all()
+        why = "not_addressed"
+        for message_id, body, turn_id in rows:
+            if len(body) > GROUP_REPLY_CONTINUE_MAX_CHARS:
+                why = "reply_too_long"
+                continue
+            if self.message_intent(session, message_id, turn_id) == INTENT_FINISH:
+                why = "finish_requested"
+                continue
+            return message_id, ""
+        return None, why
+
+    @staticmethod
+    def _captured(turn: GroupTurn | None) -> tuple[list[str], str, str]:
+        """(to refs, intent, intent source) of a captured reply.  Legacy rows store a plain JSON list (= continue)."""
+        if turn is None or not turn.captured_to:
+            return [], INTENT_CONTINUE, CONTROL_ABSENT
+        value = json.loads(turn.captured_to)
+        if isinstance(value, list):
+            return value, INTENT_CONTINUE, CONTROL_ABSENT
+        return list(value.get("to") or []), value.get("next") or INTENT_CONTINUE, value.get("source") or CONTROL_ABSENT
+
+    def message_intent(self, session: Session, message_id: str, turn_id: str | None = None) -> str:
+        """Continuation intent of a published Agent message (a bridged legacy Architect reply has no turn: continue)."""
+        if turn_id is None:
+            envelope = session.get(MessageEnvelope, message_id)
+            turn_id = envelope.turn_id if envelope is not None else None
+        return self._captured(session.get(GroupTurn, turn_id) if turn_id else None)[1]
+
+    def _addressed_by_peer(self, session: Session, rnd: GroupRound, agent_id: str) -> bool:
+        return self._continuation_trigger(session, rnd, agent_id)[0] is not None
 
     @staticmethod
     def _round_floor(session: Session, rnd: GroupRound) -> int:
@@ -1038,9 +1139,15 @@ class WorkerConversationCore:
             member.updated_by, member.updated_at = actor_id, now
         session.flush()
 
-    def _maybe_invite(self, session: Session, turn: GroupTurn, refs: list[str], body: str) -> list[str]:
+    def _maybe_invite(self, session: Session, turn: GroupTurn, refs: list[str], body: str, *,
+                      intent: str = INTENT_CONTINUE) -> list[str]:
         """P052 B: the ONE Agent-initiated invitation of an Owner-authorized DIRECT request.  Runs inside ``publish``'s
-        transaction, after the inviter's grant was debited.  Returns the invited Agent ids (possibly none)."""
+        transaction, after the inviter's grant was debited.  Returns the invited Agent ids (possibly none).
+
+        Single use (P052 r04): the direct round's one-Agent grant IS the unused Owner authorization; converting it
+        makes the round a discussion (two or more grants), durably, so the same authorization can never convert again
+        (restart-safe: the decision is read from committed rows inside ``BEGIN IMMEDIATE``).  An explicit ``finish``
+        never opens a discussion (nobody would be asked to answer)."""
         rnd = session.get(GroupRound, turn.round_id)
         if rnd is None or rnd.state != ROUND_OPEN:
             return []
@@ -1062,6 +1169,8 @@ class WorkerConversationCore:
                 p not in {g.agent_id for g in grants} for p in peers) else []
         if len(body) > GROUP_REPLY_CONTINUE_MAX_CHARS:
             return declined("reply_too_long")
+        if intent == INTENT_FINISH:
+            return declined("finish_requested")
         if self._controls_block(session, turn.conversation_id) is not None:
             return declined(self._controls_block(session, turn.conversation_id))  # type: ignore[arg-type]
         problems = [(p, self._invite_problem(session, room, p, inviter=turn.agent_id)) for p in peers]
@@ -1095,9 +1204,12 @@ class WorkerConversationCore:
     def _display_names(self, session: Session, room: Conversation) -> dict[str, str]:
         return {ref: names[0] for ref, names in self._room_candidates(session, room).items()}
 
-    def _quota_snapshot(self, session: Session, rnd: GroupRound, agent_id: str) -> dict:
+    def _quota_snapshot(self, session: Session, rnd: GroupRound, agent_id: str, *, turn: GroupTurn | None = None,
+                        through: int | None = None) -> dict:
         """P052 C: trusted, advisory, room-wide quota state frozen immediately before this Agent's provider submit.
-        ``remaining`` is BEFORE the current reply; the current Agent's ``remaining_after_this_reply`` already counts it."""
+        ``remaining`` is BEFORE the current reply; the current Agent's ``remaining_after_this_reply`` already counts it.
+        P052 r04: ``reply`` names the message this turn answers and its default recipient (the requester), and whether
+        that recipient could take the next turn if the reply does not ``finish``."""
         room = session.get(Conversation, rnd.conversation_id)
         names = self._display_names(session, room)  # type: ignore[arg-type]
         blocked = self._controls_block(session, rnd.conversation_id)
@@ -1135,8 +1247,20 @@ class WorkerConversationCore:
                               "can_reply_after_your_message": False,
                               "why_not": "not_in_this_discussion" if problem is None else problem})
         before = sum(max(0, g.quota - g.published_count) for g in grants)
+        reply = None
+        if turn is not None:
+            trigger = turn.captured_reply_to
+            parent = session.get(ConversationMessage, trigger) if trigger else None
+            if parent is None or (through is not None and parent.ordinal > through):
+                trigger, parent = None, None
+            requester = self._requester(session, turn, trigger)
+            peer = next((p for p in peers if p["agent_id"] == requester), None)
+            reply = {"reply_to_ordinal": parent.ordinal if parent is not None else None,
+                     "default_to": requester, "default_to_name": names.get(requester, requester),
+                     "default_to_can_answer": bool(peer and peer.get("can_reply_after_your_message")),
+                     "default_to_remaining": peer["remaining"] if peer else None}
         return {"you": you, "peers": peers, "remaining_total_before_this_reply": before,
-                "remaining_total_after_this_reply": max(0, before - 1), "invitation": invitation,
+                "remaining_total_after_this_reply": max(0, before - 1), "invitation": invitation, "reply": reply,
                 "reply_guide_chars": GROUP_REPLY_GUIDE_CHARS, "continue_max_chars": GROUP_REPLY_CONTINUE_MAX_CHARS}
 
     def direct_quota_snapshot(self, session: Session, room: Conversation, agent_id: str) -> dict | None:
@@ -1172,7 +1296,8 @@ class WorkerConversationCore:
             ConversationParticipant.kind == PARTICIPANT_OWNER).order_by(ConversationMessage.ordinal.desc()).limit(1)).first()
 
     def bridge_direct_reply(self, session: Session, *, owner_message: ConversationMessage,
-                            reply: ConversationMessage, agent_id: str, actor_id: str, actor_assurance: str) -> dict | None:
+                            reply: ConversationMessage, agent_id: str, actor_id: str, actor_assurance: str,
+                            intent: str = INTENT_CONTINUE) -> dict | None:
         """P052 B1(a): runs INSIDE the transaction that commits an authenticated legacy direct Architect reply.
 
         * No in-scope peer @mentioned: nothing changes (legacy shape, no envelope).
@@ -1202,6 +1327,14 @@ class WorkerConversationCore:
         not_invited = None
         if latest is None or latest.message_id != owner_message.message_id:
             not_invited = "newer_owner_message"
+        elif session.scalar(select(GroupRound.round_id).where(
+                GroupRound.authorizing_message_id == owner_message.message_id).limit(1)) is not None:
+            # P052 r04 (R-15.26): single-use provenance.  An Owner message that already authorized any round (an Agent
+            # discussion, an Owner Renew/Continue citing it, ...) is SPENT: a delayed, reconciled or repeated reply to
+            # it can never open another bounded discussion.  Durable (committed rows), so it survives a restart.
+            not_invited = "authorization_spent"
+        elif intent == INTENT_FINISH:
+            not_invited = "finish_requested"
         elif self._unfinished_work(session, room.conversation_id, current):  # type: ignore[union-attr]
             # P052 r02 (Defect B): an Agent's invitation never closes, supersedes or cancels Owner-authorized work that
             # is still unfinished in this room (an open direct OR group round; any queued / reserved /
@@ -1248,7 +1381,7 @@ class WorkerConversationCore:
                        decision="architect_direct_invitation", authorizing_message_id=owner_message.message_id,
                        closed_round_id=None if closed is None else closed.round_id,
                        grants=self._grants_view(session, rnd))
-            self._create_pass(session, rnd, 0, invited)
+            self._create_pass(session, rnd, 0, invited, {peer: reply.message_id for peer in invited})
         self._note(session, "invitation_checked", room.conversation_id, message_id=reply.message_id,  # type: ignore[union-attr]
                    sender_agent_id=agent_id, to=refs, considered_message_id=owner_message.message_id,
                    latest_owner_message_id=None if latest is None else latest.message_id,
@@ -1358,6 +1491,8 @@ class WorkerConversationCore:
         if row is None:
             return []
         message, sender = row
+        if self.message_intent(session, message.message_id) == INTENT_FINISH:
+            return []  # P052 r04: an explicit final answer asks nobody; its recipient is not "waiting"
         targets = [p.party_ref for p in session.scalars(select(MessageParty).where(
             MessageParty.message_id == message.message_id, MessageParty.role == "to"))
             if p.party_ref not in (PARTY_OWNER_REF, sender)]
@@ -1400,6 +1535,14 @@ class WorkerConversationCore:
                            "ordinal": message.ordinal, "reason": reason})
         return result
 
+    def _latest_agent_finished(self, session: Session, conversation_id: str, rnd: GroupRound) -> bool:
+        """True when the round's latest Agent message explicitly ended the discussion (``finish``)."""
+        row = session.execute(select(MessageEnvelope.message_id, MessageEnvelope.turn_id).join(
+            ConversationMessage, ConversationMessage.message_id == MessageEnvelope.message_id).where(
+            ConversationMessage.conversation_id == conversation_id, MessageEnvelope.round_id == rnd.round_id,
+            MessageEnvelope.sender_agent_id.is_not(None)).order_by(ConversationMessage.ordinal.desc()).limit(1)).first()
+        return row is not None and self.message_intent(session, row[0], row[1]) == INTENT_FINISH
+
     def continue_round(self, actor: ActorContext, project_id: object, *, task_id: object = None) -> dict:
         """P052 D2: the explicit Owner continuation of a finished discussion whose last Agent message addressed a peer
         that had no reply left.  Opens a fresh round (same participants, N each, provenance = the room's latest Owner
@@ -1412,9 +1555,9 @@ class WorkerConversationCore:
             current = self._current_round(session, room.conversation_id)
             if current is None or current.state != ROUND_AWAITING_OWNER:
                 raise ConversationConflict("There is no finished discussion to continue")
-            waiting = [u["agent_id"] for u in self._unanswered(session, room, current)
-                       if u["reason"] == "quota_exhausted"]
-            waiting = [a for a in waiting if self._invite_problem(session, room, a, inviter=None) is None]
+            unanswered = {u["agent_id"]: u["message_id"] for u in self._unanswered(session, room, current)
+                          if u["reason"] == "quota_exhausted"}
+            waiting = [a for a in unanswered if self._invite_problem(session, room, a, inviter=None) is None]
             if not waiting:
                 raise ConversationConflict("No addressed Agent is waiting for a reply; write a new message instead")
             latest = self._latest_owner_message(session, room.conversation_id)
@@ -1441,7 +1584,7 @@ class WorkerConversationCore:
             self._note(session, "round_opened", room.conversation_id, round_id=rnd.round_id, round_no=number,
                        decision="owner_continue", authorizing_message_id=rnd.authorizing_message_id,
                        grants=self._grants_view(session, rnd))
-            self._create_pass(session, rnd, 0, waiting)
+            self._create_pass(session, rnd, 0, waiting, {a: unanswered[a] for a in waiting})
             session.flush()
             return self._round_view(session, rnd)
         return self._tx(write)
@@ -1520,14 +1663,20 @@ class WorkerConversationCore:
                                grants=self._grants_view(session, rnd))
                     return ClaimResult("reserved", turn.turn_id, turn.agent_id,
                                        {"pass": turn.pass_no, "position": turn.position, "attempt": turn.attempt})
-                eligible = self._eligible_for_next_pass(session, rnd)
+                eligible, refused = self._next_pass_triggers(session, rnd)
+                self._note(session, "next_turn_decided", conversation_id, round_id=rnd.round_id,
+                           round_no=rnd.round_no, pass_no=rnd.current_pass + 1, next_turn=list(eligible),
+                           declined=sorted(refused.items()), grants=self._grants_view(session, rnd))
                 if not eligible:
                     rnd.state = ROUND_AWAITING_OWNER
+                    reasons = set(refused.values())
+                    reason = ("finish_requested" if "finish_requested" in reasons else "quota_exhausted"
+                              if "quota_exhausted" in reasons else "no_addressed_peer_with_quota")
                     self._note(session, "round_awaiting_owner", conversation_id, round_id=rnd.round_id,
                                round_no=rnd.round_no, from_state=ROUND_OPEN, to_state=ROUND_AWAITING_OWNER,
-                               reason="no_addressed_peer_with_quota", grants=self._grants_view(session, rnd))
+                               reason=reason, grants=self._grants_view(session, rnd))
                     return ClaimResult("awaiting_owner")
-                self._create_pass(session, rnd, rnd.current_pass + 1, eligible)
+                self._create_pass(session, rnd, rnd.current_pass + 1, list(eligible), eligible)
                 session.flush()
             raise ConversationStoreError("Turn queue is inconsistent")  # pragma: no cover - defensive
         return self._tx(write)
@@ -1627,7 +1776,8 @@ class WorkerConversationCore:
             payload = TurnPayload(turn.turn_id, turn.correlation_id, turn.conversation_id, turn.agent_id,
                                   turn.round_id, after, through, grant.quota - grant.published_count,  # type: ignore[union-attr]
                                   tuple(events), self._gaps(session, member),  # type: ignore[arg-type]
-                                  quota=self._quota_snapshot(session, rnd, turn.agent_id))  # type: ignore[arg-type]
+                                  quota=self._quota_snapshot(session, rnd, turn.agent_id, turn=turn,  # type: ignore[arg-type]
+                                                             through=through))
             turn.input_after_ordinal, turn.input_through_ordinal = after, through
             turn.state, turn.updated_at = TURN_SUBMITTED, _now()
             if self.trace.enabled:
@@ -1721,7 +1871,8 @@ class WorkerConversationCore:
                                   conversation_id=turn.conversation_id, agent_id=turn.agent_id, pass_no=turn.pass_no,
                                   position=last + 1, attempt=2, retry_of=turn.turn_id, state=TURN_QUEUED,
                                   catchup_choice=turn.catchup_choice, correlation_id=str(uuid.uuid4()),
-                                  created_at=_now(), updated_at=_now()))
+                                  created_at=_now(), updated_at=_now(),
+                                  captured_reply_to=turn.captured_reply_to))  # same causal trigger
         else:
             turn.state = TURN_FAILED
             grant = session.get(GroupRoundGrant, (turn.round_id, turn.agent_id))
@@ -1729,9 +1880,23 @@ class WorkerConversationCore:
                 grant.failed = True
 
     # ------------------------------------------------------------------ engine: reply
-    def capture_reply(self, turn_id: str, text: object, *, to: object = None, reply_to: object = None) -> dict:
-        """Durably store the correlated reply of an ACCEPTED turn before publication (no quota spent yet)."""
-        body = _architect_body(text)
+    def capture_reply(self, turn_id: str, text: object, *, to: object = None, reply_to: object = None,
+                      intent: object = None) -> dict:
+        """Durably store the correlated reply of an ACCEPTED turn before publication (no quota spent yet).
+
+        P052 r04 (R-15.26): three separate controls.  ``reply_to`` = the turn's durable causal trigger (recorded at queue
+        time), unless the adapter names another message this turn received.  ``to`` = the actual recipient: explicit
+        adapter ``to``, else the resolved ``@names`` of the text (a redirect), else the REQUESTER (the trigger's sender;
+        the Owner for an Owner-authorized request).  The Owner's constant presence never implies ``to=Owner``.
+        ``intent`` = continue | finish, from the adapter or the reply's trailing control line (removed from the body)."""
+        control = parse_reply_control(_architect_body(text))
+        body = _architect_body(control.body)
+        next_intent, source = control.intent, control.source
+        if intent is not None:
+            if intent not in (INTENT_CONTINUE, INTENT_FINISH):
+                next_intent, source = INTENT_FINISH, CONTROL_INVALID
+            else:
+                next_intent, source = intent, CONTROL_EXPLICIT  # type: ignore[assignment]
 
         def write(session: Session) -> dict:
             turn = session.get(GroupTurn, turn_id)
@@ -1743,16 +1908,21 @@ class WorkerConversationCore:
                 return self._turn_view(turn)
             if turn.state != TURN_ACCEPTED:
                 raise ConversationConflict("Only an accepted turn can capture a reply")
-            refs = self._reply_targets(session, turn, to, body)
-            if reply_to is not None:
-                parent = session.get(ConversationMessage, reply_to) if isinstance(reply_to, str) else None
+            parent_id = reply_to if reply_to is not None else turn.captured_reply_to
+            if parent_id is not None:
+                parent = session.get(ConversationMessage, parent_id) if isinstance(parent_id, str) else None
                 if (parent is None or parent.conversation_id != turn.conversation_id
                         or parent.ordinal > (turn.input_through_ordinal or 0)):
-                    raise InvalidConversationInput("reply_to does not name a message this turn received")
-            turn.captured_reply, turn.captured_to = body, json.dumps(refs)
-            turn.captured_reply_to, turn.state, turn.updated_at = reply_to, TURN_REPLY_CAPTURED, _now()  # type: ignore[assignment]
+                    if reply_to is not None:
+                        raise InvalidConversationInput("reply_to does not name a message this turn received")
+                    parent_id = None  # a trigger the frozen input did not contain is never claimed as answered
+            refs, to_source = self._reply_targets(session, turn, to, body, trigger=parent_id, with_source=True)
+            turn.captured_reply = body
+            turn.captured_to = json.dumps({"to": refs, "next": next_intent, "source": source})
+            turn.captured_reply_to, turn.state, turn.updated_at = parent_id, TURN_REPLY_CAPTURED, _now()
             self._note(session, "reply_captured", turn.conversation_id, turn_id=turn.turn_id, round_id=turn.round_id,
-                       agent_id=turn.agent_id, to=refs, response_text=body)
+                       agent_id=turn.agent_id, to=refs, to_source=to_source, reply_to_id=parent_id,
+                       intent=next_intent, intent_source=source, response_text=body)
             return self._turn_view(turn)
         return self._tx(write)
 
@@ -1793,10 +1963,40 @@ class WorkerConversationCore:
             return []
         return list(self.resolve_mentions(session, room, text, exclude=turn.agent_id).refs)
 
-    def _reply_targets(self, session: Session, turn: GroupTurn, to: object, text: str = "") -> list[str]:
+    def _requester(self, session: Session, turn: GroupTurn, trigger: str | None) -> str:
+        """The default recipient of a reply: the sender of its causal trigger when that is a peer Agent still
+        legitimately in this room (not released), otherwise the Owner."""
+        if trigger is None:
+            return PARTY_OWNER_REF
+        envelope = session.get(MessageEnvelope, trigger)
+        sender = envelope.sender_agent_id if envelope is not None else None
+        if sender is None:
+            message = session.get(ConversationMessage, trigger)
+            participant = session.get(ConversationParticipant, message.sender_participant_id) if message else None
+            sender = participant.agent_id if participant is not None else None
+        room = session.get(Conversation, turn.conversation_id)
+        member = self._member(session, turn.conversation_id, sender) if sender else None
+        if (sender is None or sender == turn.agent_id or room is None or self._assignment(session, room, sender) is None
+                or member is None or member.state == MEMBER_RELEASED):
+            return PARTY_OWNER_REF
+        return sender
+
+    def _reply_targets(self, session: Session, turn: GroupTurn, to: object, text: str = "", *,
+                       trigger: str | None = None, with_source: bool = False):
+        refs, source = self._reply_targets_src(session, turn, to, text, trigger)
+        return (refs, source) if with_source else refs
+
+    def _reply_targets_src(self, session: Session, turn: GroupTurn, to: object, text: str,
+                           trigger: str | None) -> tuple[list[str], str]:
         if to is None:
             mentioned = self._mention_targets(session, turn, text)
-            return mentioned or [PARTY_OWNER_REF]
+            if mentioned:
+                return mentioned, "mention"
+            requester = self._requester(session, turn, trigger)
+            return [requester], "requester" if requester != PARTY_OWNER_REF or trigger is not None else "owner_default"
+        return self._explicit_targets(session, turn, to), "adapter"
+
+    def _explicit_targets(self, session: Session, turn: GroupTurn, to: object) -> list[str]:
         if not isinstance(to, (list, tuple)) or not to or len(to) > MAX_TARGETS:
             raise InvalidConversationInput("to must be a non-empty list")
         members = {m.agent_id for m in self._members(session, turn.conversation_id) if m.state != MEMBER_RELEASED}
@@ -1842,12 +2042,12 @@ class WorkerConversationCore:
             session.flush()
             session.add(MessageEnvelope(message_id=message.message_id, reply_to_message_id=turn.captured_reply_to,
                                         round_id=turn.round_id, turn_id=turn.turn_id, sender_agent_id=turn.agent_id))
-            refs = json.loads(turn.captured_to or "[]")
+            refs, intent, source = self._captured(turn)
             grant = session.get(GroupRoundGrant, (turn.round_id, turn.agent_id))
             grant.published_count += 1  # type: ignore[union-attr]  # CHECK forbids overspend
             # P052: the one Agent-initiated invitation of a direct request, atomically with this publication; invited
             # members join BEFORE the parties are written so this message is in their audience.
-            self._maybe_invite(session, turn, refs, turn.captured_reply or "")
+            self._maybe_invite(session, turn, refs, turn.captured_reply or "", intent=intent)
             self._write_parties(session, message.message_id, turn.conversation_id, refs)
             turn.state, turn.reply_message_id, turn.updated_at = TURN_PUBLISHED, message.message_id, _now()
             session.flush()
@@ -1856,8 +2056,8 @@ class WorkerConversationCore:
                 self._note(session, "reply_published", turn.conversation_id, turn_id=turn.turn_id,
                            round_id=turn.round_id, round_no=rnd.round_no if rnd else None, agent_id=turn.agent_id,
                            message_id=message.message_id, ordinal=ordinal, sender_kind=member.role,  # type: ignore[union-attr]
-                           to=refs, chars=len(message.body),
-                           grants=self._grants_view(session, rnd) if rnd else None)
+                           to=refs, reply_to_id=turn.captured_reply_to, intent=intent, intent_source=source,
+                           chars=len(message.body), grants=self._grants_view(session, rnd) if rnd else None)
             if self.before_publish_commit is not None:
                 self.before_publish_commit()
             view = self._turn_view(turn)
@@ -1865,8 +2065,9 @@ class WorkerConversationCore:
             return view
         return self._tx(write)
 
-    def complete(self, turn_id: str, text: object, *, to: object = None, reply_to: object = None) -> dict:
-        self.capture_reply(turn_id, text, to=to, reply_to=reply_to)
+    def complete(self, turn_id: str, text: object, *, to: object = None, reply_to: object = None,
+                 intent: object = None) -> dict:
+        self.capture_reply(turn_id, text, to=to, reply_to=reply_to, intent=intent)
         return self.publish(turn_id)
 
     # ------------------------------------------------------------------ engine: recovery / reconciliation
@@ -1918,7 +2119,8 @@ class WorkerConversationCore:
             return self._turn_view(turn)  # type: ignore[arg-type]
         view = self._tx(write)
         if view["state"] == TURN_ACCEPTED and found.status == LOOKUP_REPLY and found.text:
-            view = self.complete(turn_id, found.text, to=list(found.to) if found.to else None, reply_to=found.reply_to)
+            view = self.complete(turn_id, found.text, to=list(found.to) if found.to else None, reply_to=found.reply_to,
+                                 intent=found.intent)
         return view
 
     # ------------------------------------------------------------------ views
@@ -1975,7 +2177,8 @@ class WorkerConversationCore:
             stop = None
             if rnd is not None and rnd.state == ROUND_AWAITING_OWNER:
                 stop = "quota_exhausted" if any(u["reason"] == "quota_exhausted" for u in unanswered) \
-                    else "unanswered" if unanswered else "natural"
+                    else "unanswered" if unanswered else "finished" if self._latest_agent_finished(
+                        session, room.conversation_id, rnd) else "natural"
             return {
                 "conversation_id": room.conversation_id,
                 "controls": {"paused": bool(controls and controls.paused),

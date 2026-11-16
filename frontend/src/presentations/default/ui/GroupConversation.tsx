@@ -51,6 +51,8 @@ function roomState(info: GroupStatus): { tone: 'idle' | 'active' | 'warning' | '
     // P052: a natural stop and an exhausted reply limit are different facts; neither claims a model was contacted.
     if (info.stop_reason === 'quota_exhausted') return { tone: 'warning', text: 'Лимит ответов исчерпан · последнее обращение по @имени осталось без ответа', live: false };
     if (info.stop_reason === 'unanswered') return { tone: 'warning', text: 'Обсуждение остановлено · последнее обращение по @имени осталось без ответа', live: false };
+    // P052 r04: an Agent marked its answer final; the spent allowance is not reusable by Agents.
+    if (info.stop_reason === 'finished') return { tone: 'idle', text: 'Обсуждение завершено финальным ответом агента · продолжит только новое сообщение Owner', live: false };
     return { tone: 'idle', text: 'Обсуждение завершилось само · следующее сообщение Owner откроет новое', live: false };
   }
   if (info.round && info.driver.running) return { tone: 'active', text: 'Агенты отвечают по очереди', live: false };
@@ -74,6 +76,9 @@ const UNANSWERED_TEXT: Record<string, string> = {
   newer_owner_message: 'приглашение не открыло обсуждение: Owner уже написал новое сообщение',
   pending_owner_request: 'приглашение не открыло обсуждение: незавершённый запрос Owner в этой комнате не прерывается',
   peer_unavailable: 'адресат сейчас не может ответить',
+  // P052 r04: the Owner authorization behind this request was already used; only a new Owner message or Renew refills it.
+  authorization_spent: 'разрешение Owner на обсуждение уже израсходовано — нужно новое сообщение Owner',
+  finish_requested: 'агент завершил обсуждение финальным ответом',
   ...UNSUPPORTED_TEXT,
 };
 
@@ -383,6 +388,7 @@ export function MessageAddress({ message, info, refPrefix }: { message: Conversa
   return <>
     {label && <span className="rosc-chat-to">→ {label}</span>}
     {message.group?.reply_to_ordinal ? <span className="rosc-chat-to">↩ #{message.group.reply_to_ordinal}</span> : null}
+    {message.group?.next === 'finish' ? <span className="rosc-chat-to" title="Агент завершил обсуждение">✓ финальный ответ</span> : null}
     <button type="button" className="rosc-chat-ref" aria-label={`Скопировать ссылку на сообщение ${message.ordinal}`}
       title={`Скопировать ссылку ${reference}`}
       onClick={async () => {

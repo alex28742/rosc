@@ -17,6 +17,10 @@ from test_p047_owner_qa_corrections import NativeFakeRuntime, P047Case
 from rosc.mentions import find_mentions
 from rosc.worker_conversation import (GROUP_REPLY_CONTINUE_MAX_CHARS, SUBMIT_NOT_ACCEPTED, SubmitOutcome)
 
+# P052 r04 (R-15.26): a reply to a peer goes to that peer and may earn it the next turn; an explicit final answer
+# ends the chain with the provider-neutral control line (removed from the visible message).
+FIN = '\n<rosc-control next="finish"/>'
+
 
 class ScriptedArchitect(NativeFakeRuntime):
     """Fake Architect runtime answering from ``replies`` in order (direct AND group turns share it)."""
@@ -173,15 +177,15 @@ class SixTurnWalkthroughTests(P052Case):
     def test_owner_continue_delivers_the_unanswered_final_message_once(self) -> None:
         self.run_six()
         final = self.messages()[-1]["body"]
-        self.arch_runtime.replies = ["Принято, B утверждён."]
+        self.arch_runtime.replies = ["Принято, B утверждён." + FIN]  # r04: default to=Claude; finish ends it
         cont = self.api.post(f"{self.url()}/continue")
         self.assertEqual(cont.status_code, 200, cont.text)
         self.settle()
         self.assertEqual(len(self.arch_texts()), 4)
         self.assertIn(final, self.arch_texts()[3])
-        self.assertEqual(len(self.runner.calls), 3)  # Claude was not addressed again: no turn
+        self.assertEqual(len(self.runner.calls), 3)  # r04: the Architect finished, so Claude gets no turn
         status = self.status()
-        self.assertEqual(status["stop_reason"], "natural")
+        self.assertEqual(status["stop_reason"], "finished")
         self.assertEqual(status["round"]["grants"][self.arch]["published"], 1)
         self.assertEqual(self.api.post(f"{self.url()}/continue").status_code, 409)  # never self-renews
         bodies = [m["body"] for m in self.messages()]
@@ -221,7 +225,7 @@ class InvitationRulesTests(P052Case):
 
     def test_owner_to_worker_direct_then_at_architect_invites_once(self) -> None:
         self.runner.replies = ["@Architect посмотри, пожалуйста, вариант A."]
-        self.arch_runtime.replies = ["Вариант A подходит."]  # no mention -> natural stop
+        self.arch_runtime.replies = ["Вариант A подходит." + FIN]  # r04: final answer to Claude -> stop
         sent = self.post("Claude, как лучше?", [self.claude_agent])
         self.assertEqual(sent.json()["dispatch"]["mode"], "direct")
         self.settle()
@@ -230,7 +234,7 @@ class InvitationRulesTests(P052Case):
         quota = envelope(self.arch_texts()[0])["quota"]
         self.assertEqual(quota["you"]["remaining_after_this_reply"], 2)
         status = self.status()
-        self.assertEqual(status["stop_reason"], "natural")
+        self.assertEqual(status["stop_reason"], "finished")
         self.assertEqual(status["unanswered"], [])
         invite = envelope(self.runner.calls[0]["prompt"])["quota"]["invitation"]
         self.assertTrue({"Architect", "Claude-2"} <= {a["display_name"] for a in invite["agents"]})
@@ -239,16 +243,16 @@ class InvitationRulesTests(P052Case):
 
     def test_direct_reply_inviting_two_workers_opens_one_three_agent_discussion(self) -> None:
         self.arch_runtime.replies = ["@Claude и @Claude-2, сравните варианты."]
-        self.runner.replies = ["Вариант A.", "Вариант B."]  # both answer the Owner: natural stop
+        self.runner.replies = ["Вариант A." + FIN, "Вариант B." + FIN]  # r04: both answer the Architect and finish
         self.direct("Спроси обоих")
         self.assertEqual(self.grants(), {self.arch: (1, 3), self.claude_agent: (1, 3), self.second: (1, 3)})
         self.assertEqual(len(self.runner.calls), 2)
         self.assertEqual(self.fetch("SELECT count(*) FROM group_rounds"), [(1,)])
-        self.assertEqual(self.status()["stop_reason"], "natural")
+        self.assertEqual(self.status()["stop_reason"], "finished")
 
     def test_released_member_is_never_re_invited_by_an_agent(self) -> None:
         self.arch_runtime.replies = ["@Claude проверь", "@Claude ещё раз"]
-        self.runner.replies = ["ok"]
+        self.runner.replies = ["ok" + FIN]
         self.direct("первый")
         self.assertEqual(self.api.post(f"{self.url()}/members/{self.claude_agent}/release").status_code, 200)
         self.direct("второй")
@@ -292,7 +296,7 @@ class InvitationRulesTests(P052Case):
 
     def test_pause_during_discussion_holds_then_resumes_within_the_same_grants(self) -> None:
         self.arch_runtime.replies = ["@Claude проверь"]
-        self.runner.replies = ["Проверено."]
+        self.runner.replies = ["Проверено." + FIN]
         with patch.object(self.app.state.group, "wake", return_value=False):
             self.direct("старт")
         self.api.post(f"{self.url()}/controls", json={"paused": True})
@@ -363,7 +367,7 @@ class AtomicityTests(P052Case):
 
     def test_lost_driver_wake_keeps_a_durable_round_that_the_owner_resumes_once(self) -> None:
         self.arch_runtime.replies = ["@Claude проверь"]
-        self.runner.replies = ["Сделано."]
+        self.runner.replies = ["Сделано." + FIN]
         with patch.object(self.app.state.group, "wake", side_effect=RuntimeError("lost")):
             self.direct("старт")
         self.assertEqual(len(self.runner.calls), 0)
@@ -376,7 +380,7 @@ class AtomicityTests(P052Case):
 
     def test_identical_retry_of_the_owner_message_grants_nothing_new(self) -> None:
         self.arch_runtime.replies = ["@Claude проверь"]
-        self.runner.replies = ["ok"]
+        self.runner.replies = ["ok" + FIN]
         self.direct("старт", key="owner-retry-key-1")
         again = self.direct("старт", key="owner-retry-key-1")
         self.assertEqual(again.status_code, 200)

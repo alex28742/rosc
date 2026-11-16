@@ -505,14 +505,15 @@ class GroupConversationBridge:
         return "\n".join(parts), catchup
 
     def attach_direct_reply(self, session: Session, *, owner_message: ConversationMessage, reply: ConversationMessage,
-                            agent_id: str, actor: ActorContext, catchup: dict | None = None) -> dict | None:
+                            agent_id: str, actor: ActorContext, catchup: dict | None = None,
+                            intent: str = "continue") -> dict | None:
         """Inside the Architect reply's commit transaction (see ``WorkerConversationCore.bridge_direct_reply``).  The
         provider answered, so the catch-up this turn carried (and the Owner message itself) is now applied."""
         if catchup is not None:
             self._core.advance_direct_cursor(session, owner_message.conversation_id, agent_id, catchup["epoch"],
                                              catchup["lane_id"], owner_message.ordinal)
         return self._core.bridge_direct_reply(session, owner_message=owner_message, reply=reply, agent_id=agent_id,
-                                              actor_id=actor.actor_id, actor_assurance=actor.assurance)
+                                              actor_id=actor.actor_id, actor_assurance=actor.assurance, intent=intent)
 
     def authorize_round(self, actor: ActorContext, project_id: int, task_id: int | None, *, agents: object,
                         quota: object = None, renew: bool = False) -> dict:

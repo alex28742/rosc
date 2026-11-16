@@ -58,7 +58,7 @@ EVENTS = frozenset({
     "architect_reply_received", "architect_delivery_state", "invitation_checked", "round_opened", "round_closed",
     "round_awaiting_owner", "turn_queued", "turn_reserved", "turn_cancelled", "dispatch_attempted", "transport_request",
     "transport_outcome", "reply_captured", "reply_published", "driver_started", "driver_stopped", "wake_skipped",
-    "wake_failed"})
+    "wake_failed", "next_turn_decided"})
 
 _UUID = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$")
 _CODE = re.compile(r"^[a-z][a-z0-9_]{0,47}$")  # ROSC-defined reason/state/outcome constants only
@@ -77,9 +77,10 @@ FIELDS: dict[str, str] = {
     "scope": "code", "sender_kind": "code", "delivery_mode": "code", "route": "code", "state": "code",
     "from_state": "code", "to_state": "code", "reason": "code", "outcome": "code", "status": "code",
     "error_code": "code", "transport": "code", "stop_reason": "code", "mode": "code", "previous_mode": "code",
-    "decision": "code", "claim": "code",
+    "decision": "code", "claim": "code", "intent": "code", "intent_source": "code", "to_source": "code",
     "replayed": "bool", "this_reply_counts": "bool",
-    "to": "refs", "typed_refs": "refs", "selected_refs": "refs", "invited": "refs", "unknown_names": "count",
+    "to": "refs", "typed_refs": "refs", "selected_refs": "refs", "invited": "refs", "next_turn": "refs",
+    "unknown_names": "count",
     "declined": "declined", "quota_snapshot": "quota", "grants": "grants",
 }
 # Written only in body mode; in metadata mode only ``<field>_chars`` is recorded.
@@ -162,6 +163,12 @@ def _quota(snapshot: object) -> dict | None:
     for key in ("remaining_total_before_this_reply", "remaining_total_after_this_reply"):
         if _clean("count", snapshot.get(key)) is not None:
             result[key] = snapshot[key]
+    reply = snapshot.get("reply")
+    if isinstance(reply, dict):  # P052 r04: the turn's causal trigger and default recipient (never a name or body)
+        result["reply"] = {"reply_to_ordinal": _clean("count", reply.get("reply_to_ordinal")),
+                           "default_to": _ref(reply.get("default_to")),
+                           "default_to_can_answer": bool(reply.get("default_to_can_answer")),
+                           "default_to_remaining": _clean("count", reply.get("default_to_remaining"))}
     invitation = snapshot.get("invitation")
     if isinstance(invitation, dict):
         agents = [a for a in (entry(a) for a in invitation.get("agents") or [] if isinstance(invitation.get("agents"), list)) if a]

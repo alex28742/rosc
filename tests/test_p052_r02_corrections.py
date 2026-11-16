@@ -15,7 +15,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from test_p052_agent_mentions_quota import P052Case, _fetch_exec  # noqa: F401 - P052Case.fetch_exec is attached there
+from test_p052_agent_mentions_quota import FIN, P052Case, _fetch_exec  # noqa: F401 - P052Case.fetch_exec is attached there
 
 from rosc.mentions import find_mentions
 
@@ -233,7 +233,7 @@ class InvitationNonPreemptionTests(P052Case):
         self.assertEqual(len(self.runner.calls), 0)
 
     def test_invitation_still_opens_the_discussion_once_the_direct_request_finished(self) -> None:
-        self.runner.replies = ["auth в порядке", "ошибки обработаны"]
+        self.runner.replies = ["auth в порядке", "ошибки обработаны" + FIN]
         self.post("@Claude, audit auth", [])
         self.settle()
         self.assertEqual(len(self.runner.calls), 1)

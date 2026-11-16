@@ -21,7 +21,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from test_p052_agent_mentions_quota import P052Case
+from test_p052_agent_mentions_quota import FIN, P052Case
 from test_p052_r02_corrections import InvitationNonPreemptionTests
 
 from rosc import conversation_trace as ctrace
@@ -54,13 +54,13 @@ class TraceMixin:
 
 class LifecycleTests(TraceMixin, P052Case):
     def finished_first_round(self, task: str | None = None) -> None:
-        """Round #1: Owner -> Architect, Architect @Claude, Claude answers the Owner -> natural stop."""
+        """Round #1: Owner -> Architect, Architect @Claude, Claude answers the Architect with an explicit finish (r04)."""
         self.arch_runtime.replies = ["@Claude сколько 2+2?"]
-        self.runner.replies = ["4"]
+        self.runner.replies = ["4" + FIN]
         self.direct("Architect, спроси Claude", task=task)
         status = self.status(task)
         self.assertEqual(status["round"]["state"], "awaiting_owner")
-        self.assertEqual(status["stop_reason"], "natural")
+        self.assertEqual(status["stop_reason"], "finished")
         self.assertFalse(status["round_active"])  # P052 r03: finished = history, not an active conversation
 
     def test_owner_direct_after_finished_round_opens_one_fresh_bounded_round(self) -> None:
@@ -71,7 +71,7 @@ class LifecycleTests(TraceMixin, P052Case):
                 first = self.status(task)["round"]
                 calls = len(self.runner.calls)
                 self.arch_runtime.replies = [SENTINEL_ARCH]
-                self.runner.replies = [SENTINEL_CLAUDE]
+                self.runner.replies = [SENTINEL_CLAUDE + FIN]
                 self.direct(SENTINEL_OWNER, task=task)
                 status = self.status(task)
                 fresh = status["round"]
@@ -85,7 +85,7 @@ class LifecycleTests(TraceMixin, P052Case):
                                  {self.arch: (1, 3), self.claude_agent: (1, 3)})
                 self.assertEqual(len(self.runner.calls), calls + 1)  # exactly one Claude turn, no extra request
                 self.assertEqual(status["round"]["state"], "awaiting_owner")
-                self.assertEqual(status["stop_reason"], "natural")
+                self.assertEqual(status["stop_reason"], "finished")
                 self.assertFalse(status["round_active"])
                 self.assertEqual(status["invitation"], None)  # latest Agent message is Claude's reply, not a direct one
                 msgs = self.messages(task)
@@ -109,7 +109,7 @@ class LifecycleTests(TraceMixin, P052Case):
             return original(argv, **kw)
         self.runner.spawn = spawn
         self.arch_runtime.replies = ["@Claude ещё пример: 3+3?"]
-        self.runner.replies = ["6"]
+        self.runner.replies = ["6" + FIN]
         self.direct("ещё раз")
         self.assertTrue(seen["round_active"])
         self.assertEqual(seen["round"]["round_no"], 2)
@@ -218,10 +218,10 @@ class PendingRequestReasonTests(InvitationNonPreemptionTests):
 class DiagnosticsTests(TraceMixin, P052Case):
     def exchange(self, task: str | None = None) -> None:
         self.arch_runtime.replies = ["@Claude первый"]
-        self.runner.replies = ["первый ответ"]
+        self.runner.replies = ["первый ответ" + FIN]
         self.direct("старт", task=task)
         self.arch_runtime.replies = [SENTINEL_ARCH]
-        self.runner.replies = [SENTINEL_CLAUDE]
+        self.runner.replies = [SENTINEL_CLAUDE + FIN]
         self.direct(SENTINEL_OWNER, task=task)
 
     def test_defaults_are_off_and_off_writes_nothing(self) -> None:

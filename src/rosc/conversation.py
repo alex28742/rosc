@@ -17,6 +17,7 @@ Trust limits (read before relying on anything here):
 """
 from __future__ import annotations
 
+import json
 import re
 import uuid
 from datetime import datetime, timezone
@@ -29,7 +30,7 @@ from .authorization import (CONVERSATION_MESSAGE_CREATE, CONVERSATION_READ, Acto
                             ResourceScope, evaluate)
 from .models import (CONVERSATION_KIND_PROJECT, MAX_CLIENT_KEY, MAX_MESSAGE_BODY, PARTICIPANT_ARCHITECT,
                      PARTICIPANT_OWNER, PARTICIPANT_WORKER, AgentDefinition, Conversation, ConversationMessage,
-                     ConversationDelivery, ConversationParticipant, CONVERSATION_KIND_TASK, MessageEnvelope,
+                     ConversationDelivery, ConversationParticipant, CONVERSATION_KIND_TASK, GroupTurn, MessageEnvelope,
                      MessageParty, RECIPIENT_ARCHITECT, Project, ProjectIdentityError, Task, validate_project_identity)
 
 # Failure codes after which nothing can have reached the provider, so an explicit retry cannot duplicate a turn.
@@ -220,6 +221,17 @@ def group_metadata(session: Session, message_ids: list[str]) -> dict[str, dict]:
     for party in session.scalars(select(MessageParty).where(MessageParty.message_id.in_(list(envelopes))).order_by(
             MessageParty.message_id, MessageParty.role, MessageParty.party_ref)):
         parties.setdefault(party.message_id, {"to": [], "audience": []})[party.role].append(party.party_ref)
+    # P052 r04: the continuation intent of an Agent turn's reply (``finish`` = explicit final answer), metadata only.
+    intents: dict[str, str] = {}
+    turn_ids = [e.turn_id for e in envelopes.values() if e.turn_id]
+    if turn_ids:
+        for turn_id, captured in session.execute(select(GroupTurn.turn_id, GroupTurn.captured_to).where(
+                GroupTurn.turn_id.in_(turn_ids))):
+            try:
+                value = json.loads(captured) if captured else None
+            except ValueError:
+                value = None
+            intents[turn_id] = value.get("next", "continue") if isinstance(value, dict) else "continue"
     parents = [e.reply_to_message_id for e in envelopes.values() if e.reply_to_message_id]
     ordinals = {m.message_id: m.ordinal for m in session.scalars(select(ConversationMessage).where(
         ConversationMessage.message_id.in_(parents)))} if parents else {}
@@ -229,6 +241,7 @@ def group_metadata(session: Session, message_ids: list[str]) -> dict[str, dict]:
         "reply_to": envelope.reply_to_message_id,
         "reply_to_ordinal": ordinals.get(envelope.reply_to_message_id) if envelope.reply_to_message_id else None,
         "round_id": envelope.round_id, "turn_id": envelope.turn_id, "sender_agent_id": envelope.sender_agent_id,
+        "next": intents.get(envelope.turn_id) if envelope.turn_id else None,
     } for message_id, envelope in envelopes.items()}
 
 
