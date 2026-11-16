@@ -5,6 +5,9 @@ import type { GroupControls, LoadStatus } from './presentation/contracts';
 
 /** While Core reports work in this room (a running driver or a held turn) the status and history are re-read. */
 const ACTIVE_POLL_MS = 1500;
+/** P052 r03: after a legacy direct Architect reply the room is followed at most this long while a turn is still queued
+ * (the driver may not have claimed it yet); never an indefinite poll of an idle room. */
+const FOLLOW_WINDOW_MS = 20000;
 
 type Cache = { scope: string | null; status: LoadStatus; info: GroupStatus | null; error: string; busy: string | null; notice: string };
 const emptyFor = (scope: string | null): Cache => ({ scope, status: 'loading', info: null, error: '', busy: null, notice: '' });
@@ -56,7 +59,13 @@ export function useGroupConversation(api: CoreApi, projectId: string | null, tas
     if (scope && projectId) void load(scope, projectId, taskId);
   }, [scope, projectId, taskId, load]);
 
-  const working = Boolean(visible.info && (visible.info.driver.running || visible.info.holding_turn));
+  const followUntil = useRef(0);
+  const info = visible.info;
+  const blocked = Boolean(info && (info.controls.paused || info.controls.emergency_brake || info.catchup));
+  // A queued turn of an OPEN round counts as work only inside the bounded follow window (see onFollow).
+  const queued = Boolean(info && info.round?.state === 'open' && info.waiting.length > 0 && !blocked
+    && Date.now() < followUntil.current);
+  const working = Boolean(info && (info.driver.running || (info.holding_turn && info.holding_turn.state !== 'unknown') || queued));
   const wasWorking = useRef(false);
   useEffect(() => {
     if (!scope || !projectId) return;
@@ -99,6 +108,16 @@ export function useGroupConversation(api: CoreApi, projectId: string | null, tas
     if (scopeRef.current && projectId) void load(scopeRef.current, projectId, taskId);
   }, [load, projectId, taskId]);
 
+  /** P052 r03: a legacy direct Architect delivery finished.  Its reply may have opened a fresh bounded round whose peer
+   * turn runs right away: re-read the room AND the canonical history once, and follow a still-queued turn for a bounded
+   * window (polling itself only continues while Core reports work). */
+  const onFollow = useCallback(() => {
+    if (!scopeRef.current || !projectId) return;
+    followUntil.current = Date.now() + FOLLOW_WINDOW_MS;
+    void load(scopeRef.current, projectId, taskId);
+    onMessagesRef.current();
+  }, [load, projectId, taskId]);
+
   /** P047: ONE Owner Send = stored message + authorization; Core starts the reply itself (no Authorize/Start). */
   const onPost = useCallback((body: string, clientKey: string, to: string[]) =>
     act('post', (pid, tid) => api.sendGroupMessage(pid, tid, { client_key: clientKey, body, to }),
@@ -128,5 +147,5 @@ export function useGroupConversation(api: CoreApi, projectId: string | null, tas
   const onContinue = useCallback(() => act('continue', (pid, tid) => api.continueGroup(pid, tid)), [act, api]);
 
   return { status: visible.status, info: visible.info, error: visible.error, busy: visible.busy, notice: visible.notice, onReload, onPost,
-    onAuthorize, onStart, onControls, onRelease, onKeep, onCatchup, onReconcile, onContinue };
+    onAuthorize, onStart, onControls, onRelease, onKeep, onCatchup, onReconcile, onContinue, onFollow };
 }

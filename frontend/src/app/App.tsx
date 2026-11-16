@@ -110,6 +110,7 @@ export function App({ api = coreApi }: { api?: CoreApi }) {
       onSaveAgent={core.registryControls.onSaveAgent}
       onOpenProjectSettings={id => go({ kind: 'project', projectId: id, tab: 'settings' })}
       onClose={close}
+      diagnostics={core.diagnosticsControls}
     />}
     {modalOpen && <RegisterProject
       feedback={core.feedbackFor('modal')}

@@ -1,7 +1,7 @@
 // The only surface a presentation package sees. Presentations render these typed view models and call these
 // callbacks; they never reach the API client, the router or Core persistence.
 import type { ComponentType, ReactNode } from 'react';
-import type { AgentDefinition, AgentFormValues, ArchitectStatus, ContextAccess, ConversationMessage, GroupStatus, MessageRecipient, Project, PromptRevision, ProjectFormValues, RepairConfirmation, RoleAssignment, SpecRevision, SpecRevisionSummary, Task, TaskArchitectStatus, TaskAuthoring, TaskFormValues, ProjectWorker } from '../../core/models';
+import type { AgentDefinition, AgentFormValues, ArchitectStatus, ContextAccess, ConversationDiagnostics, ConversationMessage, GroupStatus, MessageRecipient, Project, PromptRevision, ProjectFormValues, RepairConfirmation, RoleAssignment, SpecRevision, SpecRevisionSummary, Task, TaskArchitectStatus, TaskAuthoring, TaskFormValues, ProjectWorker } from '../../core/models';
 import type { ScrollRegions } from '../scroll';
 
 export type LoadStatus = 'loading' | 'ready' | 'failed';
@@ -110,6 +110,17 @@ export type SettingsViewProps = {
   onSaveAgent: (agentId: string | null, values: AgentFormValues) => Promise<string | null>;
   onOpenProjectSettings: (projectId: string) => void;
   onClose: () => void;
+  /** P052 r03: local Conversation Diagnostics switches (absent in presentations that do not offer them). */
+  diagnostics?: DiagnosticsControls;
+};
+
+export type DiagnosticsControls = {
+  status: LoadStatus;
+  value: ConversationDiagnostics | null;
+  error: string;
+  busy: boolean;
+  onReload: () => void;
+  onChange: (change: { enabled?: boolean; include_bodies?: boolean }) => Promise<string | null>;
 };
 
 export type ProjectAssignmentsState = {
@@ -238,6 +249,8 @@ export type GroupControls = {
   onReconcile: () => Promise<string | null>;
   /** P052: Owner-only continuation after the reply limit left an addressed Agent unanswered. */
   onContinue: () => Promise<string | null>;
+  /** P052 r03: a legacy direct Architect delivery just finished; re-read room state and history (bounded follow-up). */
+  onFollow: () => void;
 };
 
 export type ConversationControls = {

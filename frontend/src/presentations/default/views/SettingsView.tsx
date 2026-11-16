@@ -1,6 +1,6 @@
 import { useState, type FormEvent } from 'react';
 import type { AgentDefinition, AgentFormValues } from '../../../core/models';
-import type { SettingsViewProps } from '../../../app/presentation/contracts';
+import type { DiagnosticsControls, SettingsViewProps } from '../../../app/presentation/contracts';
 import {
   AGENT_CAPABILITIES, AGENT_ICON_GLYPHS, AGENT_RUNTIME_OPTIONS, agentIcon, capabilityPreset,
   ROLE_REQUIRED_CAPABILITIES, runtimeLabel, type CapabilityPreset,
@@ -174,7 +174,48 @@ function AgentEditor({ agent, busy, projects, onSave, onOpenProjectSettings, onC
   </form>;
 }
 
-export function SettingsView({ state, projects, onRetry, onSaveAgent, onOpenProjectSettings, onClose }: SettingsViewProps) {
+const MODE_TEXT = { off: 'выключена — ничего не записывается', metadata: 'включена · только метаданные (без текстов)', full: 'включена · метаданные + полные тексты сообщений' } as const;
+
+/** P052 r03: local Conversation Diagnostics — two Owner switches; the effective mode is the running Core's own report. */
+export function ConversationDiagnosticsPanel({ controls }: { controls: DiagnosticsControls }) {
+  const [problem, setProblem] = useState('');
+  const value = controls.value;
+  const change = async (patch: { enabled?: boolean; include_bodies?: boolean }) => setProblem((await controls.onChange(patch)) ?? '');
+  const enabled = value?.enabled ?? false;
+  return <section className="rosc-card rosc-settings__diagnostics" aria-labelledby="rosc-diag-title">
+    <h3 id="rosc-diag-title">Диагностика разговоров</h3>
+    <p className="rosc-hint">Локальный журнал JSONL событий Project/Task Conversation: сообщения, @адресаты, решения о приглашении,
+      раунды и квоты, постановка и отправка ходов, ответы и причины остановки. Пишется только на этом компьютере
+      (<code>{value?.effective.location ?? 'diagnostics/conversations/'}</code> в каталоге данных ROSC), не синхронизируется и не отправляется.</p>
+    {controls.status === 'failed' && !value
+      ? <p className="rosc-alert" role="alert">Настройки диагностики недоступны: {controls.error}
+        {' '}<button type="button" className="rosc-btn rosc-btn--small" onClick={controls.onReload}>Повторить</button></p>
+      : !value ? <p className="rosc-hint">Загрузка…</p> : <>
+        <label className="rosc-settings__cap">
+          <input type="checkbox" checked={enabled} disabled={controls.busy}
+            onChange={event => void change({ enabled: event.target.checked })} />
+          <span>Conversation Diagnostics <small>(по умолчанию выключено; включение пишет только последующие события, выключение не удаляет уже записанное)</small></span>
+        </label>
+        <label className="rosc-settings__cap rosc-settings__cap--sub">
+          <input type="checkbox" checked={value.include_bodies} disabled={controls.busy || !enabled}
+            onChange={event => void change({ include_bodies: event.target.checked })} />
+          <span>Include message bodies — записывать полные тексты {!enabled && <small>(неактивно, пока диагностика выключена)</small>}</span>
+        </label>
+        <div className="rosc-settings__hint rosc-settings__hint--warn" role="note">
+          <strong>Внимание:</strong> журнал с полными текстами может содержать приватный текст проекта, промпты, секреты и
+          учётные данные, которые пользователь или агент вписал в сообщения, и другое чувствительное содержимое. Храните его
+          только локально. Автоматического удаления секретов из текста сообщений нет; служебные учётные данные ROSC
+          (токены, ключи, переменные окружения, argv процессов) в журнал не попадают ни в одном режиме.
+        </div>
+        <p className="rosc-hint" aria-live="polite">Сейчас: <strong>{MODE_TEXT[value.effective.mode]}</strong>
+          {value.effective.mode !== 'off' && <> · записано событий: {value.effective.writes}</>}
+          {value.effective.dropped > 0 && <> · <span className="rosc-alert">потеряно событий: {value.effective.dropped}{value.effective.problem ? ` (${value.effective.problem})` : ''}</span></>}</p>
+      </>}
+    {(problem || (controls.error && value)) && <p className="rosc-alert" role="alert">{problem || controls.error}</p>}
+  </section>;
+}
+
+export function SettingsView({ state, projects, onRetry, onSaveAgent, onOpenProjectSettings, onClose, diagnostics }: SettingsViewProps) {
   const [editingId, setEditingId] = useState<string | null | undefined>(undefined);
   const editing = editingId === undefined ? null : state.agents.find(agent => agent.agent_id === editingId) ?? null;
 
@@ -242,6 +283,8 @@ export function SettingsView({ state, projects, onRetry, onSaveAgent, onOpenProj
           Имя, иконка, Runtime, Provider, Model и capabilities — свойства Agent Definition. Роли Architect / Worker
           назначаются только внутри проекта. Регистрация и назначение не запускают сессию.
         </div>
+
+        {diagnostics && <ConversationDiagnosticsPanel controls={diagnostics} />}
       </div>
     </div>
   </Drawer>;

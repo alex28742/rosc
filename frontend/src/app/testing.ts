@@ -119,7 +119,8 @@ export const groupControls = (over: Partial<GroupControls> = {}): GroupControls 
   status: 'ready', info: groupStatus(), error: '', busy: null, notice: '', onReload: vi.fn(),
   onPost: vi.fn(async () => null), onAuthorize: vi.fn(async () => null), onStart: vi.fn(async () => null),
   onControls: vi.fn(async () => null), onRelease: vi.fn(async () => null), onKeep: vi.fn(async () => null),
-  onCatchup: vi.fn(async () => null), onReconcile: vi.fn(async () => null), onContinue: vi.fn(async () => null), ...over,
+  onCatchup: vi.fn(async () => null), onReconcile: vi.fn(async () => null), onContinue: vi.fn(async () => null),
+  onFollow: vi.fn(), ...over,
 });
 
 export function stubApi(over: Partial<{ [K in keyof CoreApi]: ReturnType<typeof vi.fn> }> = {}) {
@@ -145,6 +146,8 @@ export function stubApi(over: Partial<{ [K in keyof CoreApi]: ReturnType<typeof 
     chooseGroupCatchup: vi.fn(async () => ({})),
     reconcileGroup: vi.fn(async () => ({ reconciled: [] })),
     continueGroup: vi.fn(async () => ({ round: {}, conversation_id: 'c', started: true })),
+    getConversationDiagnostics: vi.fn(async () => ({ enabled: false, include_bodies: false, effective: { mode: 'off', writes: 0, dropped: 0, problem: null, location: 'diagnostics/conversations/conversation-trace.jsonl' } })),
+    updateConversationDiagnostics: vi.fn(async (change: { enabled?: boolean; include_bodies?: boolean }) => ({ enabled: change.enabled ?? false, include_bodies: change.include_bodies ?? false, effective: { mode: change.enabled ? (change.include_bodies ? 'full' : 'metadata') : 'off', writes: 0, dropped: 0, problem: null, location: 'diagnostics/conversations/conversation-trace.jsonl' } })),
     getTaskConversation: vi.fn(async () => conversationPage({ task_id: 'T0001' })),
     sendTaskConversationMessage: vi.fn(async (_projectId: string, _taskId: string, input: ConversationMessageInput) => ({
       message: conversationMessage(input.body, { recipient: input.recipient ?? null }), replayed: false,

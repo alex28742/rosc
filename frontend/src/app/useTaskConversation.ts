@@ -252,6 +252,14 @@ export function useTaskConversation(api: CoreApi, projectId: string | null, task
       : { ...prev, conversationId: message.conversation_id, messages: merge(prev.messages, [message]) });
   }, []);
   const group = useGroupConversation(api, projectId && taskId ? projectId : null, taskId, reloadGroupMessages, mergeGroupMessage);
+  // P052 r03: a finished legacy direct Architect delivery may have opened a bounded peer discussion: follow it (bounded).
+  const followGroup = group.onFollow;
+  const wasAwaiting = useRef<string | null>(null);
+  useEffect(() => {
+    if (awaiting && scope) { wasAwaiting.current = scope; return; }
+    if (wasAwaiting.current && wasAwaiting.current === scope) followGroup();
+    wasAwaiting.current = null;
+  }, [awaiting, scope, followGroup]);
 
   const { scope: _scope, architect, taskArchitect, ...state } = visible;
   void _scope;

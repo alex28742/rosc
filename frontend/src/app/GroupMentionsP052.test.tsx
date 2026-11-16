@@ -114,9 +114,14 @@ describe('P052 typed @name addressing in the Project Conversation', () => {
     const status = room({ engagement: 'group', stop_reason: 'natural', unanswered: [],
       round: { round_id: 'r1', round_no: 1, state: 'awaiting_owner', per_agent_quota: 3, current_pass: 1, turns: [],
         grants: { [ARCH]: { quota: 3, published: 1, failed: false }, [CLAUDE]: { quota: 3, published: 1, failed: false } } } });
-    render(<App api={api(status)} />);
+    const stub = api(status);
+    render(<App api={stub} />);
     const panel = await ready(pcPanel);
-    expect(await within(panel).findByText(/Обсуждение завершилось само/)).toBeTruthy();
+    await within(panel).findByLabelText('Адресовать Claude');  // the room state has been read
+    // P052 r03: a naturally finished round is a past discussion: no group bar, no stale quota cards, no continuation.
+    expect(stub.getGroupStatus).toHaveBeenCalled();
+    expect(within(panel).queryByLabelText('Групповой чат')).toBeNull();
+    expect(within(panel).queryByText(/Обсуждение завершилось само/)).toBeNull();
     expect(within(panel).queryByRole('button', { name: 'Продолжить обсуждение' })).toBeNull();
   });
 });

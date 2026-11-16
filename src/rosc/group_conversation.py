@@ -120,6 +120,25 @@ class GroupConversationBridge:
         return self._support(agent, ROLE_ARCHITECT if architect is not None else ROLE_WORKER, room.project_id)
 
     # ------------------------------------------------------------------ helpers
+    def _trace(self, event: str, conversation_id: str, **fields) -> None:
+        """P052 r03 diagnostics outside a Core transaction (driver/wake boundaries).  OFF = immediate return."""
+        trace = self._core.trace
+        if not trace.enabled:
+            return
+        try:
+            with self._sessions() as session:
+                room = session.get(Conversation, conversation_id)
+                rnd = self._core._current_round(session, conversation_id)  # noqa: SLF001
+                if room is not None:
+                    fields.update(project_id=room.project_id, task_id=room.task_id,
+                                  scope="task" if room.task_id else "project")
+                if rnd is not None:
+                    fields.setdefault("round_id", rnd.round_id)
+                    fields.update(round_no=rnd.round_no, state=rnd.state)
+        except Exception:  # diagnostics never affect the driver
+            pass
+        trace.emit(event, conversation_id=conversation_id, **fields)
+
     def _authorize(self, actor: ActorContext, action: str, project_id: int, task_id: int | None) -> None:
         if not evaluate(self._policy, actor, action, ResourceScope(project_id=project_id, task_id=task_id)).allowed:
             raise ConversationDenied("Not authorized for this operation")
@@ -233,6 +252,7 @@ class GroupConversationBridge:
             latest_envelope = session.get(MessageEnvelope, latest_owner) if latest_owner else None
             # P047 r02: a direct request attached to a running group round keeps that round current.
             latest_round = latest_envelope.round_id if latest_envelope is not None else None
+            invitation = self._core.latest_invitation(session, room.conversation_id) if room is not None else None
         core = self._core.room_status(actor, project_id, task_id=task_id) if room is not None else None
         activity = None
         if core is not None and core["holding_turn"] is not None:
@@ -244,8 +264,15 @@ class GroupConversationBridge:
         grants = len(rnd["grants"]) if rnd and (rnd.get("authorizing_message_id") in (None, latest_owner)
                                                 or rnd["round_id"] == latest_round) else 0
         engagement = "group" if grants >= 2 or peer_addressed else "direct" if grants == 1 else "none"
+        # P052 r03: a finished round (awaiting_owner / closed) is history, never an active conversation.  The UI shows the
+        # group bar only while this is true; Owner-actionable states are reported separately (unanswered, failed, ...).
+        running = self.running(conversation_id) if conversation_id else False
+        round_active = bool(rnd is not None and (rnd["state"] == ROUND_OPEN or (core and core["holding_turn"])
+                                                 or running))
         return {
             "engagement": engagement,
+            "round_active": round_active,
+            "invitation": invitation,
             "conversation_id": conversation_id,
             "roster": roster,
             "names": names,
@@ -446,6 +473,9 @@ class GroupConversationBridge:
             held = self._core._holding_turn(session, conversation_id)  # noqa: SLF001
             if (controls is not None and (controls.paused or controls.emergency_brake)) or (
                     held is not None and held.state == TURN_UNKNOWN):
+                reason = ("emergency_brake" if controls is not None and controls.emergency_brake else "paused"
+                          if controls is not None and controls.paused else "unknown_turn")
+                self._trace("wake_skipped", conversation_id, reason=reason)
                 return False
         return self._kick(conversation_id)
 
@@ -539,14 +569,15 @@ class GroupConversationBridge:
         with self._lock:
             self._wanted.add(conversation_id)
             thread = self._drivers.get(conversation_id)
-            if thread is not None and thread.is_alive():
-                return False
-            thread = threading.Thread(target=self._drive, args=(conversation_id,), daemon=True,
-                                      name=f"rosc-group-{conversation_id[:8]}")
-            self._drivers[conversation_id] = thread
-            self._last[conversation_id] = {"state": "running", "at": _now_iso()}
-            thread.start()
-            return True
+            started = thread is None or not thread.is_alive()
+            if started:
+                thread = threading.Thread(target=self._drive, args=(conversation_id,), daemon=True,
+                                          name=f"rosc-group-{conversation_id[:8]}")
+                self._drivers[conversation_id] = thread
+                self._last[conversation_id] = {"state": "running", "at": _now_iso()}
+                thread.start()
+        self._trace("driver_started", conversation_id, reason=None if started else "already_running")
+        return started
 
     def wait(self, conversation_id: str, timeout: float = 30.0) -> None:
         """Test/ops seam: join the room's driver."""
@@ -565,8 +596,15 @@ class GroupConversationBridge:
                         # Leaving under the lock: a later _kick sees no live driver and starts a new one.
                         self._drivers.pop(conversation_id, None)
                         self._last[conversation_id] = {**last, "at": _now_iso()}
-                        return
-                    self._wanted.discard(conversation_id)
+                        leaving = True
+                    else:
+                        leaving = False
+                        self._wanted.discard(conversation_id)
+                if leaving:
+                    self._trace("driver_stopped", conversation_id, reason=last.get("reason"), steps=steps,
+                                turn_id=last.get("turn_id"), agent_id=last.get("agent_id"),
+                                error_code=last.get("error_code"))
+                    return
                 while steps < MAX_DRIVER_STEPS:
                     steps += 1
                     claim = self._core.claim_next(conversation_id)
@@ -591,6 +629,7 @@ class GroupConversationBridge:
                 self._drivers.pop(conversation_id, None)
                 self._wanted.discard(conversation_id)
                 self._last[conversation_id] = {"state": "stopped", "reason": "driver_error", "at": _now_iso()}
+            self._trace("driver_stopped", conversation_id, reason="driver_error", steps=steps)
 
     def reconcile(self, actor: ActorContext, project_id: int, task_id: int | None) -> dict:
         """Explicit Owner evidence reconciliation of the room's held turn.  Never re-submits; inconclusive evidence

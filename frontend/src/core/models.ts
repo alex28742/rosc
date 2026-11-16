@@ -141,8 +141,21 @@ export type GroupEngagement = 'none' | 'direct' | 'group';
 export type GroupUnanswered = { agent_id: string; from_agent_id: string; message_id: string; ordinal: number; reason: string };
 /** P052: why a finished discussion stopped: nobody was addressed (`natural`), a reply limit was reached, or another reason. */
 export type GroupStopReason = 'natural' | 'quota_exhausted' | 'unanswered' | null;
+/** P052 r03: the recorded outcome of a legacy direct Architect reply's invitation check (no body, no trace needed). */
+export type GroupInvitation = {
+  message_id: string; ordinal: number; decision: 'accepted' | 'declined' | 'unrecorded'; reason: string | null;
+  round_id: string | null; round_no: number | null; owner_message_id: string;
+};
+/** P052 r03: Owner switches of local Conversation Diagnostics and the honest effective mode of the running Core. */
+export type ConversationDiagnostics = {
+  enabled: boolean; include_bodies: boolean;
+  effective: { mode: 'off' | 'metadata' | 'full'; writes: number; dropped: number; problem: string | null; location: string };
+};
 export type GroupStatus = {
   engagement?: GroupEngagement;
+  /** P052 r03: true only while the current round is running (open, a held turn or a live driver); a finished round is history. */
+  round_active?: boolean;
+  invitation?: GroupInvitation | null;
   unanswered?: GroupUnanswered[];
   stop_reason?: GroupStopReason;
   conversation_id: string | null;

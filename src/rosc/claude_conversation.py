@@ -364,7 +364,8 @@ class ClaudeConversationTransport:
     def __init__(self, session_factory: sessionmaker[Session], evidence_dir: Path, *, model: str,
                  max_budget_usd: float = DEFAULT_MAX_BUDGET_USD, timeout: float = DEFAULT_TIMEOUT_SECONDS,
                  cli: str | None = None, runner: ProcessRunner | None = None,
-                 environ: Mapping[str, str] | None = None, clock: Callable[[], float] = time.monotonic) -> None:
+                 environ: Mapping[str, str] | None = None, clock: Callable[[], float] = time.monotonic,
+                 trace: object | None = None) -> None:
         if not isinstance(model, str) or not re.fullmatch(r"[A-Za-z0-9._:\[\]-]{1,96}", model):
             raise TransportConfigError("an explicit model alias or id is required")
         if not (isinstance(max_budget_usd, (int, float)) and 0 < max_budget_usd <= 1.0):
@@ -379,6 +380,7 @@ class ClaudeConversationTransport:
         source = os.environ if environ is None else environ
         self._env = {k: v for k, v in source.items() if not k.startswith(_STRIPPED_ENV_PREFIXES)}
         self._clock = clock
+        self._trace = trace  # P052 r03: ConversationTrace (OFF = no-op); never receives argv or environment
 
     # ------------------------------------------------------------------ paths / leases
     def _lane_dir(self, lane: LaneRef) -> Path:
@@ -544,6 +546,12 @@ class ClaudeConversationTransport:
         resume = self._established(lane, turn_dir)
         prompt = self.build_prompt(lane, payload, context)
         argv = self.argv(lane, resume, context)
+        if self._trace is not None and self._trace.enabled:
+            # P052 r03: the exact stdin prompt ROSC hands to the CLI (never argv, env or the role/system text).
+            self._trace.emit("transport_request", transport="claude_cli", turn_id=payload.turn_id,
+                             correlation_id=payload.correlation_id, agent_id=lane.agent_id,
+                             conversation_id=lane.conversation_id, project_id=lane.project_id,
+                             mode="resume" if resume else "new", request_text=prompt)
         try:
             _private_dir(turn_dir)
             _write_atomic(turn_dir / "prompt.txt", prompt.encode())

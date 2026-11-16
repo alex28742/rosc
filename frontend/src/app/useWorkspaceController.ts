@@ -6,6 +6,7 @@ import type { AgentRegistryState, AssignmentIntent, EngineNotice, Feedback, Load
 import { assignmentBaseline, ROLE_REQUIRED_CAPABILITIES } from './presentation/contracts';
 import { projectIdOf } from './route';
 import { useGroupConversation } from './useGroupConversation';
+import { useConversationDiagnostics } from './useConversationDiagnostics';
 
 export type Layer = 'dashboard' | 'project' | 'task' | 'modal' | 'settings';
 
@@ -661,6 +662,7 @@ export function useWorkspaceController({ route, routeKey, go }: Navigation, api:
     } else { architectSeq.current++; setArchitect(NO_ARCHITECT); accessSeq.current++; setAccess(NO_ACCESS); }
   }, [projectId, loadArchitect]);
   const settingsRoute = route.kind === 'settings';
+  const diagnosticsControls = useConversationDiagnostics(api, settingsRoute);
   useEffect(() => {
     if (settingsRoute) void loadAgents();
     else registrySeq.current++;
@@ -690,6 +692,15 @@ export function useWorkspaceController({ route, routeKey, go }: Navigation, api:
     const timer = setInterval(() => { void loadConversation(projectId); }, DELIVERY_POLL_MS);
     return () => clearInterval(timer);
   }, [projectId, awaitingReply, loadConversation]);
+  // P052 r03: when a legacy direct Architect delivery finishes, its reply may have opened a bounded peer discussion that
+  // runs at once; re-read the room state and history (bounded) even though the previous round was idle.
+  const followGroup = group.onFollow;
+  const wasAwaiting = useRef<string | null>(null);
+  useEffect(() => {
+    if (awaitingReply && projectId) { wasAwaiting.current = projectId; return; }
+    if (wasAwaiting.current && wasAwaiting.current === projectId) followGroup();
+    wasAwaiting.current = null;
+  }, [awaitingReply, projectId, followGroup]);
 
   /** Whether the current Project's Tools notice is on screen; kept across a close/reopen of the same Project. */
   const toolsTrackRef = useRef<{ projectId: string; warned: boolean; dismissed: boolean } | null>(null);
@@ -977,6 +988,7 @@ export function useWorkspaceController({ route, routeKey, go }: Navigation, api:
     layer, projects, projectsStatus, project, tasks: taskList.items, tasksStatus: taskList.status, task, busy, registrationOpen,
     feedbackFor, conversation, registry: registryState, projectTab,
     engineNotices, dismissEngineNotice: onDismissEngineNotice,
+    diagnosticsControls,
     registryControls: {
       state: registryState,
       onRetry: () => void loadAgents(),

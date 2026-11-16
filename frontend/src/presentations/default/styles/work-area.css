@@ -1214,6 +1214,15 @@
   color: var(--rosc-amber);
 }
 
+/* P052 r03: local Conversation Diagnostics (ROSC Settings). */
+.rosc-settings__diagnostics {
+  margin-top: 16px;
+}
+
+.rosc-settings__cap--sub {
+  margin-left: 22px;
+}
+
 .rosc-settings__hint ul {
   margin: 6px 0;
   padding-left: 18px;

@@ -32,6 +32,7 @@ from __future__ import annotations
 
 import json
 import random
+import threading
 import time
 import uuid
 from dataclasses import dataclass, field
@@ -47,6 +48,7 @@ from .authorization import (CONVERSATION_GROUP_CONTROL, CONVERSATION_MESSAGE_CRE
                             evaluate)
 from .conversation import (ConversationConflict, ConversationDenied, ConversationNotFound, ConversationStoreError,
                            InvalidConversationInput, UnsafeProjectIdentity, _architect_body, _body, _client_key)
+from .conversation_trace import ConversationTrace
 from .mentions import find_mentions
 from .models import (ASSIGNMENT_ACTIVE, CONVERSATION_KIND_PROJECT, CONVERSATION_KIND_TASK, GAP_OWNER_SKIP,
                      GAP_RELEASED_PERIOD, LANE_ACTIVE, LANE_INVALIDATED, MEMBER_ACTIVE, MEMBER_PASSIVE,
@@ -170,6 +172,26 @@ class ClaimResult:
     detail: dict = field(default_factory=dict)
 
 
+def _payload_text(payload: "TurnPayload") -> str:
+    """Body-mode trace projection of the exact room input ROSC hands to a dispatch adapter (TurnPayload events)."""
+    return json.dumps({"turn_id": payload.turn_id, "input_after_ordinal": payload.input_after_ordinal,
+                       "input_through_ordinal": payload.input_through_ordinal, "remaining": payload.remaining_replies,
+                       "omitted_ranges": [list(r) for r in payload.omitted_ranges],
+                       "events": [{"ordinal": e.ordinal, "message_id": e.message_id, "from": e.sender_kind,
+                                   "from_agent_id": e.sender_agent_id, "to": list(e.to), "body": e.body}
+                                  for e in payload.events]}, ensure_ascii=False)
+
+
+def _guidance_text(quota: dict | None) -> str | None:
+    if not quota:
+        return None
+    from .claude_conversation import quota_guidance  # local: avoids an import cycle
+    try:
+        return quota_guidance(quota)
+    except Exception:  # diagnostics never break dispatch
+        return None
+
+
 class WorkerConversationCore:
     """Bounded internal Core for group rooms (PC and every TC).  Owner actions take the trusted ``ActorContext`` and are
     authorized before any lookup; engine steps (claim/dispatch/capture/publish/recover/reconcile) take no actor and can
@@ -185,6 +207,38 @@ class WorkerConversationCore:
         # P052 composition seam (set by the group bridge): why an in-scope Agent could NOT take a real turn now
         # (``None`` = it could).  DB-only, read-only.  Unset = every invitation fails closed.
         self.peer_problem: Callable[[Session, Conversation, str], str | None] | None = None
+        # P052 r03: Owner-switchable conversation diagnostics.  Events noted inside a transaction are written only after
+        # it commits (a rolled-back decision is never reported as having happened).
+        self.trace = ConversationTrace(None)
+        self._local = threading.local()
+
+    # ------------------------------------------------------------------ diagnostics (P052 r03)
+    def _note(self, session: Session, event: str, conversation_id: str | None = None, **fields) -> None:
+        if not self.trace.enabled:
+            return
+        if conversation_id is not None:
+            room = session.get(Conversation, conversation_id)
+            if room is not None:
+                fields.setdefault("project_id", room.project_id)
+                fields.setdefault("task_id", room.task_id)
+                fields.setdefault("scope", "task" if room.task_id else "project")
+            fields["conversation_id"] = conversation_id
+        pending = getattr(self._local, "events", None)
+        if pending is None:
+            self.trace.emit(event, **fields)
+        else:
+            pending.append((event, fields))
+
+    def trace_begin(self) -> None:
+        """Start buffering notes for a transaction owned by a caller (e.g. the Architect reply commit)."""
+        self._local.events = [] if self.trace.enabled else None
+
+    def trace_end(self, committed: bool) -> None:
+        pending = getattr(self._local, "events", None)
+        self._local.events = None
+        if committed and pending:
+            for event, fields in pending:
+                self.trace.emit(event, **fields)
 
     # ------------------------------------------------------------------ helpers
     def _authorize(self, actor: ActorContext, action: str, **scope) -> None:
@@ -198,10 +252,15 @@ class WorkerConversationCore:
     def _tx(self, fn):
         """Run ``fn(session)`` inside one single-writer transaction; map store errors to safe exceptions."""
         with self._sessions() as session:
+            outer = getattr(self._local, "events", None) is not None
+            if not outer:
+                self.trace_begin()
+            committed = False
             try:
                 self._begin(session)
                 result = fn(session)
                 session.commit()
+                committed = True
                 return result
             except (ConversationDenied, ConversationNotFound, InvalidConversationInput, ConversationConflict,
                     UnsafeProjectIdentity, ConversationStoreError):
@@ -213,6 +272,9 @@ class WorkerConversationCore:
             except IntegrityError:
                 session.rollback()
                 raise ConversationStoreError("The conversation change could not be stored") from None
+            finally:
+                if not outer:
+                    self.trace_end(committed)
 
     @staticmethod
     def _project(session: Session, project_id: int) -> Project:
@@ -575,10 +637,17 @@ class WorkerConversationCore:
             session.flush()
             rnd = None
             granted = [a for a in to_refs if a in set(grant)]  # type: ignore[arg-type]
+            self._note(session, "owner_message_committed", room.conversation_id, message_id=message.message_id,
+                       ordinal=ordinal, sender_kind="owner", to=to_refs, route="room",
+                       delivery_mode="owner_note" if not granted else "direct" if len(granted) == 1 else "group",
+                       body=text)
             current = self._current_round(session, room.conversation_id)
             if len(granted) == 1 and self._is_active_group(session, current):
                 # P047 r02 (R-15.24): a 1:1 request never closes a running group discussion.
                 rnd = self._attach_direct(session, current, granted[0], envelope)  # type: ignore[arg-type]
+                self._note(session, "round_opened", room.conversation_id, round_id=rnd.round_id, round_no=rnd.round_no,
+                           decision="direct_attached_to_running_group", authorizing_message_id=message.message_id,
+                           grants=self._grants_view(session, rnd))
             elif granted:
                 rnd = self._open_round(session, room, granted, actor, message.message_id,
                                        1 if len(granted) == 1 else self._setting(session, SETTING_GROUP_QUOTA),
@@ -649,10 +718,14 @@ class WorkerConversationCore:
         """Close the current round (cancelling ONLY its queued, never-submitted turns) and open a new one."""
         current = self._current_round(session, room.conversation_id)
         if current is not None:
+            self._note(session, "round_closed", room.conversation_id, round_id=current.round_id,
+                       round_no=current.round_no, from_state=current.state, to_state=ROUND_CLOSED, reason=superseded_code)
             current.state, current.closed_at = ROUND_CLOSED, _now()
             for turn in session.scalars(select(GroupTurn).where(GroupTurn.round_id == current.round_id,
                                                                 GroupTurn.state == TURN_QUEUED)):
                 turn.state, turn.error_code, turn.updated_at = TURN_CANCELLED, superseded_code, _now()
+                self._note(session, "turn_cancelled", room.conversation_id, turn_id=turn.turn_id,
+                           round_id=current.round_id, agent_id=turn.agent_id, reason=superseded_code)
             session.flush()
         number = (session.scalar(select(func.max(GroupRound.round_no)).where(
             GroupRound.conversation_id == room.conversation_id)) or 0) + 1
@@ -665,6 +738,10 @@ class WorkerConversationCore:
         for agent_id in agent_ids:
             session.add(GroupRoundGrant(round_id=rnd.round_id, agent_id=agent_id, quota=quota, published_count=0,
                                         failed=False))
+        session.flush()
+        self._note(session, "round_opened", room.conversation_id, round_id=rnd.round_id, round_no=rnd.round_no,
+                   decision="owner_message", authorizing_message_id=authorizing_message_id,
+                   grants=self._grants_view(session, rnd))
         self._create_pass(session, rnd, 0, list(agent_ids))
         session.flush()
         return rnd
@@ -750,6 +827,9 @@ class WorkerConversationCore:
             for agent_id in agent_ids:
                 session.add(GroupRoundGrant(round_id=rnd.round_id, agent_id=agent_id, quota=n, published_count=0,
                                             failed=False))
+            self._note(session, "round_opened", room.conversation_id, round_id=rnd.round_id, round_no=number,
+                       decision="owner_renew" if renew else "owner_authorize",
+                       authorizing_message_id=authorizing_message_id, grants=self._grants_view(session, rnd))
             self._create_pass(session, rnd, 0, agent_ids)
             session.flush()
             return self._round_view(session, rnd)
@@ -867,9 +947,12 @@ class WorkerConversationCore:
             swap = self._rng.randrange(1, len(order))
             order[0], order[swap] = order[swap], order[0]
         for position, agent_id in enumerate(order):
-            session.add(GroupTurn(turn_id=str(uuid.uuid4()), round_id=rnd.round_id, conversation_id=rnd.conversation_id,
+            turn_id = str(uuid.uuid4())
+            session.add(GroupTurn(turn_id=turn_id, round_id=rnd.round_id, conversation_id=rnd.conversation_id,
                                   agent_id=agent_id, pass_no=pass_no, position=position, attempt=1, state=TURN_QUEUED,
                                   correlation_id=str(uuid.uuid4()), created_at=_now(), updated_at=_now()))
+            self._note(session, "turn_queued", rnd.conversation_id, turn_id=turn_id, round_id=rnd.round_id,
+                       round_no=rnd.round_no, agent_id=agent_id, pass_no=pass_no, position=position, attempt=1)
         rnd.current_pass = pass_no
         return order
 
@@ -962,16 +1045,29 @@ class WorkerConversationCore:
         if rnd is None or rnd.state != ROUND_OPEN:
             return []
         grants = list(session.scalars(select(GroupRoundGrant).where(GroupRoundGrant.round_id == rnd.round_id)))
-        if len(grants) != 1 or grants[0].agent_id != turn.agent_id:
-            return []  # not a direct request, or the one invitation was already used
         peers = [r for r in refs if r not in (PARTY_OWNER_REF, turn.agent_id)]
-        if not peers or len(body) > GROUP_REPLY_CONTINUE_MAX_CHARS \
-                or self._controls_block(session, turn.conversation_id) is not None:
+        if not peers:
             return []
         room = session.get(Conversation, turn.conversation_id)
-        invited = [p for p in peers if self._invite_problem(session, room, p, inviter=turn.agent_id) is None]
-        if not invited:
+
+        def declined(reason: str, problems: list | None = None) -> list[str]:
+            self._note(session, "invitation_checked", turn.conversation_id, round_id=rnd.round_id,
+                       round_no=rnd.round_no, turn_id=turn.turn_id, sender_agent_id=turn.agent_id, to=refs,
+                       authorizing_message_id=rnd.authorizing_message_id, decision="declined", reason=reason,
+                       declined=problems)
             return []
+        if len(grants) != 1 or grants[0].agent_id != turn.agent_id:
+            # not a direct request, or the one invitation was already used (peers already in the round are not invited)
+            return declined("not_a_direct_request") if any(
+                p not in {g.agent_id for g in grants} for p in peers) else []
+        if len(body) > GROUP_REPLY_CONTINUE_MAX_CHARS:
+            return declined("reply_too_long")
+        if self._controls_block(session, turn.conversation_id) is not None:
+            return declined(self._controls_block(session, turn.conversation_id))  # type: ignore[arg-type]
+        problems = [(p, self._invite_problem(session, room, p, inviter=turn.agent_id)) for p in peers]
+        invited = [p for p, problem in problems if problem is None]
+        if not invited:
+            return declined("peer_unavailable", problems)
         n = self._setting(session, SETTING_GROUP_QUOTA)
         rnd.per_agent_quota = n
         grants[0].quota = max(grants[0].quota, n)  # the inviter's published reply already counts as its first
@@ -983,7 +1079,18 @@ class WorkerConversationCore:
                                         failed=False))
             self._join(session, room, agent_id, baseline, rnd.authorized_by)  # type: ignore[arg-type]
         session.flush()
+        self._note(session, "invitation_checked", turn.conversation_id, round_id=rnd.round_id, round_no=rnd.round_no,
+                   turn_id=turn.turn_id, sender_agent_id=turn.agent_id, to=refs, decision="accepted",
+                   authorizing_message_id=rnd.authorizing_message_id, invited=invited,
+                   declined=[(p, problem) for p, problem in problems if problem is not None],
+                   grants=self._grants_view(session, rnd))
         return invited
+
+    @staticmethod
+    def _grants_view(session: Session, rnd: GroupRound) -> dict:
+        session.flush()
+        return {g.agent_id: {"quota": g.quota, "published": g.published_count, "failed": g.failed}
+                for g in session.scalars(select(GroupRoundGrant).where(GroupRoundGrant.round_id == rnd.round_id))}
 
     def _display_names(self, session: Session, room: Conversation) -> dict[str, str]:
         return {ref: names[0] for ref, names in self._room_candidates(session, room).items()}
@@ -1077,9 +1184,17 @@ class WorkerConversationCore:
           only the invited eligible peers.  A running discussion is never closed or re-granted by an Agent.
         Returns ``{"conversation_id", "round_id" | None, "invited"}`` or None.  Never calls a provider."""
         room = session.get(Conversation, reply.conversation_id)
-        refs = list(self.resolve_mentions(session, room, reply.body, exclude=agent_id).refs)  # type: ignore[arg-type]
+        found = self.resolve_mentions(session, room, reply.body, exclude=agent_id)  # type: ignore[arg-type]
+        refs = list(found.refs)
         peers = [r for r in refs if r != PARTY_OWNER_REF]
+        self._note(session, "mentions_resolved", reply.conversation_id, message_id=reply.message_id,
+                   ordinal=reply.ordinal, sender_agent_id=agent_id, sender_kind="architect", to=refs,
+                   reply_to_id=owner_message.message_id, reply_to_ordinal=owner_message.ordinal,
+                   unknown_names=len(found.unknown) + len(found.ambiguous), route="architect_direct")
         if not peers:
+            self._note(session, "invitation_checked", reply.conversation_id, message_id=reply.message_id,
+                       sender_agent_id=agent_id, considered_message_id=owner_message.message_id, decision="none",
+                       reason="no_peer_mention")
             return None
         current = self._current_round(session, room.conversation_id)  # type: ignore[union-attr]
         latest = self._latest_owner_message(session, room.conversation_id)  # type: ignore[union-attr]
@@ -1096,11 +1211,20 @@ class WorkerConversationCore:
             not_invited = self._controls_block(session, room.conversation_id)  # type: ignore[union-attr]
         elif len(reply.body) > GROUP_REPLY_CONTINUE_MAX_CHARS:
             not_invited = "reply_too_long"
-        else:
-            invited = [p for p in peers if self._invite_problem(session, room, p, inviter=agent_id) is None]  # type: ignore[arg-type]
+        problems: list = []
+        if not_invited is None:
+            problems = [(p, self._invite_problem(session, room, p, inviter=agent_id)) for p in peers]  # type: ignore[arg-type]
+            invited = [p for p, problem in problems if problem is None]
+            if not invited:
+                not_invited = "peer_unavailable"
         rnd = None
+        closed = None
         if invited:
             if current is not None:  # finished (awaiting_owner) only: nothing queued or holding can be lost here
+                closed = current
+                self._note(session, "round_closed", room.conversation_id, round_id=current.round_id,  # type: ignore[union-attr]
+                           round_no=current.round_no, from_state=current.state, to_state=ROUND_CLOSED,
+                           reason="agent_invitation_after_finished_round")
                 current.state, current.closed_at = ROUND_CLOSED, _now()
                 session.flush()
             n = self._setting(session, SETTING_GROUP_QUOTA)
@@ -1120,7 +1244,19 @@ class WorkerConversationCore:
                 session.add(GroupRoundGrant(round_id=rnd.round_id, agent_id=peer, quota=n, published_count=0,
                                             failed=False))
             session.flush()
+            self._note(session, "round_opened", room.conversation_id, round_id=rnd.round_id, round_no=number,  # type: ignore[union-attr]
+                       decision="architect_direct_invitation", authorizing_message_id=owner_message.message_id,
+                       closed_round_id=None if closed is None else closed.round_id,
+                       grants=self._grants_view(session, rnd))
             self._create_pass(session, rnd, 0, invited)
+        self._note(session, "invitation_checked", room.conversation_id, message_id=reply.message_id,  # type: ignore[union-attr]
+                   sender_agent_id=agent_id, to=refs, considered_message_id=owner_message.message_id,
+                   latest_owner_message_id=None if latest is None else latest.message_id,
+                   decision="accepted" if invited else "declined", reason=not_invited, invited=invited,
+                   declined=[(p, problem) for p, problem in problems if problem is not None],
+                   round_id=None if rnd is None else rnd.round_id, round_no=None if rnd is None else rnd.round_no,
+                   closed_round_id=None if closed is None else closed.round_id,
+                   this_reply_counts=bool(invited))
         session.add(MessageEnvelope(message_id=reply.message_id, reply_to_message_id=owner_message.message_id,
                                     round_id=None if rnd is None else rnd.round_id, turn_id=None,
                                     sender_agent_id=agent_id))
@@ -1173,6 +1309,45 @@ class WorkerConversationCore:
         cursor.applied_through_ordinal = max(cursor.applied_through_ordinal, through)
         cursor.updated_at = _now()
 
+    INVITATION_TAG = "|invitation:"
+
+    @classmethod
+    def invitation_tag(cls, bridged: dict | None) -> str | None:
+        """P052 r03: the durable, content-free outcome of a legacy direct reply's invitation check (recorded on the Owner
+        message's delivery row inside the same commit; no schema change)."""
+        if bridged is None:
+            return None
+        return cls.INVITATION_TAG + ("opened" if bridged.get("round_id") else (bridged.get("not_invited") or "none"))
+
+    def invitation_outcome(self, session: Session, reply_message_id: str) -> dict | None:
+        """The recorded invitation outcome of one legacy direct Architect reply, or None (not a bridged reply)."""
+        from .models import ConversationDelivery  # local: the legacy delivery table is not otherwise used here
+        envelope = session.get(MessageEnvelope, reply_message_id)
+        if envelope is None or envelope.turn_id is not None or envelope.reply_to_message_id is None:
+            return None
+        delivery = session.get(ConversationDelivery, envelope.reply_to_message_id)
+        tags = (delivery.context_categories or "") if delivery is not None else ""
+        code = tags.split(self.INVITATION_TAG, 1)[1] if self.INVITATION_TAG in tags else None
+        rnd = session.get(GroupRound, envelope.round_id) if envelope.round_id else None
+        return {"decision": "accepted" if rnd is not None else "declined" if code else "unrecorded",
+                "reason": None if rnd is not None or code in (None, "opened") else code,
+                "round_id": None if rnd is None else rnd.round_id, "round_no": None if rnd is None else rnd.round_no,
+                "owner_message_id": envelope.reply_to_message_id}
+
+    def latest_invitation(self, session: Session, conversation_id: str) -> dict | None:
+        """Status projection: the invitation outcome of the room's latest Agent message when it is a bridged direct
+        Architect reply addressing peers (truthful without the diagnostics switch; never a body)."""
+        row = session.execute(select(ConversationMessage.message_id, ConversationMessage.ordinal).join(
+            MessageEnvelope, MessageEnvelope.message_id == ConversationMessage.message_id).where(
+            ConversationMessage.conversation_id == conversation_id,
+            MessageEnvelope.sender_agent_id.is_not(None)).order_by(ConversationMessage.ordinal.desc()).limit(1)).first()
+        if row is None:
+            return None
+        outcome = self.invitation_outcome(session, row[0])
+        if outcome is None:
+            return None
+        return {"message_id": row[0], "ordinal": row[1], **outcome}
+
     def _unanswered(self, session: Session, room: Conversation, rnd: GroupRound | None) -> list[dict]:
         """P052 D2: explicit Agent addressees of the room's latest Agent message that did not (yet) get a turn, with the
         honest reason.  Read-only; an Agent that is queued or holding the room is pending, not unanswered."""
@@ -1187,6 +1362,8 @@ class WorkerConversationCore:
             MessageParty.message_id == message.message_id, MessageParty.role == "to"))
             if p.party_ref not in (PARTY_OWNER_REF, sender)]
         blocked = self._controls_block(session, room.conversation_id)
+        invitation = self.invitation_outcome(session, message.message_id)
+        declined = invitation["reason"] if invitation is not None and invitation["decision"] == "declined" else None
         result = []
         for agent_id in targets:
             answered = session.scalar(select(ConversationMessage.message_id).join(
@@ -1205,6 +1382,8 @@ class WorkerConversationCore:
                 continue
             elif len(message.body) > GROUP_REPLY_CONTINUE_MAX_CHARS:
                 reason = "reply_too_long"
+            elif grant is None and declined is not None and declined != "peer_unavailable":
+                reason = declined  # P052 r03: the recorded reason the Architect's invitation was refused at commit time
             elif grant is None:
                 reason = self._invite_problem(session, room, agent_id, inviter=sender) or "not_in_this_discussion"
             elif grant.failed:
@@ -1243,6 +1422,9 @@ class WorkerConversationCore:
                 GroupRoundGrant.round_id == current.round_id).order_by(GroupRoundGrant.agent_id))
                 if self._invite_problem(session, room, g.agent_id, inviter=None) is None]
             n = self._setting(session, SETTING_GROUP_QUOTA)
+            self._note(session, "round_closed", room.conversation_id, round_id=current.round_id,
+                       round_no=current.round_no, from_state=current.state, to_state=ROUND_CLOSED,
+                       reason="owner_continue")
             current.state, current.closed_at = ROUND_CLOSED, _now()
             session.flush()
             number = (session.scalar(select(func.max(GroupRound.round_no)).where(
@@ -1256,6 +1438,9 @@ class WorkerConversationCore:
             for agent_id in participants:
                 session.add(GroupRoundGrant(round_id=rnd.round_id, agent_id=agent_id, quota=n, published_count=0,
                                             failed=False))
+            self._note(session, "round_opened", room.conversation_id, round_id=rnd.round_id, round_no=number,
+                       decision="owner_continue", authorizing_message_id=rnd.authorizing_message_id,
+                       grants=self._grants_view(session, rnd))
             self._create_pass(session, rnd, 0, waiting)
             session.flush()
             return self._round_view(session, rnd)
@@ -1310,14 +1495,17 @@ class WorkerConversationCore:
                         GroupTurn.state == TURN_QUEUED).order_by(GroupTurn.position)).all():
                     grant = session.get(GroupRoundGrant, (rnd.round_id, turn.agent_id))
                     member = self._member(session, conversation_id, turn.agent_id)
+                    cancel = None
                     if member is None or member.state == MEMBER_RELEASED:
-                        turn.state, turn.error_code = TURN_CANCELLED, "member_released"
-                        continue
-                    if self._assignment(session, room, turn.agent_id) is None:
-                        turn.state, turn.error_code = TURN_CANCELLED, "assignment_changed"
-                        continue
-                    if grant is None or grant.published_count >= grant.quota or grant.failed:
-                        turn.state, turn.error_code = TURN_CANCELLED, "quota_exhausted"
+                        cancel = "member_released"
+                    elif self._assignment(session, room, turn.agent_id) is None:
+                        cancel = "assignment_changed"
+                    elif grant is None or grant.published_count >= grant.quota or grant.failed:
+                        cancel = "quota_exhausted"
+                    if cancel is not None:
+                        turn.state, turn.error_code = TURN_CANCELLED, cancel
+                        self._note(session, "turn_cancelled", conversation_id, turn_id=turn.turn_id,
+                                   round_id=rnd.round_id, agent_id=turn.agent_id, reason=cancel)
                         continue
                     if turn.catchup_choice is None:
                         need = self._catchup_need(session, turn)
@@ -1326,11 +1514,18 @@ class WorkerConversationCore:
                     lane = self._ensure_lane(session, room, turn.agent_id)
                     turn.lane_id, turn.state, turn.updated_at = lane.lane_id, TURN_RESERVED, _now()
                     session.flush()
+                    self._note(session, "turn_reserved", conversation_id, turn_id=turn.turn_id, round_id=rnd.round_id,
+                               round_no=rnd.round_no, agent_id=turn.agent_id, pass_no=turn.pass_no,
+                               position=turn.position, attempt=turn.attempt, lane_id=lane.lane_id,
+                               grants=self._grants_view(session, rnd))
                     return ClaimResult("reserved", turn.turn_id, turn.agent_id,
                                        {"pass": turn.pass_no, "position": turn.position, "attempt": turn.attempt})
                 eligible = self._eligible_for_next_pass(session, rnd)
                 if not eligible:
                     rnd.state = ROUND_AWAITING_OWNER
+                    self._note(session, "round_awaiting_owner", conversation_id, round_id=rnd.round_id,
+                               round_no=rnd.round_no, from_state=ROUND_OPEN, to_state=ROUND_AWAITING_OWNER,
+                               reason="no_addressed_peer_with_quota", grants=self._grants_view(session, rnd))
                     return ClaimResult("awaiting_owner")
                 self._create_pass(session, rnd, rnd.current_pass + 1, eligible)
                 session.flush()
@@ -1435,6 +1630,13 @@ class WorkerConversationCore:
                                   quota=self._quota_snapshot(session, rnd, turn.agent_id))  # type: ignore[arg-type]
             turn.input_after_ordinal, turn.input_through_ordinal = after, through
             turn.state, turn.updated_at = TURN_SUBMITTED, _now()
+            if self.trace.enabled:
+                self._note(session, "dispatch_attempted", turn.conversation_id, turn_id=turn.turn_id,
+                           round_id=turn.round_id, round_no=rnd.round_no, agent_id=turn.agent_id,  # type: ignore[union-attr]
+                           correlation_id=turn.correlation_id, lane_id=lane.lane_id, attempt=turn.attempt,
+                           input_after_ordinal=after, input_through_ordinal=through, events=len(events),
+                           from_state=TURN_RESERVED, to_state=TURN_SUBMITTED, quota_snapshot=payload.quota,
+                           request_text=_payload_text(payload), guidance_text=_guidance_text(payload.quota))
             return payload, self._lane_ref(lane)
 
         payload, lane = self._tx(prepare)
@@ -1462,6 +1664,9 @@ class WorkerConversationCore:
                 self._safe_failure(session, turn, outcome.code or "not_accepted")  # type: ignore[arg-type]
             else:
                 turn.state, turn.error_code, turn.updated_at = TURN_UNKNOWN, outcome.code or "submit_unknown", _now()  # type: ignore[union-attr]
+            self._note(session, "transport_outcome", turn.conversation_id, turn_id=turn.turn_id,  # type: ignore[union-attr]
+                       round_id=turn.round_id, agent_id=turn.agent_id, status=outcome.status,  # type: ignore[union-attr]
+                       to_state=turn.state, error_code=turn.error_code)  # type: ignore[union-attr]
             return self._turn_view(turn)  # type: ignore[arg-type]
         # The provider call already happened: a transient lock must not strand the turn as ``submitted``.  ``record`` is
         # idempotent (it acts only while the turn is still ``submitted``), so a bounded retry is safe.
@@ -1546,6 +1751,8 @@ class WorkerConversationCore:
                     raise InvalidConversationInput("reply_to does not name a message this turn received")
             turn.captured_reply, turn.captured_to = body, json.dumps(refs)
             turn.captured_reply_to, turn.state, turn.updated_at = reply_to, TURN_REPLY_CAPTURED, _now()  # type: ignore[assignment]
+            self._note(session, "reply_captured", turn.conversation_id, turn_id=turn.turn_id, round_id=turn.round_id,
+                       agent_id=turn.agent_id, to=refs, response_text=body)
             return self._turn_view(turn)
         return self._tx(write)
 
@@ -1644,6 +1851,13 @@ class WorkerConversationCore:
             self._write_parties(session, message.message_id, turn.conversation_id, refs)
             turn.state, turn.reply_message_id, turn.updated_at = TURN_PUBLISHED, message.message_id, _now()
             session.flush()
+            if self.trace.enabled:
+                rnd = session.get(GroupRound, turn.round_id)
+                self._note(session, "reply_published", turn.conversation_id, turn_id=turn.turn_id,
+                           round_id=turn.round_id, round_no=rnd.round_no if rnd else None, agent_id=turn.agent_id,
+                           message_id=message.message_id, ordinal=ordinal, sender_kind=member.role,  # type: ignore[union-attr]
+                           to=refs, chars=len(message.body),
+                           grants=self._grants_view(session, rnd) if rnd else None)
             if self.before_publish_commit is not None:
                 self.before_publish_commit()
             view = self._turn_view(turn)

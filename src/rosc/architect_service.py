@@ -30,6 +30,8 @@ from sqlalchemy.exc import DataError, IntegrityError, OperationalError
 from sqlalchemy.orm import Session, sessionmaker
 
 from .architect_latency import DISABLED, LatencyTrace
+from .conversation_trace import ConversationTrace
+from .worker_conversation import WorkerConversationCore
 from .architect_rules import ArchitectRulesLoader, RulesError, RulesSnapshot
 from .architect_runtime import (ADAPTER_NAME, ArchitectRuntime, RuntimeAmbiguous, RuntimeHandle, RuntimeProblem,
                                 RuntimeStartUnresolved)
@@ -117,8 +119,11 @@ class ArchitectService:
         # P052 composition seam (``create_app``): the group bridge that turns an authenticated direct reply addressing
         # in-scope peers into ONE Owner-provenanced bounded discussion.  None = legacy behavior only.
         self.peer_bridge = None
+        # P052 r03: Owner-switchable conversation diagnostics (composed by the app; OFF = immediate no-op).
+        self.conv_trace = ConversationTrace(None)
         # Owner message id -> room catch-up carried by that direct turn (memory only; lost = a safe superset later).
         self._direct_ctx: dict[str, dict] = {}
+        self._committed: dict[str, bool] = {}  # P052 r03: reply commit outcome for the trace buffer (per message)
         attach = getattr(runtime, "attach_diagnostics", None)
         if self._trace.enabled and callable(attach):
             attach(self._trace)
@@ -512,6 +517,15 @@ class ArchitectService:
             for key, value in fields.items():
                 setattr(row, key, value)
             session.commit()
+            if self.conv_trace.enabled:
+                message = session.get(ConversationMessage, message_id)
+                conversation = session.get(Conversation, message.conversation_id) if message is not None else None
+                self.conv_trace.emit("architect_delivery_state", message_id=message_id, to_state=state, error_code=code,
+                                     ordinal=message.ordinal if message else None,
+                                     conversation_id=conversation.conversation_id if conversation else None,
+                                     project_id=conversation.project_id if conversation else None,
+                                     task_id=conversation.task_id if conversation else None,
+                                     scope=("task" if conversation.task_id else "project") if conversation else None)
         self._note_state(message_id, state, code)
 
     def _note_state(self, message_id: str, state: str, code: str | None) -> None:
@@ -716,6 +730,13 @@ class ArchitectService:
             runtime_id = delivery.runtime_message_id or runtime_message_id(message_id)
             live_session_id = live.session_id
             attempts = delivery.attempts
+            if self.conv_trace.enabled:
+                self.conv_trace.emit("architect_request_sent", message_id=message_id, ordinal=message.ordinal,
+                                     conversation_id=conversation.conversation_id, project_id=project_id,
+                                     task_id=conversation.task_id, scope="task" if conversation.task_id else "project",
+                                     agent_id=pair[1].agent_id, attempts=attempts, route="architect_direct",
+                                     state=categories.replace("+", "_")[:48], request_text=body,
+                                     guidance_text=preamble if self.peer_bridge is not None else None)
         trace.bind(rosc_session_id=live_session_id)
         trace.emit("prepare", duration_ms=trace.since(prepared), attempts=attempts, outcome="ready")
         asked = time.monotonic()
@@ -735,6 +756,9 @@ class ArchitectService:
         finally:
             trace.end_turn(live_session_id, runtime_id)
         trace.emit("ask_finished", duration_ms=trace.since(asked), outcome="reply")
+        if self.conv_trace.enabled:
+            self.conv_trace.emit("architect_reply_received", message_id=message_id, project_id=project_id,
+                                 duration_ms=trace.since(asked), response_text=reply if isinstance(reply, str) else None)
         if primed_now:
             self._mark_primed(message_id, live_session_id)
         self._commit_reply(actor, project_id, message_id, live_session_id, reply)
@@ -982,6 +1006,17 @@ class ArchitectService:
         except MemoryError:  # cannot even normalize it right now: the generated reply stays recoverable at the provider
             self._set(message_id, DELIVERY_UNKNOWN, "reply_storage_resources")
             return False
+        core = getattr(self.peer_bridge, "_core", None)
+        if core is not None:
+            core.trace_begin()
+        try:
+            return self._commit_reply_tx(actor, project_id, message_id, live_session_id, text)
+        finally:
+            if core is not None:
+                core.trace_end(self._committed.pop(message_id, False))
+
+    def _commit_reply_tx(self, actor: ActorContext, project_id: int, message_id: str, live_session_id: str,
+                         text: str) -> bool:
         with self._sessions() as session:
             try:
                 session.connection().exec_driver_sql("BEGIN IMMEDIATE")
@@ -1029,12 +1064,31 @@ class ArchitectService:
                         catchup=self._direct_ctx.pop(message_id, None))
                 delivery.state, delivery.error_code = DELIVERY_DELIVERED, None
                 delivery.reply_message_id, delivery.updated_at = reply_row.message_id, _now()
+                tag = WorkerConversationCore.invitation_tag(bridged)
+                if tag is not None:  # P052 r03: the truthful invitation outcome, durable without the trace switch
+                    delivery.context_categories = ((delivery.context_categories or "") + tag)[:160]
                 session.commit()
-                if bridged is not None:
+                self._committed[message_id] = True
+                core = getattr(self.peer_bridge, "_core", None)
+                if core is not None:
+                    core.trace_end(True)  # the committed bridge decisions first, in their real order
+                if self.conv_trace.enabled:
+                    self.conv_trace.emit("architect_delivery_state", message_id=message_id, to_state=DELIVERY_DELIVERED,
+                                         conversation_id=conversation.conversation_id, project_id=project_id,
+                                         task_id=conversation.task_id, ordinal=message.ordinal,
+                                         scope="task" if conversation.task_id else "project")
+                    self.conv_trace.emit("reply_published", message_id=reply_row.message_id, ordinal=reply_row.ordinal,
+                                         reply_to_id=message_id, conversation_id=conversation.conversation_id,
+                                         project_id=project_id, task_id=conversation.task_id, agent_id=live.agent_id,
+                                         sender_kind="architect", route="architect_direct", chars=len(text),
+                                         scope="task" if conversation.task_id else "project")
+                if bridged is not None and bridged.get("round_id"):
                     try:
                         self.peer_bridge.wake(bridged["conversation_id"])
                     except Exception:  # the round is durable; the Owner can resume it explicitly
                         log.warning("Group driver wake after an Architect reply failed")
+                        self.conv_trace.emit("wake_failed", conversation_id=bridged["conversation_id"],
+                                             round_id=bridged["round_id"], reason="wake_exception")
                 return True
             except (OperationalError, IntegrityError):
                 session.rollback()
@@ -1331,6 +1385,11 @@ class ArchitectGroupTransport:
                     text = svc._task_preface(session.get(Task, room.task_id), project, text)
                 live_session_id = svc._live(session, lane.project_id).session_id
             runtime_id = self.runtime_id(payload.correlation_id)
+            if svc.conv_trace.enabled:
+                svc.conv_trace.emit("transport_request", transport="architect_opencode", turn_id=payload.turn_id,
+                                    correlation_id=payload.correlation_id, agent_id=lane.agent_id,
+                                    conversation_id=lane.conversation_id, project_id=lane.project_id,
+                                    task_id=room.task_id, request_text=text)
             # P047 r02: ``primed`` records CONFIRMED delivery of the Task preface, nothing weaker.
             # * accepted (a provider reply) -> primed now;
             # * proven not accepted (SAFE_CODES, e.g. connection_failed) -> stays unprimed, so the next authorized

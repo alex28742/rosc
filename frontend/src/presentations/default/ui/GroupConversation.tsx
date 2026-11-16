@@ -70,6 +70,10 @@ const UNANSWERED_TEXT: Record<string, string> = {
   paused: 'доставка на паузе', emergency_brake: 'включён Emergency Brake', awaiting_owner: 'обсуждение ждёт Owner',
   excluded_after_failures: 'исключён после двух безопасных отказов', released: 'освобождён Owner',
   unassigned: 'не назначен этой комнате', transport_unknown: 'транспорт недоступен',
+  // P052 r03: why an Architect's @invitation could not open a discussion (recorded at reply commit time).
+  newer_owner_message: 'приглашение не открыло обсуждение: Owner уже написал новое сообщение',
+  pending_owner_request: 'приглашение не открыло обсуждение: незавершённый запрос Owner в этой комнате не прерывается',
+  peer_unavailable: 'адресат сейчас не может ответить',
   ...UNSUPPORTED_TEXT,
 };
 
@@ -126,14 +130,16 @@ function QuotaCards({ info }: { info: GroupStatus }) {
   </div>;
 }
 
-/** P047: the room is in a TRUE group interaction (Owner + 2+ addressed Agents, or Agent -> Agent with the Owner observing). */
-export const groupEngaged = (info: GroupStatus | null): boolean => info?.engagement === 'group';
+/** P047: the room is in a TRUE group interaction (Owner + 2+ addressed Agents, or Agent -> Agent with the Owner observing).
+ * P052 r03: only while that interaction is still RUNNING; a finished round (natural stop, limit reached) is a past discussion, not an active one. */
+export const groupEngaged = (info: GroupStatus | null): boolean =>
+  info?.engagement === 'group' && (info.round_active ?? info.round?.state !== 'awaiting_owner');
 
 /** Critical states that must stay visible and recoverable even in ordinary 1:1 chatting. */
 export function groupAttention(info: GroupStatus | null): boolean {
   if (!info) return false;
   return info.controls.emergency_brake || info.controls.paused || info.holding_turn?.state === 'unknown'
-    || info.failed.length > 0 || info.catchup !== null;
+    || info.failed.length > 0 || info.catchup !== null || (info.unanswered?.length ?? 0) > 0;
 }
 
 /**
@@ -191,6 +197,7 @@ export function GroupBar({ group, open, onOpenChange }: { group: GroupControls; 
       </div>
       {unknownBanner}
       {failedNotes}
+      <UnansweredNotes group={group} info={info} />
       {errorLine}
     </section>;
   }

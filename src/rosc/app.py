@@ -38,6 +38,7 @@ from .conversation import (DEFAULT_PAGE_SIZE, ConversationConflict, Conversation
 from .db import make_session_factory
 from .group_conversation import GroupConversationBridge, TransportFactory, claude_transport_factory
 from .worker_conversation import WorkerConversationCore
+from . import conversation_trace as ctrace
 from .models import (CURRENT_BINDING, Project, ProjectIdentityError, ProjectRootBinding, Task, reserved_roots,
                      validate_project_identity)
 from .workspace import (MAX_MANIFEST_BYTES, READY, WorkspaceConflict, WorkspaceError, WorkspaceUncertain, inspect_project, inspect_task, provision_project,
@@ -272,6 +273,21 @@ class GroupCatchupInput(BaseModel):
     choice: Literal["send_full", "skip_backlog"]
 
 
+class ConversationDiagnosticsInput(BaseModel):
+    """P052 r03: the two Owner diagnostics switches (strict booleans; omitted = unchanged)."""
+
+    model_config = {"extra": "forbid"}
+    enabled: bool | None = None
+    include_bodies: bool | None = None
+
+    @field_validator("enabled", "include_bodies", mode="before")
+    @classmethod
+    def strict_bool(cls, value: object) -> object:
+        if value is not None and not isinstance(value, bool):
+            raise ValueError("must be a boolean")
+        return value
+
+
 CONVERSATION_PATH = re.compile(r"^/api/projects/[^/]+/(tasks/[^/]+/conversation(/messages(/[^/]+/send)?)?|conversation(/messages(/[^/]+/(reconcile|retry))?)?|(tasks/[^/]+/)?conversation/group(/.*)?|architect/(activate|deactivate)|architect(/context-access)?|tasks/[^/]+/architect(/activate)?)$")
 DEFAULT_GLOBAL_LIBRARY = global_library_dir()  # <checkout>/global (Git-tracked); None for a non-editable install
 
@@ -399,7 +415,8 @@ def create_app(db_path: Path | None = None, workspace_root: Path | None = None, 
                latency_trace: LatencyTrace | None = None,
                architect_rules: ArchitectRulesLoader | None = None,
                worker_session_service: WorkerSessionService | None = None,
-               group_transport_factory: TransportFactory | None = None) -> FastAPI:
+               group_transport_factory: TransportFactory | None = None,
+               conversation_trace: ctrace.ConversationTrace | None = None) -> FastAPI:
     """``auth_provider``/``authorization_policy`` and the ``extra_allowed_*`` sets are Python-level composition and
     test seams only. Nothing in a request (body, query, header, cookie) can select an actor, a role or these values,
     and there is deliberately no environment knob.
@@ -432,10 +449,25 @@ def create_app(db_path: Path | None = None, workspace_root: Path | None = None, 
                                  tools=tool_host, context=context_broker, rules=architect_rules, trace=trace)
     # P046: Owner-only group bridge over the P043B Core and the P043C Claude CLI transport.  The transport factory is a
     # Python-level composition seam (tests inject a fake process runner); no request can select or configure it.
+    # P052 r03: Owner-switchable local conversation diagnostics (default OFF; applied in-process on every change).
+    conv_trace = conversation_trace or ctrace.ConversationTrace(db_path.parent)  # test seam, never request-selected
     group_core = WorkerConversationCore(sessions, policy)
+    group_core.trace = conv_trace
+    architect.conv_trace = conv_trace
     group = GroupConversationBridge(sessions, policy, group_core, group_transport_factory or claude_transport_factory(
-        sessions, db_path.parent / "conversation-evidence"), architect_transport=ArchitectGroupTransport(architect))
+        sessions, db_path.parent / "conversation-evidence", trace=conv_trace),
+        architect_transport=ArchitectGroupTransport(architect))
     architect.peer_bridge = group  # P052: an authenticated direct Architect reply may invite in-scope peers once
+
+    def load_diagnostics() -> None:
+        try:
+            with sessions() as session:
+                values = ctrace.read_settings(session)
+        except OperationalError:
+            values = {}
+        conv_trace.configure(enabled=values.get(ctrace.SETTING_ENABLED, False),
+                             bodies=values.get(ctrace.SETTING_BODIES, False))
+    load_diagnostics()
 
     @asynccontextmanager
     async def lifespan(_app: FastAPI):
@@ -450,6 +482,7 @@ def create_app(db_path: Path | None = None, workspace_root: Path | None = None, 
     app = FastAPI(title="ROSC Core", version="0.1.0", lifespan=lifespan)
     app.state.architect = architect
     app.state.group = group
+    app.state.conversation_trace = conv_trace
 
     @app.exception_handler(RequestValidationError)
     async def validation_failed(request: Request, exc: RequestValidationError):
@@ -504,6 +537,45 @@ def create_app(db_path: Path | None = None, workspace_root: Path | None = None, 
             return call(*args, **kwargs)
         except ConversationError as exc:
             raise conversation_error(exc) from None
+
+    def trace_owner_message(pid: int, tid: int | None, message: dict, body: str, mode: str) -> None:
+        """P052 r03: a legacy-route Owner message committed (OFF = immediate return)."""
+        if not conv_trace.enabled:
+            return
+        conv_trace.emit("owner_message_committed", project_id=pid, task_id=tid, scope="task" if tid else "project",
+                        conversation_id=message.get("conversation_id"), message_id=message.get("message_id"),
+                        ordinal=message.get("ordinal"), sender_kind="owner", route="legacy", delivery_mode=mode,
+                        body=body)
+
+    def diagnostics_view() -> dict:
+        with sessions() as session:
+            values = ctrace.read_settings(session)
+        return {"enabled": values[ctrace.SETTING_ENABLED], "include_bodies": values[ctrace.SETTING_BODIES],
+                "effective": conv_trace.status()}
+
+    # -- P052 r03 ROSC Settings: local Conversation Diagnostics (Owner only) --------------------------------------
+    @app.get("/api/settings/conversation-diagnostics")
+    def read_conversation_diagnostics() -> dict:
+        authorize(authz.ROSC_SETTINGS_READ)
+        try:
+            return diagnostics_view()
+        except OperationalError:
+            raise HTTPException(503, "Settings storage is unavailable") from None
+
+    @app.put("/api/settings/conversation-diagnostics")
+    def update_conversation_diagnostics(data: ConversationDiagnosticsInput) -> dict:
+        authorize(authz.ROSC_SETTINGS_UPDATE)
+        changes = {key: value for key, value in ((ctrace.SETTING_ENABLED, data.enabled),
+                                                 (ctrace.SETTING_BODIES, data.include_bodies)) if value is not None}
+        actor = current_actor()
+        try:
+            with sessions() as session:
+                ctrace.write_settings(session, actor.actor_id, changes)
+                session.commit()
+        except (OperationalError, IntegrityError):
+            raise HTTPException(503, "Settings could not be saved") from None
+        load_diagnostics()  # the running Core picks the change up at once; no restart
+        return diagnostics_view()
 
     @app.get("/api/health")
     def health() -> dict:
@@ -775,6 +847,7 @@ def create_app(db_path: Path | None = None, workspace_root: Path | None = None, 
         if result["replayed"]:
             response.status_code = 200
             return result
+        trace_owner_message(pid, None, result["message"], data.body, "architect_direct")
         # Only a NEW message may be delivered, and only to a live verified session; history is never replayed.
         result["message"]["delivery"] = architect.submit(current_actor(), pid, result["message"]["message_id"])
         return result
@@ -818,6 +891,9 @@ def create_app(db_path: Path | None = None, workspace_root: Path | None = None, 
                                    body=data.body, task_id=tid, recipient=data.recipient)
         if result["replayed"]:
             response.status_code = 200
+        else:
+            trace_owner_message(pid, tid, result["message"], data.body,
+                                "saved_for_architect" if data.recipient else "saved")
         return result
 
     @app.post("/api/projects/{project_id}/tasks/{task_id}/conversation/messages/{message_id}/send")
