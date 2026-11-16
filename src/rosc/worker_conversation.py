@@ -32,6 +32,11 @@ Invariants (each is backed by a DB constraint or a single ``BEGIN IMMEDIATE`` tr
   ``finish``, ``parse_reply_control``) is separate from body, ``to`` and ``reply_to``; only the recipient of a
   non-finish reply of the SAME round can earn a next turn.  An Owner authorization is single-use (a legacy bridged
   invitation from an Owner message that already authorized any round is ``authorization_spent``).  No migration.
+* P052 r05: every round records its allowlisted opening origin (``GroupRound.opened_via``, migration 0017) in the
+  transaction that opens it, and an Owner Continue also records the continued round and its pre-close stop reason.
+  Every dispatched GROUP turn carries that trusted ``round_context`` inside ``TurnPayload.quota`` (rendered by the
+  shared prompt builder for the Claude CLI and the Architect alike).  Historical rows stay ``unknown``; nothing is
+  derived from diagnostics, timestamps, the latest Owner message or model text.
 """
 from __future__ import annotations
 
@@ -59,7 +64,9 @@ from .mentions import find_mentions
 from .models import (ASSIGNMENT_ACTIVE, CONVERSATION_KIND_PROJECT, CONVERSATION_KIND_TASK, GAP_OWNER_SKIP,
                      GAP_RELEASED_PERIOD, LANE_ACTIVE, LANE_INVALIDATED, MEMBER_ACTIVE, MEMBER_PASSIVE,
                      MEMBER_RELEASED, PARTICIPANT_OWNER, PARTY_OWNER_REF, ROLE_ARCHITECT, ROLE_WORKER, ROUND_AWAITING_OWNER,
-                     ROUND_CLOSED, ROUND_OPEN, TURN_ACCEPTED, TURN_CANCELLED, TURN_DEFERRED, TURN_FAILED,
+                     ROUND_CLOSED, ROUND_OPEN, ROUND_VIA_AGENT_INVITATION, ROUND_VIA_OWNER_AUTHORIZE,
+                     ROUND_VIA_OWNER_CONTINUE, ROUND_VIA_OWNER_DIRECT, ROUND_VIA_OWNER_GROUP_MESSAGE,
+                     ROUND_VIA_OWNER_RENEW, ROUND_VIA_VALUES, TURN_ACCEPTED, TURN_CANCELLED, TURN_DEFERRED, TURN_FAILED,
                      TURN_HOLDING_STATES, TURN_PUBLISHED, TURN_QUEUED, TURN_REPLY_CAPTURED, TURN_RESERVED,
                      TURN_SUBMITTED, TURN_UNKNOWN, AgentDefinition, AgentNativeLane, Conversation,
                      ConversationDispatchControl, ConversationMember, ConversationMemberGap, ConversationMessage,
@@ -697,7 +704,9 @@ class WorkerConversationCore:
             elif granted:
                 rnd = self._open_round(session, room, granted, actor, message.message_id,
                                        1 if len(granted) == 1 else self._setting(session, SETTING_GROUP_QUOTA),
-                                       superseded_code="superseded_by_owner_message")
+                                       superseded_code="superseded_by_owner_message",
+                                       opened_via=ROUND_VIA_OWNER_DIRECT if len(granted) == 1
+                                       else ROUND_VIA_OWNER_GROUP_MESSAGE)
             return {"message": self._message_view(session, message, to_room=False), "replayed": False,
                     "round": None if rnd is None else self._round_view(session, rnd)}
         return self._tx(write)
@@ -760,7 +769,8 @@ class WorkerConversationCore:
         return None
 
     def _open_round(self, session: Session, room: Conversation, agent_ids: list[str], actor: ActorContext,
-                    authorizing_message_id: str | None, quota: int, *, superseded_code: str) -> GroupRound:
+                    authorizing_message_id: str | None, quota: int, *, superseded_code: str,
+                    opened_via: str) -> GroupRound:
         """Close the current round (cancelling ONLY its queued, never-submitted turns) and open a new one."""
         current = self._current_round(session, room.conversation_id)
         if current is not None:
@@ -778,7 +788,7 @@ class WorkerConversationCore:
         rnd = GroupRound(round_id=str(uuid.uuid4()), conversation_id=room.conversation_id, round_no=number,
                          state=ROUND_OPEN, per_agent_quota=quota, current_pass=0,
                          authorizing_message_id=authorizing_message_id, authorized_by=actor.actor_id,
-                         authorized_by_assurance=actor.assurance, created_at=_now())
+                         authorized_by_assurance=actor.assurance, created_at=_now(), opened_via=opened_via)
         session.add(rnd)
         session.flush()
         for agent_id in agent_ids:
@@ -786,7 +796,7 @@ class WorkerConversationCore:
                                         failed=False))
         session.flush()
         self._note(session, "round_opened", room.conversation_id, round_id=rnd.round_id, round_no=rnd.round_no,
-                   decision="owner_message", authorizing_message_id=authorizing_message_id,
+                   decision="owner_message", opened_via=opened_via, authorizing_message_id=authorizing_message_id,
                    grants=self._grants_view(session, rnd))
         self._create_pass(session, rnd, 0, list(agent_ids))
         session.flush()
@@ -866,7 +876,8 @@ class WorkerConversationCore:
             rnd = GroupRound(round_id=str(uuid.uuid4()), conversation_id=room.conversation_id, round_no=number,
                              state=ROUND_OPEN, per_agent_quota=n, current_pass=0,
                              authorizing_message_id=authorizing_message_id, authorized_by=actor.actor_id,
-                             authorized_by_assurance=actor.assurance, created_at=_now())
+                             authorized_by_assurance=actor.assurance, created_at=_now(),
+                             opened_via=ROUND_VIA_OWNER_RENEW if renew else ROUND_VIA_OWNER_AUTHORIZE)
             session.add(rnd)
             session.flush()
             agent_ids = [agent_id for agent_id, _ in targets]
@@ -874,7 +885,7 @@ class WorkerConversationCore:
                 session.add(GroupRoundGrant(round_id=rnd.round_id, agent_id=agent_id, quota=n, published_count=0,
                                             failed=False))
             self._note(session, "round_opened", room.conversation_id, round_id=rnd.round_id, round_no=number,
-                       decision="owner_renew" if renew else "owner_authorize",
+                       decision="owner_renew" if renew else "owner_authorize", opened_via=rnd.opened_via,
                        authorizing_message_id=authorizing_message_id, grants=self._grants_view(session, rnd))
             self._create_pass(session, rnd, 0, agent_ids)
             session.flush()
@@ -1179,6 +1190,8 @@ class WorkerConversationCore:
             return declined("peer_unavailable", problems)
         n = self._setting(session, SETTING_GROUP_QUOTA)
         rnd.per_agent_quota = n
+        if rnd.opened_via == ROUND_VIA_OWNER_DIRECT:  # P052 r05: same transaction; a NULL (historical) origin stays unknown
+            rnd.opened_via = ROUND_VIA_AGENT_INVITATION
         grants[0].quota = max(grants[0].quota, n)  # the inviter's published reply already counts as its first
         baseline = self._round_floor(session, rnd)
         if rnd.authorizing_message_id is not None:
@@ -1190,7 +1203,7 @@ class WorkerConversationCore:
         session.flush()
         self._note(session, "invitation_checked", turn.conversation_id, round_id=rnd.round_id, round_no=rnd.round_no,
                    turn_id=turn.turn_id, sender_agent_id=turn.agent_id, to=refs, decision="accepted",
-                   authorizing_message_id=rnd.authorizing_message_id, invited=invited,
+                   opened_via=rnd.opened_via, authorizing_message_id=rnd.authorizing_message_id, invited=invited,
                    declined=[(p, problem) for p, problem in problems if problem is not None],
                    grants=self._grants_view(session, rnd))
         return invited
@@ -1259,9 +1272,29 @@ class WorkerConversationCore:
                      "default_to": requester, "default_to_name": names.get(requester, requester),
                      "default_to_can_answer": bool(peer and peer.get("can_reply_after_your_message")),
                      "default_to_remaining": peer["remaining"] if peer else None}
-        return {"you": you, "peers": peers, "remaining_total_before_this_reply": before,
-                "remaining_total_after_this_reply": max(0, before - 1), "invitation": invitation, "reply": reply,
-                "reply_guide_chars": GROUP_REPLY_GUIDE_CHARS, "continue_max_chars": GROUP_REPLY_CONTINUE_MAX_CHARS}
+        snapshot = {"you": you, "peers": peers, "remaining_total_before_this_reply": before,
+                    "remaining_total_after_this_reply": max(0, before - 1), "invitation": invitation, "reply": reply,
+                    "reply_guide_chars": GROUP_REPLY_GUIDE_CHARS, "continue_max_chars": GROUP_REPLY_CONTINUE_MAX_CHARS}
+        if turn is not None and len(grants) >= 2:  # P052 r05: a dispatched GROUP turn only (never a direct request)
+            snapshot["round_context"] = self.round_context(session, rnd)
+        return snapshot
+
+    @staticmethod
+    def round_context(session: Session, rnd: GroupRound) -> dict:
+        """P052 r05: trusted, compact opening provenance of a round, read ONLY from its committed columns (so it is the
+        same after a restart).  A historical round without a recorded origin is ``unknown`` with no Owner attribution
+        and no lineage.  No actor id, name or message body is included."""
+        via = rnd.opened_via if rnd.opened_via in ROUND_VIA_VALUES else None
+        context: dict = {"round_no": rnd.round_no, "opened_via": via or "unknown"}
+        if via is not None:
+            context["authorized_by_role"] = "owner"  # every recorded origin is an authorized Owner action
+        if via == ROUND_VIA_OWNER_CONTINUE and rnd.previous_round_id:
+            previous = session.get(GroupRound, rnd.previous_round_id)
+            if previous is not None:
+                context["previous_round_no"] = previous.round_no
+            if rnd.previous_stop_reason:
+                context["previous_stop_reason"] = rnd.previous_stop_reason
+        return context
 
     def direct_quota_snapshot(self, session: Session, room: Conversation, agent_id: str) -> dict | None:
         """P052 C3: the equivalent truthful pre-turn information for a legacy DIRECT Architect delivery (no Core turn).
@@ -1366,7 +1399,8 @@ class WorkerConversationCore:
             rnd = GroupRound(round_id=str(uuid.uuid4()), conversation_id=room.conversation_id, round_no=number,  # type: ignore[union-attr]
                              state=ROUND_OPEN, per_agent_quota=n, current_pass=0,
                              authorizing_message_id=owner_message.message_id, authorized_by=actor_id,
-                             authorized_by_assurance=actor_assurance, created_at=_now())
+                             authorized_by_assurance=actor_assurance, created_at=_now(),
+                             opened_via=ROUND_VIA_AGENT_INVITATION)
             session.add(rnd)
             session.flush()
             self._join(session, room, agent_id, owner_message.ordinal, actor_id)  # type: ignore[arg-type]
@@ -1378,7 +1412,8 @@ class WorkerConversationCore:
                                             failed=False))
             session.flush()
             self._note(session, "round_opened", room.conversation_id, round_id=rnd.round_id, round_no=number,  # type: ignore[union-attr]
-                       decision="architect_direct_invitation", authorizing_message_id=owner_message.message_id,
+                       decision="architect_direct_invitation", opened_via=ROUND_VIA_AGENT_INVITATION,
+                       authorizing_message_id=owner_message.message_id,
                        closed_round_id=None if closed is None else closed.round_id,
                        grants=self._grants_view(session, rnd))
             self._create_pass(session, rnd, 0, invited, {peer: reply.message_id for peer in invited})
@@ -1560,6 +1595,9 @@ class WorkerConversationCore:
             waiting = [a for a in unanswered if self._invite_problem(session, room, a, inviter=None) is None]
             if not waiting:
                 raise ConversationConflict("No addressed Agent is waiting for a reply; write a new message instead")
+            # P052 r05: the PRE-close stop reason, read from the authoritative state that made Continue eligible (an
+            # addressed Agent left unanswered because its quota was exhausted), recorded atomically on the new round.
+            previous_stop = "quota_exhausted"
             latest = self._latest_owner_message(session, room.conversation_id)
             participants = [g.agent_id for g in session.scalars(select(GroupRoundGrant).where(
                 GroupRoundGrant.round_id == current.round_id).order_by(GroupRoundGrant.agent_id))
@@ -1575,14 +1613,18 @@ class WorkerConversationCore:
             rnd = GroupRound(round_id=str(uuid.uuid4()), conversation_id=room.conversation_id, round_no=number,
                              state=ROUND_OPEN, per_agent_quota=n, current_pass=0,
                              authorizing_message_id=None if latest is None else latest.message_id,
-                             authorized_by=actor.actor_id, authorized_by_assurance=actor.assurance, created_at=_now())
+                             authorized_by=actor.actor_id, authorized_by_assurance=actor.assurance, created_at=_now(),
+                             opened_via=ROUND_VIA_OWNER_CONTINUE, previous_round_id=current.round_id,
+                             previous_stop_reason=previous_stop)
             session.add(rnd)
             session.flush()
             for agent_id in participants:
                 session.add(GroupRoundGrant(round_id=rnd.round_id, agent_id=agent_id, quota=n, published_count=0,
                                             failed=False))
             self._note(session, "round_opened", room.conversation_id, round_id=rnd.round_id, round_no=number,
-                       decision="owner_continue", authorizing_message_id=rnd.authorizing_message_id,
+                       decision="owner_continue", opened_via=ROUND_VIA_OWNER_CONTINUE,
+                       closed_round_id=current.round_id, stop_reason=previous_stop,
+                       authorizing_message_id=rnd.authorizing_message_id,
                        grants=self._grants_view(session, rnd))
             self._create_pass(session, rnd, 0, waiting, {a: unanswered[a] for a in waiting})
             session.flush()
@@ -2139,6 +2181,7 @@ class WorkerConversationCore:
             GroupTurn.pass_no, GroupTurn.position)).all()
         return {"round_id": rnd.round_id, "round_no": rnd.round_no, "state": rnd.state,
                 "authorizing_message_id": rnd.authorizing_message_id,
+                "opened_via": self.round_context(session, rnd)["opened_via"],  # P052 r05 (additive)
                 "per_agent_quota": rnd.per_agent_quota, "current_pass": rnd.current_pass,
                 "grants": {g.agent_id: {"quota": g.quota, "published": g.published_count, "failed": g.failed}
                            for g in grants},

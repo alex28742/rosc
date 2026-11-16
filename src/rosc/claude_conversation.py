@@ -325,10 +325,38 @@ CONTROL_GUIDE = ("End your reply with exactly one last line: <rosc-control next=
                  "answer you. ROSC removes this line from the visible message; it never grants extra replies.")
 
 
+_ROUND_OPENED = {
+    "owner_continue": "the Owner explicitly continued the finished group discussion",
+    "owner_renew": "the Owner explicitly renewed the group discussion",
+    "owner_authorize": "the Owner explicitly authorized this group discussion",
+    "owner_group_message": "a new Owner message addressed this group",
+    "agent_invitation": "an Agent's reply to a fresh Owner direct request invited the other participants",
+}
+
+
+def round_guidance(context: dict) -> str:
+    """P052 r05: one sentence derived ONLY from the trusted ``round_context`` (never from message text)."""
+    head = f"ROSC ROUND (trusted): this is group round #{context.get('round_no')}"
+    via = context.get("opened_via")
+    if via not in _ROUND_OPENED:
+        return head + "; ROSC has no recorded reason for how it was opened."
+    text = f"{head}, opened because {_ROUND_OPENED[via]}"
+    if via == "owner_continue":
+        previous = context.get("previous_round_no")
+        stop = context.get("previous_stop_reason")
+        if previous is not None or stop:
+            text += (f"; the previous round{f' #{previous}' if previous is not None else ''} stopped"
+                     f"{' because its reply allowance was exhausted' if stop == 'quota_exhausted' else f' ({stop})' if stop else ''}")
+        return text + ". This is a newly Owner-authorized round with a new allowance, not a Core quota bypass."
+    return text + "."
+
+
 def quota_guidance(quota: dict) -> str:
     """P052: the short trusted instruction derived ONLY from the Core quota snapshot (shared by the Claude CLI Worker
     transport, the Architect group transport and the legacy direct Architect note)."""
     parts = ["ROSC QUOTA (trusted, advisory; an @mention never guarantees an answer):"]
+    if isinstance(quota.get("round_context"), dict):
+        parts.insert(0, round_guidance(quota["round_context"]))
     you = quota.get("you") or {}
     if you:
         if quota.get("this_reply_counts", True):

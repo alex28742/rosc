@@ -791,6 +791,16 @@ PARTY_OWNER_REF = "owner"
 MEMBER_ACTIVE, MEMBER_PASSIVE, MEMBER_RELEASED = "active", "passive", "released"
 LANE_ACTIVE, LANE_INVALIDATED = "active", "invalidated"
 ROUND_OPEN, ROUND_AWAITING_OWNER, ROUND_CLOSED = "open", "awaiting_owner", "closed"
+# P052 r05: allowlisted Core origin of a round (``GroupRound.opened_via``), written in the transaction that opens it.
+# NULL = a historical round whose origin was never recorded ("unknown"); it is never back-filled or guessed.
+ROUND_VIA_OWNER_DIRECT = "owner_direct_request"  # Owner -> one Agent (a direct request, not a discussion)
+ROUND_VIA_OWNER_GROUP_MESSAGE = "owner_group_message"  # a new Owner message addressed to two or more Agents
+ROUND_VIA_OWNER_AUTHORIZE = "owner_authorize"
+ROUND_VIA_OWNER_RENEW = "owner_renew"
+ROUND_VIA_OWNER_CONTINUE = "owner_continue"
+ROUND_VIA_AGENT_INVITATION = "agent_invitation"  # an Agent's reply to a fresh Owner direct request invited peers
+ROUND_VIA_VALUES = (ROUND_VIA_OWNER_DIRECT, ROUND_VIA_OWNER_GROUP_MESSAGE, ROUND_VIA_OWNER_AUTHORIZE,
+                    ROUND_VIA_OWNER_RENEW, ROUND_VIA_OWNER_CONTINUE, ROUND_VIA_AGENT_INVITATION)
 TURN_QUEUED, TURN_RESERVED, TURN_SUBMITTED, TURN_ACCEPTED = "queued", "reserved", "submitted", "accepted"
 TURN_REPLY_CAPTURED, TURN_PUBLISHED, TURN_DEFERRED, TURN_FAILED = "reply_captured", "published", "deferred", "failed"
 TURN_UNKNOWN, TURN_CANCELLED = "unknown", "cancelled"
@@ -979,6 +989,10 @@ class GroupRound(Base):
     authorized_by_assurance: Mapped[str] = mapped_column(String(32))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
     closed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    # P052 r05 (migration 0017, additive): trusted opening provenance; NULL on historical rows = unknown.
+    opened_via: Mapped[str | None] = mapped_column(String(40), nullable=True)
+    previous_round_id: Mapped[str | None] = mapped_column(String(36), nullable=True)  # lineage of an Owner Continue
+    previous_stop_reason: Mapped[str | None] = mapped_column(String(40), nullable=True)
 
 
 class GroupRoundGrant(Base):

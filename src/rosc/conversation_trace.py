@@ -77,7 +77,7 @@ FIELDS: dict[str, str] = {
     "scope": "code", "sender_kind": "code", "delivery_mode": "code", "route": "code", "state": "code",
     "from_state": "code", "to_state": "code", "reason": "code", "outcome": "code", "status": "code",
     "error_code": "code", "transport": "code", "stop_reason": "code", "mode": "code", "previous_mode": "code",
-    "decision": "code", "claim": "code", "intent": "code", "intent_source": "code", "to_source": "code",
+    "decision": "code", "opened_via": "code", "claim": "code", "intent": "code", "intent_source": "code", "to_source": "code",
     "replayed": "bool", "this_reply_counts": "bool",
     "to": "refs", "typed_refs": "refs", "selected_refs": "refs", "invited": "refs", "next_turn": "refs",
     "unknown_names": "count",
@@ -169,6 +169,14 @@ def _quota(snapshot: object) -> dict | None:
                            "default_to": _ref(reply.get("default_to")),
                            "default_to_can_answer": bool(reply.get("default_to_can_answer")),
                            "default_to_remaining": _clean("count", reply.get("default_to_remaining"))}
+    context = snapshot.get("round_context")
+    if isinstance(context, dict):  # P052 r05: allowlisted opening provenance (numbers and ROSC codes only)
+        result["round_context"] = {k: v for k, v in (
+            ("round_no", _clean("count", context.get("round_no"))),
+            ("opened_via", _clean("code", context.get("opened_via"))),
+            ("authorized_by_role", _clean("code", context.get("authorized_by_role"))),
+            ("previous_round_no", _clean("count", context.get("previous_round_no"))),
+            ("previous_stop_reason", _clean("code", context.get("previous_stop_reason")))) if v is not None}
     invitation = snapshot.get("invitation")
     if isinstance(invitation, dict):
         agents = [a for a in (entry(a) for a in invitation.get("agents") or [] if isinstance(invitation.get("agents"), list)) if a]
