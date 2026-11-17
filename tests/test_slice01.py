@@ -657,7 +657,9 @@ class HardeningTests(StageCase):
                                   "conversation_message_envelopes", "conversation_message_parties",
                                   "conversation_members", "conversation_member_gaps", "agent_native_lanes",
                                   "agent_inbound_cursors", "conversation_dispatch_controls", "group_rounds",
-                                  "group_round_grants", "group_turns", "rosc_settings"})
+                                  "group_round_grants", "group_turns", "rosc_settings",
+                                  # P054A managed Run foundation (additive; empty after registration)
+                                  "managed_run_states", "managed_run_events"})
 
 
 if __name__ == "__main__":

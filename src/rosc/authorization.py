@@ -62,6 +62,12 @@ RUN_READ = "run.read"
 RUN_REPORT_REGISTER = "run.report.register"
 RUN_EVIDENCE_REGISTER = "run.evidence.register"
 RUN_LINK_AGENT = "run.link_agent"
+# P054A managed Run.  ``run.launch`` is the explicit Owner consent to start ONE formal Run of a Task on a selected Worker;
+# it is never implied by Prompt approval (``task.prompt.approve``), Worker activation/bootstrap, a read or a mention.
+# ``run.reconcile`` only records evidence-backed delivery facts of an existing managed Run and never sends anything.
+# Status/list of managed Runs reuse ``run.read`` / ``run.list`` (read-only).
+RUN_LAUNCH = "run.launch"
+RUN_RECONCILE = "run.reconcile"
 # M3-A durable Project Conversation (P014). Reading and Owner-authored messages are separate operations. Neither
 # activates an Agent, creates a Run or grants an Agent participant any authority.
 CONVERSATION_READ = "conversation.read"
@@ -126,6 +132,8 @@ _SHAPES: dict[str, tuple[frozenset[str], frozenset[str]]] = {
     RUN_EVIDENCE_REGISTER: (frozenset({"project_id", "run_id"}), frozenset()),
     # agent_id is the *target* of the Owner-curated correspondence; it never selects the actor.
     RUN_LINK_AGENT: (frozenset({"project_id", "run_id", "agent_id"}), frozenset()),
+    RUN_LAUNCH: (frozenset({"project_id", "task_id", "agent_id"}), frozenset()),
+    RUN_RECONCILE: (frozenset({"project_id", "run_id"}), frozenset()),
     CONVERSATION_READ: (frozenset({"project_id"}), frozenset({"task_id"})),
     CONVERSATION_MESSAGE_CREATE: (frozenset({"project_id"}), frozenset({"task_id"})),
     ARCHITECT_STATUS: (frozenset({"project_id"}), frozenset()),

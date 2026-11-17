@@ -31,6 +31,7 @@ from .architect_tools import ToolHost
 from .project_context import ProjectContextBroker
 from .task_authoring import (AuthoringError, TaskAuthoringService)
 from .worker_session import WorkerSessionService
+from .run_launch import RunLaunchError, RunLaunchService
 from .config import data_dir, global_library_dir, repo_private_paths
 from .conversation import (DEFAULT_PAGE_SIZE, ConversationConflict, ConversationDenied, ConversationError,
                            ConversationNotFound, ConversationStoreError, InvalidConversationInput,
@@ -96,6 +97,14 @@ class PromptSaveInput(BaseModel):
 
 class PromptApproveInput(BaseModel):
     digest: str = Field(min_length=64, max_length=64)
+
+
+class RunLaunchInput(BaseModel):
+    """P054A explicit Owner Run start.  ``launch_key`` is the client's idempotency key: an exact retry returns the same
+    Run and never dispatches twice."""
+    agent_id: str = Field(min_length=36, max_length=36)
+    launch_key: str = Field(min_length=8, max_length=96)
+    ack_timeout_seconds: int | None = None
 
 
 def utc_iso(value: datetime) -> str:
@@ -415,6 +424,7 @@ def create_app(db_path: Path | None = None, workspace_root: Path | None = None, 
                latency_trace: LatencyTrace | None = None,
                architect_rules: ArchitectRulesLoader | None = None,
                worker_session_service: WorkerSessionService | None = None,
+               run_launch_service: RunLaunchService | None = None,
                group_transport_factory: TransportFactory | None = None,
                conversation_trace: ctrace.ConversationTrace | None = None) -> FastAPI:
     """``auth_provider``/``authorization_policy`` and the ``extra_allowed_*`` sets are Python-level composition and
@@ -438,6 +448,10 @@ def create_app(db_path: Path | None = None, workspace_root: Path | None = None, 
     # The runtime is a Python-level composition seam like the policy: no request can select or configure it.
     library_root = global_library_root or DEFAULT_GLOBAL_LIBRARY
     authoring = TaskAuthoringService(sessions, policy, workspace_root)
+    # P054A: Owner-only formal Run launch over the P041 package + P042 Worker CLI (composition seam, never request-selected).
+    run_launch = run_launch_service or RunLaunchService(
+        sessions, policy, workspace_root, worker_sessions, authoring, library_root or Path("/nonexistent"),
+        private_paths=(db_path.parent, *repo_private_paths()))
     context_broker = ProjectContextBroker(sessions, workspace_root, library_root,
                                         private_roots=(db_path.parent, db_path, *repo_private_paths()),
                                         authoring=authoring)
@@ -864,6 +878,32 @@ def create_app(db_path: Path | None = None, workspace_root: Path | None = None, 
     @app.post("/api/projects/{project_id}/workers/{agent_id}/session/activate")
     def worker_session_activate(project_id: str, agent_id: str) -> dict:
         return registry_call(worker_sessions.activate, current_actor(), numeric_id(project_id, "P"), agent_path_id(agent_id))
+
+    # -- P054A managed Run: explicit Owner start, read-only status/list, evidence-only reconcile -----------------------
+    def run_call(call, *args, **kwargs):
+        try:
+            return call(*args, **kwargs)
+        except RunLaunchError as exc:
+            raise HTTPException(exc.http, {"code": exc.code, "message": str(exc)}) from None
+
+    @app.post("/api/projects/{project_id}/tasks/{task_id}/runs")
+    def launch_run(project_id: str, task_id: str, data: RunLaunchInput, response: Response) -> dict:
+        result = run_call(run_launch.launch, current_actor(), *task_ids(project_id, task_id), data.agent_id,
+                          launch_key=data.launch_key, ack_timeout_seconds=data.ack_timeout_seconds)
+        response.status_code = 201 if result.get("created") else 200
+        return result
+
+    @app.get("/api/projects/{project_id}/tasks/{task_id}/runs")
+    def list_task_runs(project_id: str, task_id: str) -> list[dict]:
+        return run_call(run_launch.list_task_runs, current_actor(), *task_ids(project_id, task_id))
+
+    @app.get("/api/projects/{project_id}/runs/{run_id}")
+    def run_status(project_id: str, run_id: str) -> dict:
+        return run_call(run_launch.status, current_actor(), numeric_id(project_id, "P"), run_id)
+
+    @app.post("/api/projects/{project_id}/runs/{run_id}/reconcile")
+    def reconcile_run(project_id: str, run_id: str) -> dict:
+        return run_call(run_launch.reconcile, current_actor(), numeric_id(project_id, "P"), run_id)
 
     @app.post("/api/projects/{project_id}/workers/{agent_id}/session/bootstrap")
     def worker_session_bootstrap(project_id: str, agent_id: str) -> dict:

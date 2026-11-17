@@ -29,7 +29,7 @@ OWNED_TABLES = ("conversations", "conversation_participants", "conversation_mess
 LEGACY_TABLES = ("projects", "project_root_bindings", "tasks", "agent_definitions", "agent_capabilities",
                  "role_assignments", "assignment_capabilities", "run_records", "run_agent_links", "report_records",
                  "evidence_records")
-HEAD = "0018_architect_onboarding_attempt"  # P053 added 0018; P052 r05 added 0017; P029 added 0009; P019 added 0008; P018 added 0007; P015 added 0006; P014 tables are created by 0005
+HEAD = "0019_managed_run_foundation"  # P054A added 0019; P053 added 0018; P052 r05 added 0017; P029 added 0009; P019 added 0008; P018 added 0007; P015 added 0006; P014 tables are created by 0005
 
 
 class AgentProvider:

@@ -688,6 +688,29 @@ class WorkerSessionService:
         obs.bootstrap = self._observe_bootstrap(row, project, obs)
         return obs
 
+    # -- P054A formal-Run seams (used only by ``rosc.run_launch``; never start, stop or bootstrap anything) ---------
+    @property
+    def state_dir(self) -> Path:
+        return self._dir
+
+    def run_target(self, session: Session, project: Project, agent_id: str) -> tuple[Observation, WorkerSession | None]:
+        """Read-only observation of the Project's Worker CLI binding, including its project bootstrap state.
+        Returns ``not_assigned`` when there is no active Project-scoped Worker assignment."""
+        agent = session.get(AgentDefinition, agent_id)
+        if agent is None:
+            raise AgentNotFound("Agent not found")
+        _project, _agent, assignment = self._context(session, project.id, agent_id)
+        return self._observe(session, project, agent, assignment)
+
+    def run_evidence_base(self, incarnation: str) -> Path:
+        """``<state dir>/<incarnation>``: prefix of the CLI hook evidence files of one incarnation."""
+        return self._dir / incarnation
+
+    def deliver_run_line(self, row: WorkerSession, text: str) -> None:
+        """Type ONE Run delivery line into the exactly-bound pane.  No Enter repetition and no resend: the caller has
+        already recorded a durable dispatch intent, and only the CLI's own hooks can prove a submission."""
+        self._tmux.send_text(row.pane_id, text)
+
     def _cleanup(self, name: str) -> None:
         try:
             self._tmux.kill_session(name)

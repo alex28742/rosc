@@ -281,6 +281,8 @@ class GlobalLibraryTests(p19.ContextCase):
         self.assertEqual(shipped, sorted([
             "README.md", "agents/architect/documentation-standard.yaml", "agents/architect/ruleset.yaml",
             "agents/architect/templates/README.md", "agents/workers/README.md", "principles/context-economy.md",
+            # P054A: pinned Worker Role Rules + Execution Protocol (delivered only through a Run package)
+            "agents/workers/ruleset.yaml", "agents/workers/rules/role.md", "agents/workers/rules/execution-protocol.md",
             "skills/README.md", "tools/README.md",
             *(f"agents/architect/rules/{n}.md" for n in (
                 "role", "onboarding", "context-maintenance", "pipeline-management", "autonomy", "research", "review",

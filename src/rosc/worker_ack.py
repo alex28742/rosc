@@ -11,6 +11,17 @@ Modes (``python3 worker_ack.py <mode>``):
 * ``stop``     - Stop: when the finished turn's last message carries the request's correlated marker line, write the
   small bootstrap acknowledgement (token, claimed outcome, observed reads).  Anything else is ignored.
 
+P054A formal Run (E0) evidence uses the SAME four hook modes but its own, incarnation-scoped files, so it never touches
+the project-bootstrap files above.  It is active only while Core has written ``<incarnation>.run-request.json``
+(run id, correlation token, package directory, manifest digest):
+
+* ``submit`` also writes ``<incarnation>.run-<token>.submitted.json`` when the submitted prompt carries the Run token;
+* ``read``   also appends Read paths inside that Run's package directory to ``<incarnation>.run-<token>.reads.jsonl``;
+* ``stop``   writes the write-once ``<incarnation>.run-<token>.receipt.json`` when the finished turn's last message has
+  the line ``ROSC-RUN-ACK <token> <run_id> <manifest_sha256> ACCEPT|DECLINE`` for exactly that request.
+
+These files are evidence for Core to evaluate, never a state change: Core alone decides ``acknowledged``/``declined``.
+
 Nothing here talks to the Engine or a model; every mode is a no-op outside a ROSC-managed session.
 
 Original r01 description of the ``session`` mode:
@@ -75,6 +86,93 @@ def _load(path: str) -> dict | None:
     except (OSError, ValueError):
         return None
     return data if isinstance(data, dict) else None
+
+
+RUN_MARKER = "ROSC-RUN-ACK"
+
+
+def _canonical_token(value: object) -> bool:
+    return (isinstance(value, str) and len(value) == 36 and value.count("-") == 4
+            and all(c in "0123456789abcdef-" for c in value))
+
+
+def _run_request(target: str, nonce: str) -> dict | None:
+    """The current Run request of THIS incarnation, or ``None`` (no formal Run in flight / not ours / malformed)."""
+    request = _load(_sibling(target, ".run-request.json"))
+    if (not request or request.get("incarnation") != nonce or not _canonical_token(request.get("token"))
+            or not _canonical_token(request.get("run_id")) or not isinstance(request.get("package_dir"), str)
+            or not isinstance(request.get("manifest_sha256"), str)):
+        return None
+    return request
+
+
+def _run_file(target: str, token: str, suffix: str) -> str:
+    return _sibling(target, f".run-{token}{suffix}")
+
+
+def _run_submit(target: str, nonce: str, event: dict) -> None:
+    request = _run_request(target, nonce)
+    prompt = event.get("prompt")
+    if request is None or not isinstance(prompt, str) or request["token"] not in prompt:
+        return
+    path = _run_file(target, request["token"], ".submitted.json")
+    if os.path.exists(path):
+        return  # first submission only
+    _atomic_write(path, {"incarnation": nonce, "token": request["token"], "run_id": request["run_id"],
+                         "cli_session_id": str(event.get("session_id", ""))[:64],
+                         "ancestors": ancestors(os.getpid()), "acked_at": time.time()})
+
+
+def _run_read(target: str, nonce: str, event: dict) -> None:
+    request = _run_request(target, nonce)
+    tool_input = event.get("tool_input")
+    path = tool_input.get("file_path") if isinstance(tool_input, dict) else None
+    if request is None or event.get("tool_name") != "Read" or not isinstance(path, str):
+        return
+    package = os.path.realpath(request["package_dir"])
+    real = os.path.realpath(path)
+    if not real.startswith(package + os.sep):
+        return
+    try:
+        with open(_run_file(target, request["token"], ".reads.jsonl"), "a", encoding="utf-8") as handle:
+            handle.write(json.dumps({"token": request["token"], "path": real[:1024], "at": time.time()}) + "\n")
+    except OSError:
+        pass
+
+
+def _run_stop(target: str, nonce: str, event: dict) -> None:
+    request = _run_request(target, nonce)
+    message = event.get("last_assistant_message")
+    if request is None or not isinstance(message, str):
+        return
+    receipt = _run_file(target, request["token"], ".receipt.json")
+    if os.path.exists(receipt):
+        return  # write-once: a later turn can never replace the first receipt
+    decision = None
+    for line in message.splitlines():
+        parts = line.strip().split()
+        if (len(parts) == 5 and parts[0] == RUN_MARKER and parts[1] == request["token"]
+                and parts[2] == request["run_id"] and parts[3] == request["manifest_sha256"]
+                and parts[4] in ("ACCEPT", "DECLINE")):
+            decision = parts[4]
+    if decision is None:
+        return  # an unrelated, foreign or malformed turn is never a receipt
+    reads: list[str] = []
+    try:
+        with open(_run_file(target, request["token"], ".reads.jsonl"), "r", encoding="utf-8") as handle:
+            for raw in handle.readlines()[-200:]:
+                try:
+                    item = json.loads(raw)
+                except ValueError:
+                    continue
+                if isinstance(item, dict) and item.get("token") == request["token"] and isinstance(item.get("path"), str):
+                    reads.append(item["path"])
+    except OSError:
+        pass
+    _atomic_write(receipt, {"incarnation": nonce, "token": request["token"], "run_id": request["run_id"],
+                            "manifest_sha256": request["manifest_sha256"], "decision": decision,
+                            "observed_reads": sorted(set(reads)), "ancestors": ancestors(os.getpid()),
+                            "acked_at": time.time()})
 
 
 def _session(target: str, nonce: str, event: dict) -> None:
@@ -159,6 +257,10 @@ def main(argv: list[str] | None = None) -> int:
     try:
         {"session": _session, "read": _read, "submit": _submit, "stop": _stop}.get(mode, lambda *_: None)(target, nonce, event)
     except Exception:  # a hook must never break the CLI
+        pass
+    try:  # P054A: independent formal-Run evidence; never affects the bootstrap handling above
+        {"read": _run_read, "submit": _run_submit, "stop": _run_stop}.get(mode, lambda *_: None)(target, nonce, event)
+    except Exception:
         pass
     return 0
 

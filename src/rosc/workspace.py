@@ -383,3 +383,66 @@ def repair_project(workspace_root: Path, project: Project) -> dict | None:
 def repair_task(workspace_root: Path, task: Task) -> dict | None:
     return _repair(task_manifest_path(workspace_root, task), task_payload(task), task_identity(task),
                    TASK_UNATTRIBUTED, workspace_root, "tasks", f"T{task.id:04d}")
+
+
+# -- P054A managed Run directories ------------------------------------------------------------------------------------
+# ``<artifact root>/projects/P####/tasks/T####/runs/<canonical run id>/``.  The default artifact root is the ROSC
+# Workspace (``<ROSC_DATA_DIR>/workspace``); a per-Project override uses the very same hierarchy (validated by the
+# caller, ``run_launch.validate_artifact_root``).  Everything is created owner-private (0700) and never through a
+# symlink; the Run directory itself is created exclusively, so a second Run can never reuse or overwrite it.
+RUN_DIR_MODE = 0o700
+
+
+def task_directory(workspace_root: Path, project_id: int, task_id: int) -> Path:
+    return project_directory(workspace_root, project_id) / "tasks" / f"T{task_id:04d}"
+
+
+def run_directory(workspace_root: Path, project_id: int, task_id: int, run_id: str) -> Path:
+    if not isinstance(run_id, str) or len(run_id) != 36 or not all(c in "0123456789abcdef-" for c in run_id):
+        raise WorkspaceConflict(UNSAFE, "Run id is not canonical")
+    return task_directory(workspace_root, project_id, task_id) / "runs" / run_id
+
+
+def _ensure_private_directory(path: Path) -> None:
+    if path.is_symlink() or (path.exists() and not path.is_dir()):
+        raise WorkspaceConflict(UNSAFE, f"Workspace path {path.name} is a symlink or not a directory")
+    try:
+        path.mkdir(mode=RUN_DIR_MODE)
+    except FileExistsError:
+        pass
+    if path.is_symlink() or not path.is_dir():
+        raise WorkspaceConflict(UNSAFE, f"Workspace path {path.name} is a symlink or not a directory")
+
+
+def check_run_parents(artifact_root: Path, project_id: int, task_id: int) -> None:
+    """Fail closed (``WorkspaceConflict``) when an EXISTING component of the Run hierarchy is a symlink/non-directory or
+    resolves outside the artifact root.  Read-only: creates nothing (used by the launch preflight)."""
+    root = Path(artifact_root)
+    if root.is_symlink() or not root.is_dir():
+        raise WorkspaceConflict(UNSAFE, "Artifact root is missing, a symlink or not a directory")
+    resolved_root = root.resolve()
+    current = root
+    for part in ("projects", f"P{project_id:04d}", "tasks", f"T{task_id:04d}", "runs"):
+        current = current / part
+        if current.is_symlink() or (current.exists() and not current.is_dir()):
+            raise WorkspaceConflict(UNSAFE, f"Workspace path {part} is a symlink or not a directory")
+        if current.exists() and not current.resolve().is_relative_to(resolved_root):
+            raise WorkspaceConflict(UNSAFE, f"Workspace path {part} escapes the artifact root")
+
+
+def create_run_directory(artifact_root: Path, project_id: int, task_id: int, run_id: str) -> Path:
+    """Create the Run directory exclusively (0700).  An existing directory for this canonical Run id is returned only when
+    it is a real directory (an interrupted earlier publish of the SAME Run); its contents are verified by the caller."""
+    check_run_parents(artifact_root, project_id, task_id)
+    root = Path(artifact_root)
+    for path in (root / "projects", project_directory(root, project_id), project_directory(root, project_id) / "tasks",
+                 task_directory(root, project_id, task_id)):
+        _ensure_directory(path)
+    runs = task_directory(root, project_id, task_id) / "runs"
+    _ensure_private_directory(runs)
+    target = run_directory(root, project_id, task_id, run_id)
+    _ensure_private_directory(target)
+    if not target.resolve().is_relative_to(root.resolve()):
+        raise WorkspaceConflict(UNSAFE, "Run directory escapes the artifact root")
+    os.chmod(target, RUN_DIR_MODE)
+    return target

@@ -1074,3 +1074,99 @@ class RoscSetting(Base):
     value_int: Mapped[int] = mapped_column(Integer)
     updated_by: Mapped[str] = mapped_column(String(64))
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
+
+
+# P054A managed Run foundation.  ``run_records.run_id`` stays the ONE Run identity; a managed Run additionally has exactly
+# one ``ManagedRunState`` (same ``run_id``) and an append-only ``ManagedRunEvent`` audit.  States are Core-trusted
+# delivery facts only: ``acknowledged`` means a correlated Worker receipt was recorded by the CLI's own hook, never that
+# the Worker read everything, is running, made progress or that the Task is verified/accepted.
+MANAGED_SOURCE_KIND = "rosc.managed_run"
+RUN_AUTHORIZED = "authorized"            # Run identity + snapshot recorded; no CLI side effect yet
+RUN_DISPATCH_PENDING = "dispatch_pending"  # offline package published and verified; still no CLI side effect
+RUN_DISPATCHING = "dispatching"          # durable dispatch intent: from here delivery MAY have happened
+RUN_SUBMITTED = "submitted"              # the CLI's UserPromptSubmit hook saw the exact Run token
+RUN_ACKNOWLEDGED = "acknowledged"        # correlated Worker ACCEPT receipt + required package reads
+RUN_DECLINED = "declined"                # correlated Worker DECLINE receipt (terminal)
+RUN_UNKNOWN = "unknown"                  # no proof within the ACK window (or inconsistent evidence); holds the slot
+RUN_NOT_DELIVERED = "not_delivered"      # provably nothing was sent (failed before the dispatch intent); terminal
+MANAGED_RUN_STATES = (RUN_AUTHORIZED, RUN_DISPATCH_PENDING, RUN_DISPATCHING, RUN_SUBMITTED, RUN_ACKNOWLEDGED,
+                      RUN_DECLINED, RUN_UNKNOWN, RUN_NOT_DELIVERED)
+MANAGED_HOLDING_STATES = (RUN_AUTHORIZED, RUN_DISPATCH_PENDING, RUN_DISPATCHING, RUN_SUBMITTED, RUN_ACKNOWLEDGED,
+                          RUN_UNKNOWN)
+_MANAGED_HOLDING = _in_list("state", MANAGED_HOLDING_STATES)
+
+
+class ManagedRunState(Base):
+    """1:1 managed lifecycle of a ``RunRecord`` with ``execution_origin='managed'`` (see migration 0019)."""
+
+    __tablename__ = "managed_run_states"
+    __table_args__ = (
+        CheckConstraint(_in_list("state", MANAGED_RUN_STATES), name="ck_managed_run_states_state"),
+        CheckConstraint("ack_timeout_seconds BETWEEN 30 AND 3600", name="ck_managed_run_states_timeout"),
+        CheckConstraint("state_revision >= 1", name="ck_managed_run_states_revision"),
+        CheckConstraint("spec_revision >= 1 AND prompt_revision >= 1 AND root_binding_version >= 1",
+                        name="ck_managed_run_states_revisions"),
+        CheckConstraint("state NOT IN ('dispatching', 'submitted', 'acknowledged', 'declined') "
+                        "OR (dispatch_intent_at IS NOT NULL AND manifest_sha256 IS NOT NULL)",
+                        name="ck_managed_run_states_intent"),
+        UniqueConstraint("run_token", name="uq_managed_run_states_token"),
+        ForeignKeyConstraint(["project_id", "root_binding_version"],
+                             ["project_root_bindings.project_id", "project_root_bindings.version"],
+                             ondelete="RESTRICT", name="fk_managed_run_states_binding"),
+        Index("ix_managed_run_states_task", "project_id", "task_id"),
+        Index("ux_managed_run_states_task_holding", "task_id", unique=True, sqlite_where=text(_MANAGED_HOLDING)),
+        Index("ux_managed_run_states_worker_holding", "project_id", "agent_id", unique=True,
+              sqlite_where=text(_MANAGED_HOLDING)),
+    )
+
+    run_id: Mapped[str] = mapped_column(ForeignKey("run_records.run_id", ondelete="RESTRICT"), primary_key=True)
+    project_id: Mapped[int] = mapped_column(ForeignKey("projects.id", ondelete="RESTRICT"))
+    task_id: Mapped[int] = mapped_column(ForeignKey("tasks.id", ondelete="RESTRICT"))
+    package_id: Mapped[int] = mapped_column(ForeignKey("execution_packages.id", ondelete="RESTRICT"))
+    prompt_approval_id: Mapped[int] = mapped_column(ForeignKey("prompt_approvals.id", ondelete="RESTRICT"))
+    spec_revision: Mapped[int] = mapped_column(Integer)
+    spec_digest: Mapped[str] = mapped_column(String(64))
+    prompt_revision: Mapped[int] = mapped_column(Integer)
+    prompt_digest: Mapped[str] = mapped_column(String(64))
+    root_binding_version: Mapped[int] = mapped_column(Integer)
+    agent_id: Mapped[str] = mapped_column(ForeignKey("agent_definitions.agent_id", ondelete="RESTRICT"))
+    worker_session_id: Mapped[str] = mapped_column(ForeignKey("worker_sessions.session_id", ondelete="RESTRICT"))
+    incarnation: Mapped[str] = mapped_column(String(36))   # CLI incarnation snapshot at launch
+    pane_pid: Mapped[int] = mapped_column(Integer)
+    proc_start: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    protocol_version: Mapped[str] = mapped_column(String(32))
+    protocol_sha256: Mapped[str] = mapped_column(String(64))
+    launch_key: Mapped[str] = mapped_column(String(96))     # == run_records.source_key
+    run_token: Mapped[str] = mapped_column(String(36))      # correlation nonce of this Run's delivery; not a credential
+    ack_timeout_seconds: Mapped[int] = mapped_column(Integer)
+    state: Mapped[str] = mapped_column(String(16))
+    reason: Mapped[str] = mapped_column(String(48))
+    manifest_sha256: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    state_revision: Mapped[int] = mapped_column(Integer, default=1)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    dispatch_intent_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    submitted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    acknowledged_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
+class ManagedRunEvent(Base):
+    """Append-only audit of one guarded managed-Run state transition (immutable; never deleted)."""
+
+    __tablename__ = "managed_run_events"
+    __table_args__ = (
+        CheckConstraint("seq >= 1", name="ck_managed_run_events_seq"),
+        CheckConstraint(_in_list("to_state", MANAGED_RUN_STATES), name="ck_managed_run_events_state"),
+        CheckConstraint("evidence IS NULL OR length(evidence) <= 2000", name="ck_managed_run_events_evidence"),
+        UniqueConstraint("run_id", "seq", name="uq_managed_run_events_seq"),
+    )
+
+    event_id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    run_id: Mapped[str] = mapped_column(ForeignKey("managed_run_states.run_id", ondelete="RESTRICT"))
+    seq: Mapped[int] = mapped_column(Integer)
+    from_state: Mapped[str | None] = mapped_column(String(16), nullable=True)
+    to_state: Mapped[str] = mapped_column(String(16))
+    reason: Mapped[str] = mapped_column(String(48))
+    evidence: Mapped[str | None] = mapped_column(Text, nullable=True)  # compact JSON of evidence facts, never content
+    actor: Mapped[str] = mapped_column(String(64))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))

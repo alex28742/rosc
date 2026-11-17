@@ -84,7 +84,7 @@ class FreshRegistrationTests(IdentityCase):
 
     def test_single_migration_head(self) -> None:
         from alembic.script import ScriptDirectory
-        self.assertEqual(ScriptDirectory.from_config(self.alembic).get_heads(), ["0018_architect_onboarding_attempt"])
+        self.assertEqual(ScriptDirectory.from_config(self.alembic).get_heads(), ["0019_managed_run_foundation"])
 
     def test_read_model_adds_identity_and_keeps_legacy_root_path(self) -> None:
         root = self.new_root()
@@ -107,8 +107,12 @@ class FreshRegistrationTests(IdentityCase):
                  "/api/projects/{project_id}/workers/{agent_id}/session/activate",
                  "/api/projects/{project_id}/workers/{agent_id}/session/bootstrap"}
         self.assertLessEqual(p042a, paths)
+        # P054A deliberately adds exactly these Owner-only managed Run routes (explicit start, read, read, reconcile).
+        p054a = {"/api/projects/{project_id}/tasks/{task_id}/runs", "/api/projects/{project_id}/runs/{run_id}",
+                 "/api/projects/{project_id}/runs/{run_id}/reconcile"}
+        self.assertLessEqual(p054a, paths)
         for forbidden in ("binding", "rebind", "unlink", "archive", "run", "worker", "session", "runtime"):
-            self.assertFalse([path for path in paths - p042a if forbidden in path], (forbidden, sorted(paths)))
+            self.assertFalse([path for path in paths - p042a - p054a if forbidden in path], (forbidden, sorted(paths)))
         self.assertIn("/api/projects/{project_id}/tasks", paths)
         self.assertIn("/api/agents", paths)
 

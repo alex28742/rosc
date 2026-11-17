@@ -503,16 +503,24 @@ class AuthorizationTests(ProvenanceCase):
                 self.svc.list_runs(OWNER, 1, malformed)
             self.assertEqual(self.state(), before)
 
-    def test_no_http_surface_exists_for_runs(self) -> None:
-        for path in ("/api/runs", "/api/projects/P0001/runs", "/api/projects/P0001/tasks/T0001/runs"):
+    def test_no_http_surface_exists_for_external_runs(self) -> None:
+        # P054A added an Owner-only MANAGED Run start/status surface; external provenance still has no HTTP route.
+        for path in ("/api/runs", "/api/projects/P0001/runs"):
             self.assertIn(self.client.get(path).status_code, (404, 405))
             self.assertIn(self.client.post(path, json={}).status_code, (404, 405))
+        external = self.mkrun()
+        before = self.state()
+        self.assertEqual(self.client.get("/api/projects/P0001/tasks/T0001/runs").json(), [])  # managed Runs only
+        self.assertEqual(self.client.get(f"/api/projects/P0001/runs/{external['run_id']}").status_code, 404)
+        self.assertEqual(self.client.post("/api/projects/P0001/tasks/T0001/runs",
+                                          json={"source_kind": "manual_import"}).status_code, 422)
+        self.assertEqual(self.state(), before)
 
 
 class MigrationTests(ProvenanceCase):
     def test_single_head_and_fresh_schema(self) -> None:
         from alembic.script import ScriptDirectory
-        self.assertEqual(ScriptDirectory.from_config(self.alembic).get_heads(), ["0018_architect_onboarding_attempt"])
+        self.assertEqual(ScriptDirectory.from_config(self.alembic).get_heads(), ["0019_managed_run_foundation"])
         names = {r[0] for r in self.fetch("SELECT name FROM sqlite_master WHERE type='table'")}
         self.assertTrue(set(OWNED_TABLES) <= names)
         with sqlite3.connect(self.data / "rosc.db") as connection:

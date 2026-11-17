@@ -1,0 +1,859 @@
+"""P054A: Owner-only formal Run launch, offline Run package, Run delivery (E0) and evidence-only reconciliation.
+
+One canonical identity: a managed Run is a P013 ``RunRecord`` (``execution_origin='managed'``, namespaced source kind
+``rosc.managed_run``, ``source_key`` = the launch idempotency key) plus exactly one ``ManagedRunState`` with the same
+``run_id``, created in ONE ``BEGIN IMMEDIATE`` transaction.  The RunRecord carries no external claim or attribution
+(``agent_link_status='unlinked'``, no ``reported_executor``); ``source_attribution_assurance='claimed'`` is the only
+value the P013 schema admits and is not a statement about the Worker.  The authoritative Worker/package/incarnation
+snapshot lives in ``ManagedRunState``.
+
+Lifecycle (Core-trusted delivery facts only)::
+
+    authorized -> dispatch_pending -> dispatching -> submitted -> acknowledged | declined
+         \\______________/      \\__________________________/
+        not_delivered            unknown (no proof in the ACK window, inconsistent evidence)
+
+* Before the durable dispatch intent (``authorized``/``dispatch_pending``) nothing has reached the CLI: a failure is
+  ``not_delivered`` (slot released) and an interrupted launch is resumed only by the exact same launch key.
+* From ``dispatching`` on, delivery MAY have happened: nothing is ever re-sent, restarted, killed or re-created because
+  of a timeout or a restart; only CLI-hook evidence moves the state (``reconcile``), and ``unknown`` keeps the slot.
+* ``submitted`` = the CLI's own ``UserPromptSubmit`` hook saw the exact Run token.  ``acknowledged`` = a write-once
+  receipt from the CLI's ``Stop`` hook with the correlated ``ROSC-RUN-ACK ... ACCEPT`` line from a process descending
+  from the bound pane, plus native Read evidence of the package manifest and pinned protocol files.  It is the Worker's
+  acceptance of the delivery, never progress, ``running``, Task verification or Owner acceptance (P054B / S2).
+
+Status reads are pure; the CLI-side helper (``worker_ack.py``) never imports Core or opens ``rosc.db``.
+"""
+from __future__ import annotations
+
+import hashlib
+import json
+import os
+import re
+import stat
+import threading
+import time
+import uuid
+from collections.abc import Mapping
+from dataclasses import dataclass
+from datetime import datetime, timezone
+from pathlib import Path
+
+import yaml
+from sqlalchemy import or_, select
+from sqlalchemy.exc import IntegrityError, OperationalError
+from sqlalchemy.orm import Session, sessionmaker
+
+from . import authorization as authz
+from .agent_registry import AgentNotFound, InvalidRegistryInput, canonical_agent_id
+from .models import (ASSIGNMENT_ACTIVE, ATTRIBUTION_CLAIMED, LINK_UNLINKED, MANAGED_HOLDING_STATES, MANAGED_SOURCE_KIND,
+                     ORIGIN_MANAGED, ROLE_WORKER, RUN_ACKNOWLEDGED, RUN_AUTHORIZED, RUN_DECLINED, RUN_DISPATCH_PENDING,
+                     RUN_DISPATCHING, RUN_NOT_DELIVERED, RUN_SUBMITTED, RUN_UNKNOWN, AgentDefinition, ExecutionPackage,
+                     ManagedRunEvent, ManagedRunState, Project, ProjectIdentityError, PromptApproval, PromptRevision,
+                     RoleAssignment, RunRecord, Task, TaskSpecRevision, WorkerSession, validate_project_identity)
+from .task_authoring import AuthoringError, TaskAuthoringService, prompt_digest, spec_digest
+from .worker_session import B_CONFIRMED, STATE_ACTIVE, STATE_NOT_ASSIGNED, SessionError, WorkerSessionService
+from .workspace import (READY, WorkspaceConflict, check_run_parents, create_run_directory, inspect_project, inspect_task,
+                        run_directory)
+
+DEFAULT_ACK_TIMEOUT = 300
+MIN_ACK_TIMEOUT, MAX_ACK_TIMEOUT = 30, 3600
+SUBMIT_WAIT_SECONDS = 4.0
+MAX_PACKAGE_BYTES = 1_048_576
+MAX_EVIDENCE_BYTES = 65_536
+MAX_RULES_BYTES = 65_536
+RUN_MANIFEST_FORMAT = "rosc.run.v1"
+WORKER_RULESET = "agents/workers/ruleset.yaml"
+PACKAGE_DIRNAME = "package"
+MANIFEST_NAME = "run.json"
+_LAUNCH_KEY = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:-]{7,95}", re.ASCII)
+_SHA = re.compile(r"[0-9a-f]{64}", re.ASCII)
+_ROLE_FILE = re.compile(r"[a-z][a-z0-9-]{0,40}", re.ASCII)
+
+
+class RunLaunchError(Exception):
+    code, http = "run_error", 503
+
+    def __init__(self, message: str, code: str | None = None) -> None:
+        super().__init__(message)
+        if code:
+            self.code = code
+
+
+class RunLaunchDenied(RunLaunchError):
+    code, http = "forbidden", 403
+
+
+class RunLaunchNotFound(RunLaunchError):
+    code, http = "not_found", 404
+
+
+class RunLaunchInvalid(RunLaunchError):
+    code, http = "invalid", 422
+
+
+class RunLaunchConflict(RunLaunchError):
+    """``code``: launch_key_conflict, run_in_progress, prompt_not_approved, prompt_stale, digest_mismatch,
+    binding_changed, workspace_not_ready, worker_not_assigned, worker_not_active, bootstrap_not_confirmed,
+    worker_changed, artifact_root_unsafe."""
+
+    code, http = "conflict", 409
+
+
+class RunLaunchUnavailable(RunLaunchError):
+    code, http = "unavailable", 503
+
+
+def _now() -> datetime:
+    return datetime.now(timezone.utc)
+
+
+def _aware(value: datetime) -> datetime:
+    return value if value.tzinfo else value.replace(tzinfo=timezone.utc)
+
+
+def _iso(value: datetime | None) -> str | None:
+    if value is None:
+        return None
+    return _aware(value).astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
+
+
+# -- pinned Worker protocol ----------------------------------------------------------------------------------------------
+@dataclass(frozen=True)
+class WorkerProtocol:
+    ruleset_id: str
+    version: str
+    status: str
+    sha256: str                                   # composed digest of version + ordered (id, sha256) pairs
+    operative_stages: tuple[str, ...]
+    files: tuple[tuple[str, str, bytes], ...]     # (id, package file name, exact bytes)
+
+
+def load_worker_protocol(library_root: Path) -> WorkerProtocol:
+    """Load ``global/agents/workers/ruleset.yaml`` and verify every listed file (exact bytes + sha256), fail closed."""
+    root = Path(library_root)
+    try:
+        manifest = root / WORKER_RULESET
+        if manifest.is_symlink() or manifest.stat().st_size > MAX_RULES_BYTES:
+            raise ValueError("ruleset")
+        data = yaml.safe_load(manifest.read_text(encoding="utf-8"))
+        if (not isinstance(data, dict) or data.get("format") != "rosc.worker.ruleset.v1"
+                or not isinstance(data.get("version"), str) or not isinstance(data.get("ruleset_id"), str)
+                or not isinstance(data.get("files"), list) or not data["files"]):
+            raise ValueError("ruleset")
+        stages = data.get("operative_stages")
+        if not isinstance(stages, list) or stages != ["E0"]:
+            raise ValueError("stages")  # P054A supports exactly E0; anything else would overclaim
+        base = (root / "agents" / "workers").resolve()
+        files, pairs = [], []
+        for item in data["files"]:
+            if not isinstance(item, dict) or not isinstance(item.get("id"), str) or not _ROLE_FILE.fullmatch(item["id"]):
+                raise ValueError("item")
+            path = root / str(item.get("path", ""))
+            if path.is_symlink() or not path.resolve().is_relative_to(base):
+                raise ValueError("path")
+            raw = path.read_bytes()
+            if (len(raw) > MAX_RULES_BYTES or len(raw) != item.get("bytes")
+                    or hashlib.sha256(raw).hexdigest() != item.get("sha256")):
+                raise ValueError("digest")
+            name = "worker-role.md" if item["id"] == "role" else f"worker-{item['id']}.md"
+            files.append((item["id"], name, raw))
+            pairs.append([item["id"], item["sha256"]])
+    except (OSError, ValueError, yaml.YAMLError, UnicodeDecodeError):
+        raise RunLaunchUnavailable("The pinned Worker protocol is missing or does not match its digests",
+                                   "protocol_unavailable") from None
+    names = [name for _id, name, _raw in files]
+    if len(set(names)) != len(names) or "worker-execution-protocol.md" not in names or "worker-role.md" not in names:
+        raise RunLaunchUnavailable("The pinned Worker protocol is incomplete", "protocol_unavailable")
+    composed = hashlib.sha256(json.dumps([data["ruleset_id"], data["version"], pairs]).encode()).hexdigest()
+    return WorkerProtocol(data["ruleset_id"], data["version"][:32], str(data.get("status", ""))[:48], composed,
+                          tuple(stages), tuple(files))
+
+
+# -- artifact roots ------------------------------------------------------------------------------------------------------
+def validate_artifact_root(path: object, *, project_roots: list[str], private_paths: tuple[Path, ...] = ()) -> Path:
+    """An explicit per-Project artifact root: absolute, an existing real directory owned by this user, not group/world
+    writable, and disjoint from every registered Project source root and from ROSC private paths."""
+    if not isinstance(path, (str, Path)) or not Path(path).is_absolute():
+        raise RunLaunchConflict("Artifact root must be an absolute path", "artifact_root_unsafe")
+    candidate = Path(path)
+    try:
+        info = os.lstat(candidate)
+    except OSError:
+        raise RunLaunchConflict("Artifact root does not exist", "artifact_root_unsafe") from None
+    if not stat.S_ISDIR(info.st_mode) or info.st_uid != os.getuid() or info.st_mode & 0o022:
+        raise RunLaunchConflict("Artifact root must be a private directory of this user", "artifact_root_unsafe")
+    resolved = candidate.resolve()
+    if resolved != candidate.absolute():
+        raise RunLaunchConflict("Artifact root must not traverse a symlink", "artifact_root_unsafe")
+    for other in [*(Path(r).resolve() for r in project_roots), *(Path(p).resolve() for p in private_paths)]:
+        if resolved == other or resolved.is_relative_to(other) or other.is_relative_to(resolved):
+            raise RunLaunchConflict("Artifact root overlaps a Project source root or ROSC private data",
+                                    "artifact_root_unsafe")
+    return resolved
+
+
+# -- package files -------------------------------------------------------------------------------------------------------
+def _write_exclusive(path: Path, data: bytes) -> None:
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+    with os.fdopen(fd, "wb") as handle:
+        handle.write(data)
+        handle.flush()
+        os.fsync(handle.fileno())
+    os.chmod(path, 0o400)
+
+
+def _read_nofollow(path: Path, limit: int) -> bytes:
+    fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
+    with os.fdopen(fd, "rb") as handle:
+        data = handle.read(limit + 1)
+    if len(data) > limit:
+        raise OSError("file too large")
+    return data
+
+
+def _fsync_dir(path: Path) -> None:
+    fd = os.open(path, os.O_RDONLY)
+    try:
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+
+
+def _verify_package(package_dir: Path, expected: dict[str, bytes]) -> bool:
+    """True when the published package holds exactly the expected files with exactly the expected bytes."""
+    try:
+        if package_dir.is_symlink() or not package_dir.is_dir():
+            return False
+        if sorted(entry.name for entry in package_dir.iterdir()) != sorted(expected):
+            return False
+        return all(_read_nofollow(package_dir / name, MAX_PACKAGE_BYTES) == data for name, data in expected.items())
+    except OSError:
+        return False
+
+
+class RunLaunchService:
+    """Owner-only formal Run start/status/reconcile over the P041 package, the P042 Worker CLI and the P013 Run identity."""
+
+    def __init__(self, session_factory: sessionmaker[Session], policy: authz.AuthorizationPolicy, workspace_root: Path,
+                 workers: WorkerSessionService, authoring: TaskAuthoringService, library_root: Path, *,
+                 artifact_roots: Mapping[int, Path] | None = None, private_paths: tuple[Path, ...] = (),
+                 clock=time.time, submit_wait: float = SUBMIT_WAIT_SECONDS) -> None:
+        self._sessions = session_factory
+        self._policy = policy
+        self._workspace = Path(workspace_root)
+        self._workers = workers
+        self._authoring = authoring
+        self._library = Path(library_root)
+        # Python-level composition seam: an explicit, validated per-Project artifact root with the SAME hierarchy as the
+        # Workspace.  No request can select or configure it.
+        self._artifact_roots = dict(artifact_roots or {})
+        self._private = tuple(private_paths)
+        self._clock = clock
+        self._submit_wait = submit_wait
+        self._locks: dict[tuple[int, str], threading.Lock] = {}
+        self._guard = threading.Lock()
+
+    # -- guards ---------------------------------------------------------------------------------------------------------
+    def _authorize(self, actor: object, action: str, **scope) -> None:
+        if not authz.evaluate(self._policy, actor, action, authz.ResourceScope(**scope)).allowed:
+            raise RunLaunchDenied("Not authorized for this operation")
+
+    def _lock(self, key: tuple[int, str]) -> threading.Lock:
+        with self._guard:
+            return self._locks.setdefault(key, threading.Lock())
+
+    @staticmethod
+    def _project(session: Session, project_id: int) -> Project:
+        project = session.get(Project, project_id)
+        if project is None:
+            raise RunLaunchNotFound("Project not found")
+        try:
+            validate_project_identity(project)
+        except ProjectIdentityError:
+            raise RunLaunchUnavailable("Project identity records are inconsistent", "project_unavailable") from None
+        return project
+
+    def _artifact_root(self, session: Session, project: Project) -> Path:
+        custom = self._artifact_roots.get(project.id)
+        if custom is None:
+            return self._workspace
+        try:
+            roots = [validate_project_identity(p).root_path for p in session.scalars(select(Project))]
+        except ProjectIdentityError:
+            raise RunLaunchUnavailable("Project identity records are inconsistent", "project_unavailable") from None
+        return validate_artifact_root(custom, project_roots=roots, private_paths=self._private)
+
+    # -- launch ---------------------------------------------------------------------------------------------------------
+    def launch(self, actor: object, project_id: int, task_id: int, agent_id: object, *, launch_key: object,
+               ack_timeout_seconds: object = None) -> dict:
+        """Explicit Owner start of ONE formal Run.  Idempotent per launch key; never a second writer."""
+        try:
+            agent_key = canonical_agent_id(agent_id)
+        except InvalidRegistryInput:
+            raise RunLaunchInvalid("agent_id must be a canonical UUIDv4 string") from None
+        self._authorize(actor, authz.RUN_LAUNCH, project_id=project_id, task_id=task_id, agent_id=agent_key)
+        if not isinstance(launch_key, str) or not _LAUNCH_KEY.fullmatch(launch_key):
+            raise RunLaunchInvalid("launch_key must be 8-96 characters of letters, digits, '.', '_', ':' or '-'")
+        timeout = DEFAULT_ACK_TIMEOUT if ack_timeout_seconds is None else ack_timeout_seconds
+        if (not isinstance(timeout, int) or isinstance(timeout, bool)
+                or not MIN_ACK_TIMEOUT <= timeout <= MAX_ACK_TIMEOUT):
+            raise RunLaunchInvalid(f"ack_timeout_seconds must be an integer between {MIN_ACK_TIMEOUT} and {MAX_ACK_TIMEOUT}")
+        with self._lock((project_id, agent_key)):
+            with self._sessions() as session:
+                existing = self._by_key(session, project_id, launch_key)
+                if existing is not None:
+                    if (existing.task_id, existing.agent_id) != (task_id, agent_key):
+                        raise RunLaunchConflict("This launch key belongs to another Run", "launch_key_conflict")
+                    run_id, state = existing.run_id, existing.state
+                else:
+                    run_id = state = None
+            if run_id is not None:
+                if state in (RUN_AUTHORIZED, RUN_DISPATCH_PENDING):
+                    return self._continue(run_id, created=False)  # interrupted before any CLI side effect
+                return self._view_by_id(project_id, run_id, created=False)
+            context = self._preflight(project_id, task_id, agent_key)
+            try:
+                package = self._authoring.build_execution_package(project_id, task_id)
+            except AuthoringError as exc:
+                code = {"not_approved": "prompt_not_approved"}.get(exc.code, exc.code)
+                if exc.http == 404:
+                    raise RunLaunchConflict("No approved Prompt revision exists for this Task", "prompt_not_approved") from None
+                raise RunLaunchConflict(str(exc), code) from None
+            run_id, created = self._create(actor, context, package["package_id"], launch_key, timeout)
+            if not created:
+                return self._view_by_id(project_id, run_id, created=False)
+            return self._continue(run_id, created=True)
+
+    @staticmethod
+    def _by_key(session: Session, project_id: int, key: str) -> ManagedRunState | None:
+        run = session.scalars(select(RunRecord).where(
+            RunRecord.project_id == project_id, RunRecord.source_kind == MANAGED_SOURCE_KIND,
+            RunRecord.source_key == key)).first()
+        return None if run is None else session.get(ManagedRunState, run.run_id)
+
+    def _preflight(self, project_id: int, task_id: int, agent_id: str) -> dict:
+        """Read-only gate: nothing is written and nothing is sent when any input is missing or invalid."""
+        protocol = load_worker_protocol(self._library)
+        with self._sessions() as session:
+            project = self._project(session, project_id)
+            binding = validate_project_identity(project)
+            task = session.get(Task, task_id)
+            if task is None or task.project_id != project_id:
+                raise RunLaunchNotFound("Task not found in this Project")
+            if (inspect_project(self._workspace, project).problem != READY
+                    or inspect_task(self._workspace, task).problem != READY):
+                raise RunLaunchConflict("Project/Task identity manifests are not ready", "workspace_not_ready")
+            root = self._artifact_root(session, project)
+            try:
+                check_run_parents(root, project_id, task_id)
+            except WorkspaceConflict:
+                raise RunLaunchConflict("The Run directory location is unsafe", "artifact_root_unsafe") from None
+            try:
+                obs, row = self._workers.run_target(session, project, agent_id)
+            except AgentNotFound:
+                raise RunLaunchNotFound("Agent not found") from None
+            if obs.state == STATE_NOT_ASSIGNED:
+                raise RunLaunchConflict("The Agent has no active Worker assignment in this Project",
+                                        "worker_not_assigned")
+            holding = self._holding(session, project_id, task_id, agent_id)
+            if holding is not None:
+                raise RunLaunchConflict(f"Run {holding.run_id} of this Task or Worker is still holding "
+                                        f"({holding.state}); no second writer is started", "run_in_progress")
+            if row is None or obs.state != STATE_ACTIVE:
+                raise RunLaunchConflict(f"The Worker CLI is not active ({obs.reason})", "worker_not_active")
+            if not obs.bootstrap or obs.bootstrap.get("state") != B_CONFIRMED:
+                raise RunLaunchConflict("The Worker project bootstrap is not confirmed for the current Root Binding and "
+                                        "CLI incarnation", "bootstrap_not_confirmed")
+            return {"project_id": project_id, "task_id": task_id, "agent_id": agent_id,
+                    "binding_version": binding.version, "session_id": row.session_id, "incarnation": row.incarnation,
+                    "pane_pid": row.pane_pid, "proc_start": row.proc_start, "protocol": protocol}
+
+    def _create(self, actor: authz.ActorContext, ctx: dict, package_id: int, key: str, timeout: int) -> tuple[str, bool]:
+        """ONE transaction: re-verify every frozen input, then create the RunRecord + managed state + first event."""
+        protocol: WorkerProtocol = ctx["protocol"]
+        pid, tid, agent_id = ctx["project_id"], ctx["task_id"], ctx["agent_id"]
+        with self._sessions() as session:
+            try:
+                session.connection().exec_driver_sql("BEGIN IMMEDIATE")
+                existing = self._by_key(session, pid, key)
+                if existing is not None:  # a concurrent launch with the same key won the race
+                    session.rollback()
+                    if (existing.task_id, existing.agent_id) != (tid, agent_id):
+                        raise RunLaunchConflict("This launch key belongs to another Run", "launch_key_conflict")
+                    return existing.run_id, False
+                project = self._project(session, pid)
+                binding = validate_project_identity(project)
+                if binding.version != ctx["binding_version"]:
+                    raise RunLaunchConflict("The Root Binding changed during launch", "binding_changed")
+                package, approval, spec, prompt = self._frozen_inputs(session, pid, tid, package_id)
+                if package.root_binding_version != binding.version:
+                    raise RunLaunchConflict("The approved Execution Package was built for another Root Binding version",
+                                            "binding_changed")
+                assignment = session.scalars(select(RoleAssignment).where(
+                    RoleAssignment.project_id == pid, RoleAssignment.agent_id == agent_id,
+                    RoleAssignment.role == ROLE_WORKER, RoleAssignment.state == ASSIGNMENT_ACTIVE,
+                    RoleAssignment.task_id.is_(None))).first()
+                row = session.get(WorkerSession, ctx["session_id"])
+                if (assignment is None or row is None or row.project_id != pid or row.agent_id != agent_id
+                        or row.incarnation != ctx["incarnation"] or row.pane_pid != ctx["pane_pid"]):
+                    raise RunLaunchConflict("The Worker CLI binding changed during launch", "worker_changed")
+                holding = self._holding(session, pid, tid, agent_id)
+                if holding is not None:
+                    raise RunLaunchConflict(f"Run {holding.run_id} of this Task or Worker is still holding "
+                                            f"({holding.state}); no second writer is started", "run_in_progress")
+                now = _now()
+                run_id = str(uuid.uuid4())
+                session.add(RunRecord(run_id=run_id, project_id=pid, task_id=tid, execution_origin=ORIGIN_MANAGED,
+                                      source_kind=MANAGED_SOURCE_KIND, source_key=key,
+                                      source_attribution_assurance=ATTRIBUTION_CLAIMED, reported_executor=None,
+                                      agent_id=None, assignment_id=None, agent_link_status=LINK_UNLINKED,
+                                      attribution_revision=1, registered_by=actor.actor_id,
+                                      registered_by_assurance=actor.assurance, created_at=now))
+                session.flush()
+                session.add(ManagedRunState(
+                    run_id=run_id, project_id=pid, task_id=tid, package_id=package.id, prompt_approval_id=approval.id,
+                    spec_revision=spec.revision, spec_digest=spec.digest, prompt_revision=prompt.revision,
+                    prompt_digest=prompt.digest, root_binding_version=binding.version, agent_id=agent_id,
+                    worker_session_id=row.session_id, incarnation=row.incarnation, pane_pid=row.pane_pid,
+                    proc_start=row.proc_start, protocol_version=protocol.version, protocol_sha256=protocol.sha256,
+                    launch_key=key, run_token=str(uuid.uuid4()), ack_timeout_seconds=timeout, state=RUN_AUTHORIZED,
+                    reason="owner_launch", manifest_sha256=None, state_revision=1, created_at=now, updated_at=now))
+                session.flush()
+                self._event(session, run_id, None, RUN_AUTHORIZED, "owner_launch", actor.actor_id, now)
+                session.commit()
+                return run_id, True
+            except OperationalError:
+                session.rollback()
+                raise RunLaunchUnavailable("Another change is in progress; retry with the same launch key", "busy") from None
+            except IntegrityError:
+                session.rollback()
+                raise RunLaunchConflict("A Run of this Task or Worker is still holding; no second writer is started",
+                                        "run_in_progress") from None
+            except RunLaunchError:
+                session.rollback()
+                raise
+
+    @staticmethod
+    def _holding(session: Session, pid: int, tid: int, agent_id: str) -> ManagedRunState | None:
+        """A holding managed Run of the same Task, or of the same Worker in this Project (no Project-wide lock)."""
+        return session.scalars(select(ManagedRunState).where(
+            ManagedRunState.state.in_(MANAGED_HOLDING_STATES),
+            or_(ManagedRunState.task_id == tid,
+                (ManagedRunState.project_id == pid) & (ManagedRunState.agent_id == agent_id)))).first()
+
+    @staticmethod
+    def _frozen_inputs(session: Session, pid: int, tid: int, package_id: int):
+        task = session.get(Task, tid)
+        if task is None or task.project_id != pid:
+            raise RunLaunchNotFound("Task not found in this Project")
+        spec_head = session.scalars(select(TaskSpecRevision).where(TaskSpecRevision.task_id == tid)
+                                    .order_by(TaskSpecRevision.revision.desc()).limit(1)).first()
+        prompt = session.scalars(select(PromptRevision).where(PromptRevision.task_id == tid)
+                                 .order_by(PromptRevision.revision.desc()).limit(1)).first()
+        if spec_head is None or prompt is None:
+            raise RunLaunchConflict("No approved Prompt revision exists for this Task", "prompt_not_approved")
+        if prompt.source_spec_revision != spec_head.revision:
+            raise RunLaunchConflict("The Spec changed after the approved Prompt", "prompt_stale")
+        approval = session.scalars(select(PromptApproval).where(PromptApproval.prompt_revision_id == prompt.id)).first()
+        if approval is None:
+            raise RunLaunchConflict("The current Prompt revision is not approved by the Owner", "prompt_not_approved")
+        package = session.get(ExecutionPackage, package_id)
+        if (package is None or package.prompt_approval_id != approval.id or package.project_id != pid
+                or package.task_id != tid):
+            raise RunLaunchConflict("The Execution Package is not the one of the current approval", "prompt_stale")
+        if (approval.digest != prompt.digest or approval.prompt_revision != prompt.revision
+                or approval.spec_revision != spec_head.revision
+                or prompt.digest != prompt_digest(prompt.source_spec_revision, prompt.summary, prompt.body)
+                or spec_head.digest != spec_digest(spec_head.title, spec_head.scope, spec_head.description_html,
+                                                   spec_head.criteria_html)):
+            raise RunLaunchConflict("Stored revisions do not match the approved digests", "digest_mismatch")
+        return package, approval, spec_head, prompt
+
+    @staticmethod
+    def _event(session: Session, run_id: str, from_state: str | None, to_state: str, reason: str, actor: str,
+               when: datetime, evidence: dict | None = None) -> None:
+        last = session.scalars(select(ManagedRunEvent.seq).where(ManagedRunEvent.run_id == run_id)
+                               .order_by(ManagedRunEvent.seq.desc()).limit(1)).first() or 0
+        session.add(ManagedRunEvent(event_id=str(uuid.uuid4()), run_id=run_id, seq=last + 1, from_state=from_state,
+                                    to_state=to_state, reason=reason[:48], actor=actor[:64], created_at=when,
+                                    evidence=None if evidence is None else json.dumps(evidence, sort_keys=True)[:2000]))
+
+    def _transition(self, run_id: str, expected: tuple[str, ...], to_state: str, reason: str, *, actor: str = "rosc-core",
+                    evidence: dict | None = None, **fields) -> bool:
+        """Guarded state change + its audit event in one transaction.  False when the state moved meanwhile."""
+        with self._sessions() as session:
+            try:
+                session.connection().exec_driver_sql("BEGIN IMMEDIATE")
+                row = session.get(ManagedRunState, run_id)
+                if row is None or row.state not in expected:
+                    session.rollback()
+                    return False
+                now = _now()
+                previous = row.state
+                row.state, row.reason, row.updated_at = to_state, reason[:48], now
+                row.state_revision += 1
+                for name, value in fields.items():
+                    setattr(row, name, now if value == "now" else value)
+                self._event(session, run_id, previous, to_state, reason, actor, now, evidence)
+                session.commit()
+                return True
+            except (OperationalError, IntegrityError):
+                session.rollback()
+                raise RunLaunchUnavailable("The Run state could not be recorded; retry with the same launch key",
+                                           "busy") from None
+
+    # -- package + dispatch ---------------------------------------------------------------------------------------------
+    def _package_files(self, row: ManagedRunState, protocol: WorkerProtocol) -> tuple[dict[str, bytes], Path]:
+        """Exact bytes of the offline package (deterministic: an interrupted publish of the same Run re-creates them)."""
+        view = self._authoring.execution_package_view(row.project_id, row.task_id, row.package_id)
+        spec, prompt = view["spec"], view["prompt"]
+        if (spec["revision"], spec["digest"], prompt["revision"], prompt["digest"]) != (
+                row.spec_revision, row.spec_digest, row.prompt_revision, row.prompt_digest):
+            raise RunLaunchConflict("The Execution Package no longer matches the Run snapshot", "digest_mismatch")
+        if protocol.sha256 != row.protocol_sha256 or protocol.version != row.protocol_version:
+            raise RunLaunchUnavailable("The pinned Worker protocol changed after launch", "protocol_unavailable")
+        with self._sessions() as session:
+            project = self._project(session, row.project_id)
+            binding = validate_project_identity(project)
+            if binding.version != row.root_binding_version:
+                raise RunLaunchConflict("The Root Binding changed after launch", "binding_changed")
+            agent = session.get(AgentDefinition, row.agent_id)
+            root = self._artifact_root(session, project)
+            files: dict[str, bytes] = {
+                "spec.md": (f"# Task T{row.task_id:04d} — Spec revision {spec['revision']}\n\n"
+                            f"## Title\n\n{spec['title']}\n\n## Scope\n\n{spec['scope'] or '(none)'}\n\n"
+                            f"## Description\n\n{spec['description_text']}\n\n"
+                            f"## Acceptance criteria\n\n{spec['acceptance_criteria_text']}\n").encode("utf-8"),
+                "prompt.md": (f"# Approved Prompt revision {prompt['revision']} (Spec revision "
+                              f"{prompt['source_spec_revision']})\n\n## Summary\n\n{prompt['summary']}\n\n"
+                              f"## Prompt\n\n{prompt['body']}\n").encode("utf-8"),
+            }
+            for _id, name, raw in protocol.files:
+                files[name] = raw
+            contents = [{"file": name, "sha256": hashlib.sha256(data).hexdigest(), "bytes": len(data)}
+                        for name, data in sorted(files.items())]
+            manifest = {
+                "format": RUN_MANIFEST_FORMAT, "run_id": row.run_id,
+                "project": {"id": f"P{project.id:04d}", "uuid": project.project_uuid, "name": project.name[:160]},
+                "task": {"id": f"T{row.task_id:04d}"},
+                "binding": {"version": binding.version, "root": binding.root_path},
+                "worker": {"agent_id": row.agent_id, "display_name": agent.display_name if agent else None,
+                           "worker_session_id": row.worker_session_id},
+                "package": {"package_id": row.package_id, "prompt_approval_id": row.prompt_approval_id,
+                            "spec_revision": row.spec_revision, "spec_digest": row.spec_digest,
+                            "prompt_revision": row.prompt_revision, "prompt_digest": row.prompt_digest},
+                "protocol": {"ruleset_id": protocol.ruleset_id, "version": protocol.version, "status": protocol.status,
+                             "sha256": protocol.sha256,
+                             "files": [name for _id, name, _raw in protocol.files]},
+                "operative_stages": list(protocol.operative_stages),
+                "contents": contents, "created_at": _iso(row.created_at),
+            }
+        files[MANIFEST_NAME] = (json.dumps(manifest, ensure_ascii=False, indent=2, sort_keys=True) + "\n").encode("utf-8")
+        if sum(len(data) for data in files.values()) > MAX_PACKAGE_BYTES:
+            raise RunLaunchConflict("The Run package exceeds its size bound", "package_too_large")
+        return files, root
+
+    def _publish(self, row: ManagedRunState, files: dict[str, bytes], root: Path) -> Path:
+        """Atomically publish the package directory once; an existing one must be byte-identical (never overwritten)."""
+        run_dir = create_run_directory(root, row.project_id, row.task_id, row.run_id)
+        package_dir = run_dir / PACKAGE_DIRNAME
+        if package_dir.exists() or package_dir.is_symlink():
+            if not _verify_package(package_dir, files):
+                raise WorkspaceConflict("foreign", "An existing Run package differs from the frozen contents")
+            return package_dir
+        staging = run_dir / f".package-staging-{uuid.uuid4().hex}"
+        staging.mkdir(mode=0o700)
+        try:
+            for name, data in files.items():
+                _write_exclusive(staging / name, data)
+            _fsync_dir(staging)
+            os.chmod(staging, 0o500)
+            os.rename(staging, package_dir)  # fails when the target appeared meanwhile; never replaces it
+            _fsync_dir(run_dir)
+        finally:
+            if staging.exists():
+                os.chmod(staging, 0o700)
+                for child in staging.iterdir():
+                    child.unlink()
+                staging.rmdir()
+        if not _verify_package(package_dir, files):
+            raise WorkspaceConflict("corrupt", "The published Run package failed verification")
+        return package_dir
+
+    def _continue(self, run_id: str, *, created: bool) -> dict:
+        with self._sessions() as session:
+            row = session.get(ManagedRunState, run_id)
+            project_id, state = row.project_id, row.state
+        if state == RUN_AUTHORIZED:
+            try:
+                protocol = load_worker_protocol(self._library)
+                with self._sessions() as session:
+                    row = session.get(ManagedRunState, run_id)
+                    files, root = self._package_files(row, protocol)
+                    self._publish(row, files, root)
+            except (RunLaunchError, WorkspaceConflict, AuthoringError, OSError) as exc:
+                reason = getattr(exc, "code", None) or getattr(exc, "problem", None) or "package_publish_failed"
+                self._transition(run_id, (RUN_AUTHORIZED,), RUN_NOT_DELIVERED, f"package_publish_failed:{reason}"[:48])
+                return self._view_by_id(project_id, run_id, created=created)
+            manifest = hashlib.sha256(files[MANIFEST_NAME]).hexdigest()
+            self._transition(run_id, (RUN_AUTHORIZED,), RUN_DISPATCH_PENDING, "package_published",
+                             manifest_sha256=manifest)
+        with self._sessions() as session:
+            row = session.get(ManagedRunState, run_id)
+            state = row.state
+        if state == RUN_DISPATCH_PENDING:
+            self._dispatch(run_id)
+        return self._view_by_id(project_id, run_id, created=created)
+
+    def _dispatch(self, run_id: str) -> None:
+        """Re-verify the live target, record the durable intent, then type exactly one pointer line."""
+        with self._sessions() as session:
+            row = session.get(ManagedRunState, run_id)
+            project = self._project(session, row.project_id)
+            problem = None
+            try:
+                binding = validate_project_identity(project)
+                root = self._artifact_root(session, project)
+                obs, worker = self._workers.run_target(session, project, row.agent_id)
+            except (RunLaunchError, ProjectIdentityError, AgentNotFound) as exc:
+                problem, binding, worker, obs, root = getattr(exc, "code", "target_unavailable"), None, None, None, None
+            if problem is None:
+                if binding.version != row.root_binding_version:
+                    problem = "binding_changed"
+                elif worker is None or worker.incarnation != row.incarnation or worker.pane_pid != row.pane_pid:
+                    problem = "worker_changed"
+                elif obs.state != STATE_ACTIVE:
+                    problem = "worker_not_active"
+                elif not obs.bootstrap or obs.bootstrap.get("state") != B_CONFIRMED:
+                    problem = "bootstrap_not_confirmed"
+            if problem is None:
+                package_dir = run_directory(root, row.project_id, row.task_id, row.run_id) / PACKAGE_DIRNAME
+                try:
+                    protocol = load_worker_protocol(self._library)
+                    files, _root = self._package_files(row, protocol)
+                except (RunLaunchError, AuthoringError):
+                    files = None
+                if (files is None or hashlib.sha256(files[MANIFEST_NAME]).hexdigest() != row.manifest_sha256
+                        or not _verify_package(package_dir, files)):
+                    problem = "package_invalid"
+            token, incarnation, manifest = row.run_token, row.incarnation, row.manifest_sha256
+        if problem is not None:
+            self._transition(run_id, (RUN_DISPATCH_PENDING,), RUN_NOT_DELIVERED, problem)
+            return
+        base = self._workers.run_evidence_base(incarnation)
+        request = Path(str(base) + ".run-request.json")
+        try:
+            request.parent.mkdir(parents=True, exist_ok=True)
+            temp = request.with_name(f"{request.name}.{uuid.uuid4().hex}.tmp")
+            fd = os.open(temp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+            with os.fdopen(fd, "w", encoding="utf-8") as handle:
+                json.dump({"incarnation": incarnation, "run_id": run_id, "token": token,
+                           "package_dir": str(package_dir), "manifest_sha256": manifest}, handle)
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.replace(temp, request)
+        except OSError:
+            self._transition(run_id, (RUN_DISPATCH_PENDING,), RUN_NOT_DELIVERED, "hook_request_failed")
+            return
+        # DURABLE DISPATCH INTENT: from this commit on, delivery may happen and is never repeated.
+        if not self._transition(run_id, (RUN_DISPATCH_PENDING,), RUN_DISPATCHING, "dispatch_intent",
+                                dispatch_intent_at="now"):
+            return
+        text = (f"[ROSC run {token}] Формальный ROSC Run (не чат и не bootstrap): run_id={run_id} "
+                f"package={package_dir} manifest_sha256={manifest}. Выполни этап E0 Worker Execution Protocol: "
+                f"прочитай инструментом Read {package_dir / MANIFEST_NAME} и затем файлы из его protocol.files, "
+                f"проверь их и закончи ответ одной последней строкой ROSC-RUN-ACK {token} {run_id} {manifest} ACCEPT "
+                f"(или DECLINE с причиной выше). Не начинай реализацию: этапы, не перечисленные в operative_stages, "
+                f"не поддерживаются.")
+        try:
+            self._workers.deliver_run_line(worker, text)
+        except SessionError:
+            self._note(run_id, "send_uncertain")  # stays dispatching -> unknown after the window; never re-sent
+            return
+        deadline = self._clock() + self._submit_wait
+        while self._clock() < deadline and not self._submitted(row_snapshot(run_id, self._sessions), base):
+            time.sleep(0.25)
+        self.reconcile_internal(run_id)
+
+    def _note(self, run_id: str, reason: str) -> None:
+        with self._sessions() as session:
+            try:
+                session.connection().exec_driver_sql("BEGIN IMMEDIATE")
+                row = session.get(ManagedRunState, run_id)
+                now = _now()
+                row.reason, row.updated_at = reason, now
+                row.state_revision += 1
+                self._event(session, run_id, row.state, row.state, reason, "rosc-core", now)
+                session.commit()
+            except (OperationalError, IntegrityError):
+                session.rollback()
+
+    # -- evidence evaluation (pure) ------------------------------------------------------------------------------------
+    @staticmethod
+    def _load_evidence(path: Path) -> dict | None:
+        try:
+            if path.is_symlink() or path.stat().st_size > MAX_EVIDENCE_BYTES:
+                return None
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return None
+        return data if isinstance(data, dict) else None
+
+    def _valid_hook_record(self, data: dict | None, snap: dict) -> bool:
+        if data is None or data.get("incarnation") != snap["incarnation"] or data.get("token") != snap["run_token"]:
+            return False
+        if data.get("run_id") != snap["run_id"]:
+            return False
+        ancestors, stamp = data.get("ancestors"), data.get("acked_at")
+        if not isinstance(ancestors, list) or snap["pane_pid"] not in ancestors:
+            return False
+        if isinstance(stamp, bool) or not isinstance(stamp, (int, float)) or snap["dispatch_intent_at"] is None:
+            return False
+        return stamp >= _aware(snap["dispatch_intent_at"]).timestamp() - 5
+
+    def _submitted(self, snap: dict, base: Path) -> bool:
+        return self._valid_hook_record(self._load_evidence(Path(f"{base}.run-{snap['run_token']}.submitted.json")), snap)
+
+    def _evaluate(self, session: Session, snap: dict) -> tuple[str, str, dict]:
+        """Derived state from the recorded state + CLI-hook evidence + clock.  Never writes, sends or deletes anything."""
+        state, reason = snap["state"], snap["reason"]
+        evidence = {"submitted": False, "receipt": None, "required_reads": False}
+        if state not in (RUN_DISPATCHING, RUN_SUBMITTED, RUN_UNKNOWN, RUN_ACKNOWLEDGED, RUN_DECLINED):
+            return state, reason, evidence
+        final = state in (RUN_ACKNOWLEDGED, RUN_DECLINED)  # recorded outcome stands; evidence is shown, not re-decided
+        base = self._workers.run_evidence_base(snap["incarnation"])
+        evidence["submitted"] = self._submitted(snap, base)
+        receipt = self._load_evidence(Path(f"{base}.run-{snap['run_token']}.receipt.json"))
+        project = session.get(Project, snap["project_id"])
+        try:
+            binding = validate_project_identity(project)
+            root = self._artifact_root(session, project)
+        except (ProjectIdentityError, RunLaunchError):
+            return RUN_UNKNOWN, "project_identity", evidence
+        if self._valid_hook_record(receipt, snap) and receipt.get("manifest_sha256") == snap["manifest_sha256"]:
+            decision = receipt.get("decision")
+            evidence["receipt"] = {"ACCEPT": "accept", "DECLINE": "decline"}.get(decision, "invalid")
+            package_dir = (run_directory(root, snap["project_id"], snap["task_id"], snap["run_id"])
+                           / PACKAGE_DIRNAME).resolve()
+            reads = receipt.get("observed_reads")
+            seen = {os.path.realpath(p) for p in reads if isinstance(p, str)} if isinstance(reads, list) else set()
+            required = {str(package_dir / MANIFEST_NAME), str(package_dir / "worker-role.md"),
+                        str(package_dir / "worker-execution-protocol.md")}
+            evidence["required_reads"] = required <= seen
+            if final:
+                return state, reason, evidence
+            if binding.version != snap["root_binding_version"]:
+                return RUN_UNKNOWN, "binding_changed", evidence
+            if decision == "DECLINE":
+                return RUN_DECLINED, "worker_declined", evidence
+            if decision == "ACCEPT":
+                if not evidence["required_reads"]:
+                    return RUN_UNKNOWN, "ack_without_required_reads", evidence
+                return RUN_ACKNOWLEDGED, "late_receipt" if state == RUN_UNKNOWN else "worker_acknowledged", evidence
+            return RUN_UNKNOWN, "invalid_receipt", evidence
+        if final or state == RUN_UNKNOWN:
+            return state, reason, evidence
+        started = _aware(snap["dispatch_intent_at"]).timestamp()
+        if self._clock() - started > snap["ack_timeout_seconds"]:
+            return RUN_UNKNOWN, "no_ack_within_timeout", evidence
+        if evidence["submitted"]:
+            return RUN_SUBMITTED, "awaiting_worker_ack", evidence
+        return state, reason, evidence
+
+    # -- read / reconcile -----------------------------------------------------------------------------------------------
+    def status(self, actor: object, project_id: int, run_id: object) -> dict:
+        """Read-only: derived state; no DB write, no keystroke, no file change."""
+        if not authz.is_canonical_uuid4(run_id):
+            raise RunLaunchNotFound("Run not found")
+        self._authorize(actor, authz.RUN_READ, project_id=project_id, run_id=run_id)
+        return self._view_by_id(project_id, run_id)
+
+    def list_task_runs(self, actor: object, project_id: int, task_id: int) -> list[dict]:
+        self._authorize(actor, authz.RUN_LIST, project_id=project_id, task_id=task_id)
+        with self._sessions() as session:
+            self._project(session, project_id)
+            ids = list(session.scalars(select(ManagedRunState.run_id).where(
+                ManagedRunState.project_id == project_id, ManagedRunState.task_id == task_id)
+                .order_by(ManagedRunState.created_at, ManagedRunState.run_id)))
+        return [self._view_by_id(project_id, rid, events=False) for rid in ids]
+
+    def reconcile(self, actor: object, project_id: int, run_id: object) -> dict:
+        """Owner-requested, idempotent: record what the evidence already proves.  Never sends, restarts or kills."""
+        if not authz.is_canonical_uuid4(run_id):
+            raise RunLaunchNotFound("Run not found")
+        self._authorize(actor, authz.RUN_RECONCILE, project_id=project_id, run_id=run_id)
+        with self._sessions() as session:
+            self._project(session, project_id)
+            row = session.get(ManagedRunState, run_id)
+            if row is None or row.project_id != project_id:
+                raise RunLaunchNotFound("Run not found")
+        self.reconcile_internal(run_id, actor=getattr(actor, "actor_id", "rosc-core"))
+        return self._view_by_id(project_id, run_id)
+
+    def reconcile_internal(self, run_id: str, *, actor: str = "rosc-core") -> None:
+        with self._sessions() as session:
+            snap = row_snapshot(run_id, self._sessions, session=session)
+            derived, reason, evidence = self._evaluate(session, snap)
+        if derived == snap["state"]:
+            if reason != snap["reason"]:
+                self._note(run_id, reason)
+            return
+        fields: dict = {}
+        if evidence["submitted"] and snap["submitted_at"] is None:
+            fields["submitted_at"] = "now"
+        if derived == RUN_ACKNOWLEDGED:
+            fields["acknowledged_at"] = "now"
+        self._transition(run_id, (snap["state"],), derived, reason, actor=actor, evidence=evidence, **fields)
+
+    def _view_by_id(self, project_id: int, run_id: str, *, created: bool | None = None, events: bool = True) -> dict:
+        with self._sessions() as session:
+            row = session.get(ManagedRunState, run_id)
+            if row is None or row.project_id != project_id:
+                raise RunLaunchNotFound("Run not found")
+            snap = row_snapshot(run_id, self._sessions, session=session)
+            derived, reason, evidence = self._evaluate(session, snap)
+            history = [] if not events else [
+                {"seq": e.seq, "from": e.from_state, "to": e.to_state, "reason": e.reason, "actor": e.actor,
+                 "at": _iso(e.created_at)}
+                for e in session.scalars(select(ManagedRunEvent).where(ManagedRunEvent.run_id == run_id)
+                                         .order_by(ManagedRunEvent.seq))]
+        view = {
+            "run_id": run_id, "execution_origin": ORIGIN_MANAGED, "project_id": f"P{row.project_id:04d}",
+            "task_id": f"T{row.task_id:04d}", "agent_id": row.agent_id, "launch_key": row.launch_key,
+            "state": derived, "reason": reason, "recorded_state": row.state, "recorded_reason": row.reason,
+            "holding": derived in MANAGED_HOLDING_STATES,
+            "resumable_with_same_key": row.state in (RUN_AUTHORIZED, RUN_DISPATCH_PENDING),
+            "package": {"package_id": row.package_id, "prompt_approval_id": row.prompt_approval_id,
+                        "spec_revision": row.spec_revision, "spec_digest": row.spec_digest,
+                        "prompt_revision": row.prompt_revision, "prompt_digest": row.prompt_digest,
+                        "root_binding_version": row.root_binding_version, "manifest_sha256": row.manifest_sha256},
+            "worker": {"agent_id": row.agent_id, "worker_session_id": row.worker_session_id},
+            "protocol": {"version": row.protocol_version, "sha256": row.protocol_sha256},
+            "run_directory": f"projects/P{row.project_id:04d}/tasks/T{row.task_id:04d}/runs/{run_id}",
+            "ack_timeout_seconds": row.ack_timeout_seconds,
+            "evidence": evidence,
+            "created_at": _iso(row.created_at), "dispatch_intent_at": _iso(row.dispatch_intent_at),
+            "submitted_at": _iso(row.submitted_at), "acknowledged_at": _iso(row.acknowledged_at),
+            # Explicitly NOT represented by any state of this slice (P054B / S2):
+            "work_started": False, "plan": None, "journal": None, "report": None,
+            "checked_at": _iso(_now()),
+        }
+        if events:
+            view["events"] = history
+        if created is not None:
+            view["created"] = created
+        return view
+
+
+def row_snapshot(run_id: str, sessions: sessionmaker[Session], *, session: Session | None = None) -> dict:
+    """Plain-dict copy of the fields evidence evaluation needs (detached from any ORM session)."""
+    def take(s: Session) -> dict:
+        row = s.get(ManagedRunState, run_id)
+        return {name: getattr(row, name) for name in (
+            "run_id", "project_id", "task_id", "agent_id", "incarnation", "pane_pid", "run_token", "state", "reason",
+            "manifest_sha256", "dispatch_intent_at", "submitted_at", "ack_timeout_seconds", "root_binding_version")}
+    if session is not None:
+        return take(session)
+    with sessions() as fresh:
+        return take(fresh)
