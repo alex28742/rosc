@@ -263,6 +263,10 @@ export type ConversationControls = {
   onDeactivate: () => Promise<string | null>;
   /** Read-only Architect status re-probe after a failed load; never loads chat history or starts a runtime. */
   onRefreshArchitect: () => void;
+  /** P053 «Проверить»: re-reads the verified onboarding evidence; never a model call. Resolves to an error or null. */
+  onCheckOnboarding: () => Promise<string | null>;
+  /** P053 «Завершить знакомство»: the only UI action that asks Core for one extra onboarding model turn. */
+  onCompleteOnboarding: () => Promise<string | null>;
   /** Uncertain delivery lookup (never re-sends) and safe retry (only after a provable non-delivery). */
   onReconcile: (messageId: string) => Promise<string | null>;
   onRetryDelivery: (messageId: string) => Promise<string | null>;

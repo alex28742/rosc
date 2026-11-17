@@ -169,6 +169,8 @@ export function stubApi(over: Partial<{ [K in keyof CoreApi]: ReturnType<typeof 
     sendTaskMessageToArchitect: vi.fn(async () => ({ delivery: { state: 'pending', error_code: null, reply_message_id: null, can_retry: false, can_reconcile: true } })),
     activateArchitect: vi.fn(async () => architectStatus({ state: 'ready', can_activate: false, can_deactivate: true })),
     deactivateArchitect: vi.fn(async () => architectStatus()),
+    checkArchitectOnboarding: vi.fn(async () => architectStatus()),
+    completeArchitectOnboarding: vi.fn(async () => architectStatus()),
     getContextAccess: vi.fn(async () => contextAccess()),
     reconcileDelivery: vi.fn(async () => ({ delivery: { state: 'unknown', error_code: null, reply_message_id: null, can_retry: false, can_reconcile: true } })),
     retryDelivery: vi.fn(async () => ({ delivery: { state: 'pending', error_code: null, reply_message_id: null, can_retry: false, can_reconcile: true } })),

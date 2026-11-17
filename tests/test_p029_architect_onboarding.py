@@ -10,6 +10,10 @@ from rosc.architect_runtime import RuntimeProblem
 
 BRIEFING = {"tool": "briefing", "args": {}}
 ROLE = {"tool": "global_read", "args": {"path": "agents/architect/rules/role.md"}}
+# P053: the required set also includes the onboarding rules file and the recorded docs entrypoint (README.md here).
+RULES = {"tool": "global_read", "args": {"path": "agents/architect/rules/onboarding.md"}}
+DOCS = {"tool": "source_read", "args": {"path": "README.md"}}
+ALL = [BRIEFING, ROLE, RULES, DOCS]
 
 
 class OnboardingCase(p19.ContextCase):
@@ -29,6 +33,11 @@ class OnboardingCase(p19.ContextCase):
 
     def status(self) -> dict:
         return self.client.get("/api/projects/P0001/architect").json()
+
+    def ob(self) -> dict:
+        """The P029 pair of the onboarding view (P053 adds steps/attempt/actions beside it)."""
+        view = self.status()["onboarding"]
+        return {"state": view["state"], "detail": view["detail"]}
 
     def activate_raw(self) -> dict:
         response = self.client.post("/api/projects/P0001/architect/activate")
@@ -52,17 +61,18 @@ class OnboardingCase(p19.ContextCase):
 
 class NewSessionOnboardingTests(OnboardingCase):
     def test_one_bootstrap_after_tools_follows_the_role_route_and_is_ready_only_on_evidence(self) -> None:
-        self.script(["Read the briefing and the role.\nONBOARDING_STATUS: ready"], [BRIEFING, ROLE])
+        self.script(["Read the briefing and the role.\nONBOARDING_STATUS: ready"], ALL)
         view = self.activate_raw()
         self.assertEqual(view["state"], "ready")
         self.assertEqual(view["onboarding"]["state"], "initializing")  # truthful while the model step runs
         self.architect.drain()
-        self.assertEqual(self.status()["onboarding"], {"state": "ready", "detail": None})
+        self.assertEqual(self.ob(), {"state": "ready", "detail": None})
         sent = self.prompts()
         self.assertEqual(len(sent), 1)
         self.assertTrue(sent[0].startswith("msg_roscob"))
         prompt = (self.bin / "last_prompt.txt").read_text()
-        for needle in ("rosc_briefing", "rosc_global_read", "agents/architect/rules/role.md", "rosc_source_read",
+        for needle in ("rosc_briefing", "rosc_global_read", "agents/architect/rules/role.md",
+                       "agents/architect/rules/onboarding.md", "rosc_source_read",
                        "Docs entrypoint in the bound checkout: README.md"):
             self.assertIn(needle, prompt)
         self.assertNotIn("Handoff", prompt)
@@ -75,18 +85,18 @@ class NewSessionOnboardingTests(OnboardingCase):
         self.script(["Done.\nONBOARDING_STATUS: ready"], [BRIEFING])  # role.md never read
         self.activate_raw()
         self.architect.drain()
-        self.assertEqual(self.status()["onboarding"], {"state": "blocked", "detail": "evidence_missing"})
+        self.assertEqual(self.ob(), {"state": "blocked", "detail": "missing_evidence"})
 
     def test_architect_reported_block_and_missing_marker_are_never_ready(self) -> None:
         self.script(["role.md not found.\nONBOARDING_STATUS: blocked - role file missing"], [BRIEFING, ROLE])
         self.activate_raw()
         self.architect.drain()
-        self.assertEqual(self.status()["onboarding"], {"state": "blocked", "detail": "reported_by_architect"})
+        self.assertEqual(self.ob(), {"state": "blocked", "detail": "reported_by_architect"})
         self.client.post("/api/projects/P0001/architect/deactivate")
         self.script(["I looked around."], [BRIEFING, ROLE])
         self.activate_raw()
         self.architect.drain()
-        self.assertEqual(self.status()["onboarding"], {"state": "unknown", "detail": "no_status_marker"})
+        self.assertEqual(self.ob(), {"state": "unknown", "detail": "no_status_marker"})
 
     def test_tools_failure_before_the_first_model_call_sends_no_bootstrap(self) -> None:
         self.script(["x\nONBOARDING_STATUS: ready"], [BRIEFING, ROLE])
@@ -100,13 +110,13 @@ class NewSessionOnboardingTests(OnboardingCase):
         self.runtime.reconnect_tools = refuse  # type: ignore[method-assign]
         self.activate_raw()
         self.architect.drain()
-        self.assertEqual(self.status()["onboarding"], {"state": "blocked", "detail": "tools_unavailable"})
+        self.assertEqual(self.ob(), {"state": "blocked", "detail": "tools_unavailable"})
         self.assertEqual(self.prompts(), [])  # the model was never asked
 
 
 class RestartAndLegacyTests(OnboardingCase):
     def test_restart_never_repeats_or_invents_an_onboarding(self) -> None:
-        self.script(["ok\nONBOARDING_STATUS: ready"], [BRIEFING, ROLE])
+        self.script(["ok\nONBOARDING_STATUS: ready"], ALL)
         self.activate_raw()
         self.architect.drain()
         self.unscript()
@@ -115,7 +125,7 @@ class RestartAndLegacyTests(OnboardingCase):
         self.architect.recover()
         self.architect.drain()
         self.assertEqual(self.prompts(), before)
-        self.assertEqual(self.status()["onboarding"], {"state": "ready", "detail": None})
+        self.assertEqual(self.ob(), {"state": "ready", "detail": None})
         self.assertEqual(self.status()["tools"]["state"], "active")  # P028 reconnect, same session
 
     def test_legacy_session_is_not_onboarded_on_restart_and_still_converses(self) -> None:
@@ -128,7 +138,7 @@ class RestartAndLegacyTests(OnboardingCase):
         self.architect.recover()
         self.architect.drain()
         self.assertEqual(self.prompts(), [])
-        self.assertEqual(self.status()["onboarding"], {"state": "legacy_unverified", "detail": None})
+        self.assertEqual(self.ob(), {"state": "legacy_unverified", "detail": None})
         self.assertEqual(self.status()["session"]["session_id"], sid)
         self.send("legacy-0001-aa", "тут?")
         self.assertEqual(self.delivery(), ("delivered", None))
@@ -141,7 +151,7 @@ class RestartAndLegacyTests(OnboardingCase):
         self.restart()
         self.architect.recover()
         self.architect.drain()
-        self.assertEqual(self.status()["onboarding"], {"state": "unknown", "detail": "interrupted"})
+        self.assertEqual(self.ob(), {"state": "unknown", "detail": "interrupted"})
         self.assertEqual(self.prompts(), [])
 
 

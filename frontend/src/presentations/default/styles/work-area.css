@@ -308,6 +308,42 @@
   font-weight: 600;
 }
 
+/* P053: compact onboarding evidence inside the Project Architect block (no new panel). */
+.rosc-onboarding {
+  margin: 8px 0 0;
+  font-size: 12px;
+}
+
+.rosc-onboarding__state {
+  margin: 0;
+  color: var(--rosc-secondary);
+}
+
+.rosc-onboarding__state strong {
+  color: var(--rosc-ink);
+  font-weight: 600;
+}
+
+.rosc-onboarding__steps {
+  margin: 4px 0 0;
+  padding-left: 16px;
+  color: var(--rosc-secondary);
+  font-size: 11px;
+}
+
+.rosc-onboarding__step--done {
+  color: #2f7a47;
+}
+
+.rosc-onboarding__step--failed {
+  color: #a1392f;
+}
+
+.rosc-onboarding__note {
+  margin: 4px 0 0;
+  font-size: 11px;
+}
+
 .rosc-agents-card__workspace {
   margin: 10px 0 0;
   padding-top: 8px;

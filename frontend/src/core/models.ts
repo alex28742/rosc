@@ -192,7 +192,21 @@ export type ArchitectStatus = {
   /** P029: ROSC Tools are reported separately; a live session stays `ready` whether or not they are connected. */
   tools: { state: 'active' | 'inactive' | 'not_running' | 'not_available'; detail: string | null };
   /** P029: one-time model onboarding of a NEW native session. `legacy_unverified` = created before P029. */
-  onboarding: { state: OnboardingState | null; detail: string | null };
+  onboarding: OnboardingStatus;
+};
+/** P053: one required onboarding read and what Core's Tool audit proves about it (no content, no arguments). */
+export type OnboardingStepState = 'done' | 'failed' | 'missing' | 'pending' | 'unknown' | 'not_verified';
+export type OnboardingStep = { id: string; tool: string; path: string | null; state: OnboardingStepState; code: string | null };
+/** P053 fields are present only for a live session; `check` only on the answer of an explicit «Проверить». */
+export type OnboardingStatus = {
+  state: OnboardingState | null;
+  detail: string | null;
+  attempt?: number;
+  final_status?: 'ready' | 'blocked' | 'none' | null;
+  steps?: OnboardingStep[];
+  can_check?: boolean;
+  can_complete?: boolean;
+  check?: string;
 };
 /** P040 r03: verified state of ONE Task's native Architect session. `active` only after Core's runtime probe; the Project host being ready is a different fact. */
 export type TaskArchitectState = 'inactive' | 'active' | 'error';

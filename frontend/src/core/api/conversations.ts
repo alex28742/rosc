@@ -58,6 +58,10 @@ export const getArchitect = (projectId: string) => request<ArchitectStatus>(`/pr
 /** The only call that starts a Project Architect runtime: an explicit Owner action, never implied by opening a Project. */
 export const activateArchitect = (projectId: string) => post<ArchitectStatus>(`/projects/${projectId}/architect/activate`);
 export const deactivateArchitect = (projectId: string) => post<ArchitectStatus>(`/projects/${projectId}/architect/deactivate`);
+/** P053: verified onboarding evidence; Core never makes a model call for it. */
+export const checkArchitectOnboarding = (projectId: string) => post<ArchitectStatus>(`/projects/${projectId}/architect/onboarding/check`);
+/** P053: explicit Owner action; at most one short turn in the same native session. */
+export const completeArchitectOnboarding = (projectId: string) => post<ArchitectStatus>(`/projects/${projectId}/architect/onboarding/complete`);
 
 /** Looks an uncertain delivery up at the provider; never re-sends. */
 export const reconcileDelivery = (projectId: string, messageId: string) =>

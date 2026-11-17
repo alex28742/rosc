@@ -2,6 +2,7 @@ import { useState } from 'react';
 import type { ConversationControls, TaskWorkerControls, WorkspaceControls } from '../../../app/presentation/contracts';
 import type { Project } from '../../../core/models';
 import { ContextAccessSummary } from './ContextAccessSummary';
+import { OnboardingStatus } from './OnboardingStatus';
 import { WorkspaceActions } from './WorkspaceActions';
 import { describeArchitect } from './architectView';
 import { WorkerRows } from './WorkerRows';
@@ -71,6 +72,8 @@ export function ProjectAgentsCard({ project, conversation, workspace, workers: w
       {(view.hint || architect.error || failure) && <p className="rosc-agents-card__hint" role="alert">
         {[view.hint, architect.error, failure].filter(Boolean).join(' ')}
       </p>}
+      <OnboardingStatus architect={architect} onCheckOnboarding={conversation.onCheckOnboarding}
+        onCompleteOnboarding={conversation.onCompleteOnboarding} />
     </section>
     <div className="rosc-agents-card__block">
       <WorkerRows controls={workerControls} />

@@ -288,7 +288,7 @@ class ConversationDiagnosticsInput(BaseModel):
         return value
 
 
-CONVERSATION_PATH = re.compile(r"^/api/projects/[^/]+/(tasks/[^/]+/conversation(/messages(/[^/]+/send)?)?|conversation(/messages(/[^/]+/(reconcile|retry))?)?|(tasks/[^/]+/)?conversation/group(/.*)?|architect/(activate|deactivate)|architect(/context-access)?|tasks/[^/]+/architect(/activate)?)$")
+CONVERSATION_PATH = re.compile(r"^/api/projects/[^/]+/(tasks/[^/]+/conversation(/messages(/[^/]+/send)?)?|conversation(/messages(/[^/]+/(reconcile|retry))?)?|(tasks/[^/]+/)?conversation/group(/.*)?|architect/(activate|deactivate)|architect/onboarding/(check|complete)|architect(/context-access)?|tasks/[^/]+/architect(/activate)?)$")
 DEFAULT_GLOBAL_LIBRARY = global_library_dir()  # <checkout>/global (Git-tracked); None for a non-editable install
 
 
@@ -920,6 +920,16 @@ def create_app(db_path: Path | None = None, workspace_root: Path | None = None, 
     @app.post("/api/projects/{project_id}/architect/deactivate")
     def architect_deactivate(project_id: str) -> dict:
         return conversation_call(architect.deactivate, current_actor(), numeric_id(project_id, "P"))
+
+    @app.post("/api/projects/{project_id}/architect/onboarding/check")
+    def architect_onboarding_check(project_id: str) -> dict:
+        """P053 «Проверить»: verified onboarding evidence; never a model call or a new native session."""
+        return conversation_call(architect.check_onboarding, current_actor(), numeric_id(project_id, "P"))
+
+    @app.post("/api/projects/{project_id}/architect/onboarding/complete")
+    def architect_onboarding_complete(project_id: str) -> dict:
+        """P053 «Завершить знакомство»: explicit Owner action; at most one short turn in the same native session."""
+        return conversation_call(architect.complete_onboarding, current_actor(), numeric_id(project_id, "P"))
 
     @app.get("/api/projects/{project_id}/architect/context-access")
     def architect_context_access(project_id: str) -> dict:

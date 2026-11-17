@@ -888,8 +888,9 @@ class BriefingAndContextTests(ContextCase):
         client.app.state.architect.drain()
         self.assertEqual(runtime.asked, [])  # nothing is sent at activation without a Tools transport
         shown = client.get("/api/projects/P0001/architect").json()
-        self.assertEqual((view["state"], shown["onboarding"]),
-                         ("ready", {"state": "blocked", "detail": "tools_not_supported"}))
+        self.assertEqual((view["state"], shown["onboarding"]["state"], shown["onboarding"]["detail"]),
+                         ("ready", "blocked", "tools_not_supported"))
+        self.assertFalse(shown["onboarding"]["can_complete"])  # P053: no Tools, no completion turn
         client.post("/api/projects/P0001/conversation/messages", json={"client_key": "legacy-0001-xx", "body": "Hi"})
         client.app.state.architect.drain()
         self.assertEqual(runtime.asked[0][1], "Hi")

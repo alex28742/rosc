@@ -431,6 +431,22 @@ export function useWorkspaceController({ route, routeKey, go }: Navigation, api:
     }
   }, [api, patchArchitect, loadAccess]);
 
+  /** P053: explicit onboarding actions. They never toggle the activation `busy` flag (no session is started). */
+  const changeOnboarding = useCallback(async (action: 'check' | 'complete'): Promise<string | null> => {
+    const id = projectIdOf(routeRef.current);
+    if (!id) return 'Проект не открыт.';
+    const seq = ++architectSeq.current;
+    try {
+      const info = await (action === 'check' ? api.checkArchitectOnboarding(id) : api.completeArchitectOnboarding(id));
+      if (seq === architectSeq.current) patchArchitect(id, { info, status: 'ready', error: '' });
+      return null;
+    } catch (e) {
+      const message = describeError(e);
+      if (seq === architectSeq.current) void loadArchitect(id);
+      return message;
+    }
+  }, [api, patchArchitect, loadArchitect]);
+
   const patchAssignments = useCallback((id: string, patch: Partial<AssignmentsCache>) => {
     setAssignments(prev => (prev.projectId === id ? { ...prev, ...patch } : prev));
   }, []);
@@ -817,7 +833,7 @@ export function useWorkspaceController({ route, routeKey, go }: Navigation, api:
     if ((state === 'blocked' || state === 'unknown') && track.dismissed !== `${state}:${detail}`) {
       pushEngineNotice(engineNotice('onboarding', state === 'blocked' ? 'error' : 'warning',
         state === 'blocked' ? 'Знакомство Architect не подтверждено' : 'Итог знакомства Architect неизвестен',
-        'Беседа с Architect доступна. Сообщения сохраняются в ROSC; решение о повторной активации принимает Owner.'));
+        'Беседа с Architect доступна. Подробности и «Завершить знакомство» — во вкладке «Агенты»; без перезапуска сессии.'));
       return;
     }
     dismissEngineNotice('onboarding');
@@ -857,6 +873,8 @@ export function useWorkspaceController({ route, routeKey, go }: Navigation, api:
     onActivate: () => changeArchitect('activate'),
     onDeactivate: () => changeArchitect('deactivate'),
     onRefreshArchitect: refreshArchitect,
+    onCheckOnboarding: () => changeOnboarding('check'),
+    onCompleteOnboarding: () => changeOnboarding('complete'),
     onReconcile: (messageId: string) => changeDelivery(messageId, 'reconcile'),
     onRetryDelivery: (messageId: string) => changeDelivery(messageId, 'retry'),
     onReload: reloadConversation,

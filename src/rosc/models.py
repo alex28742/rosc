@@ -4,7 +4,7 @@ import uuid
 from datetime import datetime, timezone
 
 from sqlalchemy import Boolean, CheckConstraint, DateTime, ForeignKey, ForeignKeyConstraint, Index, Integer, String, Text, UniqueConstraint, select, text
-from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
+from sqlalchemy.orm import DeclarativeBase, Mapped, deferred, mapped_column, relationship
 
 # Root Binding states. Exactly one ``current`` binding per Project; older ones stay as history.
 CURRENT_BINDING = "current"
@@ -563,6 +563,15 @@ class ArchitectSession(Base):
     onboarding_state: Mapped[str] = mapped_column(String(20), default="legacy_unverified",
                                                   server_default="legacy_unverified")
     onboarding_detail: Mapped[str | None] = mapped_column(String(48), nullable=True)
+    # P053: identity and evidence window of the latest onboarding provider turn (0 = none sent).  The attempt index is
+    # committed BEFORE a send, so a possibly-received turn always has a lookup correlation id.  ``settled_at`` NULL
+    # with ``sent_at`` set = an open window, closed by the next provider turn of the Project.  ``evidence`` is compact
+    # JSON of required steps proven by audit ids (never Tool arguments or content).
+    # Deferred: a database not yet upgraded to 0018 keeps serving every other Architect read (P029 behavior).
+    onboarding_attempt: Mapped[int] = deferred(mapped_column(Integer, default=0))  # NOT NULL DEFAULT 0 in 0018
+    onboarding_sent_at: Mapped[datetime | None] = deferred(mapped_column(DateTime(timezone=True), nullable=True))
+    onboarding_settled_at: Mapped[datetime | None] = deferred(mapped_column(DateTime(timezone=True), nullable=True))
+    onboarding_evidence: Mapped[str | None] = deferred(mapped_column(Text, nullable=True))
 
 
 class ConversationDelivery(Base):
