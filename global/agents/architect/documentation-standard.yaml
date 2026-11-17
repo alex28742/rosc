@@ -10,6 +10,10 @@ source_of_truth:
   active_pipeline: rosc_core_after_approved_implementation_or_cutover
   working_handoff: rosc_architect_document_store
   external_project_docs: external_read_only_unless_separately_authorized
+# P053 amendment (Owner-authorized): `onboarding` and `required_resources` below are the contract of the target
+# Project Initialization workflow (typed Tools not yet implemented).  They are NOT conditions of the current Session
+# Familiarization of a native Architect session, which only reads the briefing, role.md, onboarding.md and the
+# recorded docs entrypoint; absent Handoff/Pipeline/ADR never block that familiarization.
 onboarding:
   modes: [new_project, existing_project]
   discovery_tool: project.init_analyze # proposed; not yet implemented
@@ -18,8 +22,8 @@ onboarding:
   baseline: verified_evidence_and_unknowns
   past_project_documents: never_convert_or_rewrite
   history_start: project_registration_and_baseline_event
-  readiness: mandatory_resources_valid_and_next_action_known
-required_resources:
+  readiness: mandatory_resources_valid_and_next_action_known # Project Initialization READY, not session familiarization
+required_resources: # created by future Project Initialization only; never by session familiarization
   core:
     - system/identity
     - system/onboarding

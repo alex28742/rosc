@@ -26,10 +26,11 @@ ROOT = Path(__file__).resolve().parents[1]
 GLOBAL = ROOT / "global"
 
 # Installed-file inventory fixed by the frozen P021 prompt (sha256 of the exact installed bytes, and byte size).
+# P053 Owner-authorized amendment: role.md, onboarding.md and documentation-standard.yaml (familiarization vs initialization).
 INSTALLED = {
-    "agents/architect/documentation-standard.yaml": ("ea55ba926340c1fbb029b538994c5f75a398d93d20ec9169192851105f30214f", 2377),
-    "agents/architect/rules/role.md": ("dd2a9b179038462665ea7926918daefd799e57e11e0454a02f032d3fca9df569", 2061),
-    "agents/architect/rules/onboarding.md": ("f9a211fd42b1999c0290be66909bae96008015036668d4aa668fab828a6e2b4b", 3369),
+    "agents/architect/documentation-standard.yaml": ("8986dac0c1e313061f8ae4445c03804f79938fcfbe7598224c65ed650f9a431f", 2949),
+    "agents/architect/rules/role.md": ("825f6d3e5e76127596f17b64a83b14bc6bd624dc058ac4e7295ba4e888818cac", 2572),
+    "agents/architect/rules/onboarding.md": ("ea0b9337b41703fd7939f884b619b73273381ec807af0b58e13be6c8752e0244", 4857),
     "agents/architect/rules/context-maintenance.md": ("a9e8786cfaaba6ad9ce22912b9ee54eec74ad071a2826a1a0569b481539f1241", 2316),
     "agents/architect/rules/pipeline-management.md": ("9150730f60438d783bb945cfea61015921a753f917e2c49b71f54c3642fdbe7a", 2081),
     "principles/context-economy.md": ("8e8dfa23ebf7e9ce5b24d2a8e4f3371c15a929da3d7e461dfbdb6200616c1a64", 4975),
@@ -217,7 +218,7 @@ class LoaderTests(unittest.TestCase):
         manifest = self.lib / MANIFEST
         text = manifest.read_text()
         new = text.replace(INSTALLED["agents/architect/documentation-standard.yaml"][0], sha(std)).replace(
-            "bytes: 2377", f"bytes: {std.stat().st_size}")
+            f"bytes: {INSTALLED['agents/architect/documentation-standard.yaml'][1]}", f"bytes: {std.stat().st_size}")
         manifest.write_text(new)
         self.refused("rules_schema_invalid")
 

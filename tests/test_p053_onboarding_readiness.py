@@ -288,5 +288,30 @@ class MigrationTests(P053Case):
         self.restart()
 
 
+class GovernedRulesConsistencyTests(unittest.TestCase):
+    """P053 micro-fix: the governed rules never make future Project Initialization a condition of familiarization."""
+
+    def test_rules_separate_session_familiarization_from_project_initialization(self) -> None:
+        import yaml
+        from pathlib import Path
+        lib = Path(__file__).resolve().parents[1] / "global" / "agents" / "architect"
+        role = (lib / "rules/role.md").read_text()
+        onboarding = (lib / "rules/onboarding.md").read_text()
+        standard_text = (lib / "documentation-standard.yaml").read_text()
+        for text in (role, onboarding):
+            self.assertIn("Session Familiarization", text)
+            self.assertIn("Project Initialization", text)
+        self.assertNotIn("Mark onboarding READY only after", onboarding)
+        self.assertIn("Mark Project Initialization READY only after", onboarding)
+        for needle in ("rosc_briefing", "agents/architect/rules/role.md", "rosc_source_read"):
+            self.assertIn(needle, onboarding)  # the implemented familiarization set is stated in the rules themselves
+        self.assertIn("does not block familiarization", onboarding)
+        self.assertNotIn("asks ROSC Tools to create **required** Handoff and Pipeline;", role)
+        self.assertIn("NOT conditions of the current Session", standard_text)
+        standard = yaml.safe_load(standard_text)  # the target architecture itself is unchanged
+        self.assertEqual(standard["onboarding"]["readiness"], "mandatory_resources_valid_and_next_action_known")
+        self.assertTrue(standard["required_resources"]["pipeline"]["create_on_onboarding"])
+
+
 if __name__ == "__main__":
     unittest.main()

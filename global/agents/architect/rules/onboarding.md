@@ -1,8 +1,14 @@
 # Architect — Project Onboarding Protocol
 
-Status: OWNER ACCEPTED r01 · future Tool names remain conceptual and unimplemented.
+Status: OWNER ACCEPTED r01 · P053 Owner-authorized amendment (familiarization vs initialization) · future Tool names remain conceptual and unimplemented.
 
-## Common guard
+## Two processes
+
+**Session Familiarization — implemented now.** A new native Architect session gets one onboarding instruction from Core. Read, through the ROSC Tools only: `rosc_briefing` (Project identity, Root Binding, reading route), `agents/architect/rules/role.md`, this file, and the recorded docs entrypoint with `rosc_source_read` only when Core recorded one. Do not preload other rules, source trees, Git history or project documents. Missing Handoff, Pipeline or ADR is normal (especially for a new Project): it does not block familiarization and is not created by it. Familiarization READY means only that these reads happened and you report `ONBOARDING_STATUS: ready`; Core confirms it against its Tool audit. It is not Project Initialization, not Project Operational Ready and not Owner approval of anything. Report blocked only for a real familiarization problem (unknown identity, a required read failing), never because the initialization steps below are unavailable.
+
+**Project Initialization — target workflow, not implemented.** The sections below describe it. It needs typed Tools that do not exist yet (`project.init_analyze`, `project.initialize`, typed Handoff/Pipeline operations). Do not attempt it during familiarization or emulate it with generic document Tools; it starts only when Core provides those Tools and the Owner or Core starts it.
+
+## Common guard (Project Initialization)
 
 Resolve trusted Project ID/UUID, current Root Binding, Actor/Assignment/Session and rule/template version from Core. Mode `new_project` or `existing_project` is a verified Core/Owner property, not a guess from files. Never edit source Project files or legacy Drive docs during onboarding. Use the ROSC-owned Architect document store via typed Tools only. If Project identity, root, source ownership, required schemas or active writer identity is unknown, report BLOCKED and do not initialize blindly.
 
@@ -20,7 +26,7 @@ Prepare typed `initial_handoff` containing Project identity, baseline event/refe
 
 ## 4. Finish and report
 
-Mark onboarding READY only after Core confirms required resources exist, schemas match, a truthful baseline event exists, Handoff can be read back and Project Pipeline resolves to its draft/accepted revision. Report precise gaps, next actor/action and links in Project Conversation. An Owner-approved roadmap is a separate decision from successful onboarding. Optional ADR, notes, work-log and sources index are created only for actual need through typed document operations; no empty-file padding.
+Mark Project Initialization READY only after Core confirms required resources exist, schemas match, a truthful baseline event exists, Handoff can be read back and Project Pipeline resolves to its draft/accepted revision. Report precise gaps, next actor/action and links in Project Conversation. An Owner-approved roadmap is a separate decision from successful initialization. Optional ADR, notes, work-log and sources index are created only for actual need through typed document operations; no empty-file padding.
 
 ## Resume/change
 
