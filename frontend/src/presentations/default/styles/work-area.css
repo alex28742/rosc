@@ -2414,6 +2414,86 @@
   background: #e8eef2;
 }
 
+/* P054B: imported Working Plan (existing panel; two independent Step axes as existing tags). */
+.rosc-task-plan__fill {
+  height: 100%;
+  border-radius: 4px;
+  background: var(--rosc-green);
+}
+.rosc-task-plan__fill--0 { width: 0%; }
+.rosc-task-plan__fill--1 { width: 10%; }
+.rosc-task-plan__fill--2 { width: 20%; }
+.rosc-task-plan__fill--3 { width: 30%; }
+.rosc-task-plan__fill--4 { width: 40%; }
+.rosc-task-plan__fill--5 { width: 50%; }
+.rosc-task-plan__fill--6 { width: 60%; }
+.rosc-task-plan__fill--7 { width: 70%; }
+.rosc-task-plan__fill--8 { width: 80%; }
+.rosc-task-plan__fill--9 { width: 90%; }
+.rosc-task-plan__fill--10 { width: 100%; }
+
+.rosc-run-steps,
+.rosc-run-journal {
+  display: grid;
+  gap: 6px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.rosc-run-step {
+  padding: 7px 9px;
+  border: 1px solid var(--rosc-line);
+  border-radius: 7px;
+  background: var(--rosc-panel);
+  font-size: calc(11px * var(--rosc-text-scale, 1));
+}
+
+.rosc-run-step__top {
+  display: flex;
+  gap: 7px;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.rosc-run-step__axes {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 5px;
+  margin-top: 5px;
+}
+
+.rosc-run-step__tests,
+.rosc-run-journal__seq,
+.rosc-run-journal__at {
+  color: var(--rosc-secondary);
+}
+
+.rosc-run-blockers {
+  margin-top: 9px;
+  font-size: calc(11px * var(--rosc-text-scale, 1));
+}
+
+.rosc-run-journal li {
+  overflow-wrap: anywhere;
+}
+
+.rosc-run-report {
+  margin: 0;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  font-size: calc(12px * var(--rosc-text-scale, 1));
+}
+
+.rosc-run-choice {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 12px;
+  margin: 0 0 8px;
+  padding: 0;
+  border: 0;
+}
+
 /* Context & Actions control panel: primary action first, then Architect/Worker, then compact facts, then documents. */
 .rosc-task-primary {
   margin: 2px 0 10px;

@@ -1,6 +1,7 @@
 // The only surface a presentation package sees. Presentations render these typed view models and call these
 // callbacks; they never reach the API client, the router or Core persistence.
 import type { ComponentType, ReactNode } from 'react';
+import type { RunJournalPage, RunReportPage, RunView } from '../../core/models';
 import type { AgentDefinition, AgentFormValues, ArchitectStatus, ContextAccess, ConversationDiagnostics, ConversationMessage, GroupStatus, MessageRecipient, Project, PromptRevision, ProjectFormValues, RepairConfirmation, RoleAssignment, SpecRevision, SpecRevisionSummary, Task, TaskArchitectStatus, TaskAuthoring, TaskFormValues, ProjectWorker } from '../../core/models';
 import type { ScrollRegions } from '../scroll';
 
@@ -363,6 +364,26 @@ export type TaskWorkerControls = {
   onBootstrap: (agentId: string) => Promise<void>;
 };
 
+/**
+ * P054B: the Task's managed Run as recorded by Core. Reads (load/poll/journal/report) never send, import-trigger or start
+ * anything. `onLaunch` is the ONE explicit Owner start: the same click keeps one launch key across HTTP uncertainty, and
+ * a holding conflict shows the existing Run instead of retrying with a fresh key.
+ */
+export type TaskRunControls = {
+  status: LoadStatus;
+  /** The Task's latest managed Run (null = never launched). */
+  run: RunView | null;
+  /** Last read failure while a Run is shown (the last known data stays visible and is marked stale). */
+  stale: boolean;
+  launching: boolean;
+  /** Visible launch problem; `uncertain` = the request may have reached Core (retry reuses the same key). */
+  launchError: { message: string; uncertain: boolean } | null;
+  onLaunch: (agentId: string) => Promise<void>;
+  onReload: () => void;
+  onLoadJournal: (after?: number) => Promise<RunJournalPage | string>;
+  onLoadReport: () => Promise<RunReportPage | string>;
+};
+
 export type TaskViewProps = {
   projectName: string;
   taskId: string;
@@ -375,6 +396,8 @@ export type TaskViewProps = {
   conversation: TaskConversationControls;
   authoring: TaskAuthoringControls;
   workers: TaskWorkerControls;
+  /** P054B: the Task's managed Run (one-click launch, Working Plan, Journal, Report). */
+  run: TaskRunControls;
   /** Independent Task Work Area text scale; never shared with Project or Dashboard. */
   textScale: TextScaleControls;
   onClose: () => void;

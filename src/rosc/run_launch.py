@@ -39,6 +39,8 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 
+import logging
+
 import yaml
 from sqlalchemy import or_, select
 from sqlalchemy.exc import IntegrityError, OperationalError
@@ -48,14 +50,17 @@ from . import authorization as authz
 from .agent_registry import AgentNotFound, InvalidRegistryInput, canonical_agent_id
 from .models import (ASSIGNMENT_ACTIVE, ATTRIBUTION_CLAIMED, LINK_UNLINKED, MANAGED_HOLDING_STATES, MANAGED_SOURCE_KIND,
                      ORIGIN_MANAGED, ROLE_WORKER, RUN_ACKNOWLEDGED, RUN_AUTHORIZED, RUN_DECLINED, RUN_DISPATCH_PENDING,
-                     RUN_DISPATCHING, RUN_NOT_DELIVERED, RUN_SUBMITTED, RUN_UNKNOWN, AgentDefinition, ExecutionPackage,
-                     ManagedRunEvent, ManagedRunState, Project, ProjectIdentityError, PromptApproval, PromptRevision,
-                     RoleAssignment, RunRecord, Task, TaskSpecRevision, WorkerSession, validate_project_identity)
+                     RUN_DISPATCHING, RUN_EXEC_DISPATCHING, RUN_NOT_DELIVERED, RUN_NOT_EXECUTED, RUN_REPORTED,
+                     RUN_RUNNING, RUN_SUBMITTED, RUN_UNKNOWN, AgentDefinition, ExecutionPackage, ManagedRunEvent,
+                     ManagedRunState, Project, ProjectIdentityError, PromptApproval, PromptRevision, RoleAssignment,
+                     RunRecord, Task, TaskSpecRevision, WorkerSession, validate_project_identity)
+from .run_artifacts import ReportUnavailable, RunArtifactImporter
 from .task_authoring import AuthoringError, TaskAuthoringService, prompt_digest, spec_digest
 from .worker_session import B_CONFIRMED, STATE_ACTIVE, STATE_NOT_ASSIGNED, SessionError, WorkerSessionService
 from .workspace import (READY, WorkspaceConflict, check_run_parents, create_run_directory, inspect_project, inspect_task,
                         run_directory)
 
+log = logging.getLogger(__name__)
 DEFAULT_ACK_TIMEOUT = 300
 MIN_ACK_TIMEOUT, MAX_ACK_TIMEOUT = 30, 3600
 SUBMIT_WAIT_SECONDS = 4.0
@@ -68,6 +73,16 @@ PACKAGE_DIRNAME = "package"
 MANIFEST_NAME = "run.json"
 # Package files a Worker must natively Read before an E0 ACCEPT counts (P054A r02: the task inputs, not just the rules).
 E0_REQUIRED_READS = (MANIFEST_NAME, "worker-role.md", "worker-execution-protocol.md", "spec.md", "prompt.md")
+E0_ONLY = ("E0",)
+FULL_STAGES = ("E0", "E1", "E2", "E3", "E4", "E5", "E6")   # P054B: operative only with the pinned Artifact Tool
+ARTIFACT_TOOL_ID = "artifact-tool"
+ARTIFACT_TOOL_FILE = "rosc-run-tool.py"
+ARTIFACT_FORMAT = "rosc.run-artifacts.v1"
+ARTIFACT_LAYOUT = {"format": ARTIFACT_FORMAT, "plan_dir": "plan", "journal": "journal/events.jsonl",
+                   "checkpoint": "checkpoints/latest.json", "evidence_dir": "evidence", "report": "reports/final.md",
+                   "terminal": "terminal.json"}
+EXEC_MARKER = "ROSC run-exec"
+MONITOR_BATCH = 50
 _LAUNCH_KEY = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:-]{7,95}", re.ASCII)
 _SHA = re.compile(r"[0-9a-f]{64}", re.ASCII)
 _ROLE_FILE = re.compile(r"[a-z][a-z0-9-]{0,40}", re.ASCII)
@@ -128,6 +143,12 @@ class WorkerProtocol:
     sha256: str                                   # composed digest of version + ordered (id, sha256) pairs
     operative_stages: tuple[str, ...]
     files: tuple[tuple[str, str, bytes], ...]     # (id, package file name, exact bytes)
+    tools: tuple[tuple[str, str, str, bytes], ...] = ()  # (id, package file name, version, exact bytes); P054B
+
+    @property
+    def executable(self) -> bool:
+        """E1-E6 are operative (and backed by the pinned Artifact Tool) for packages built from this protocol."""
+        return self.operative_stages == FULL_STAGES and any(t[0] == ARTIFACT_TOOL_ID for t in self.tools)
 
 
 def load_worker_protocol(library_root: Path) -> WorkerProtocol:
@@ -143,8 +164,10 @@ def load_worker_protocol(library_root: Path) -> WorkerProtocol:
                 or not isinstance(data.get("files"), list) or not data["files"]):
             raise ValueError("ruleset")
         stages = data.get("operative_stages")
-        if not isinstance(stages, list) or stages != ["E0"]:
-            raise ValueError("stages")  # P054A supports exactly E0; anything else would overclaim
+        # E0 alone (P054A) or the full E0-E6 that P054B implements (requires the pinned Artifact Tool below);
+        # any other set would overclaim what ROSC supports.
+        if not isinstance(stages, list) or tuple(stages) not in (E0_ONLY, FULL_STAGES):
+            raise ValueError("stages")
         base = (root / "agents" / "workers").resolve()
         files, pairs = [], []
         for item in data["files"]:
@@ -160,14 +183,33 @@ def load_worker_protocol(library_root: Path) -> WorkerProtocol:
             name = "worker-role.md" if item["id"] == "role" else f"worker-{item['id']}.md"
             files.append((item["id"], name, raw))
             pairs.append([item["id"], item["sha256"]])
+        tools, tool_pairs = [], []
+        for item in data.get("tools") or []:
+            if (not isinstance(item, dict) or item.get("id") != ARTIFACT_TOOL_ID
+                    or item.get("package_file") != ARTIFACT_TOOL_FILE or not isinstance(item.get("version"), str)):
+                raise ValueError("tool")
+            path = root / str(item.get("path", ""))
+            if path.is_symlink() or not path.resolve().is_relative_to(base):
+                raise ValueError("path")
+            raw = path.read_bytes()
+            if (len(raw) > MAX_PACKAGE_BYTES // 2 or len(raw) != item.get("bytes")
+                    or hashlib.sha256(raw).hexdigest() != item.get("sha256")):
+                raise ValueError("digest")
+            tools.append((item["id"], ARTIFACT_TOOL_FILE, item["version"][:16], raw))
+            tool_pairs.append([item["id"], item["version"], item["sha256"]])
+        if tuple(stages) == FULL_STAGES and len(tools) != 1:
+            raise ValueError("tool")  # E1-E6 are never operative without the pinned writer
+        if tuple(stages) == E0_ONLY and tools:
+            raise ValueError("tool")
     except (OSError, ValueError, yaml.YAMLError, UnicodeDecodeError):
         raise RunLaunchUnavailable("The pinned Worker protocol is missing or does not match its digests",
                                    "protocol_unavailable") from None
     names = [name for _id, name, _raw in files]
     if len(set(names)) != len(names) or "worker-execution-protocol.md" not in names or "worker-role.md" not in names:
         raise RunLaunchUnavailable("The pinned Worker protocol is incomplete", "protocol_unavailable")
-    composed = hashlib.sha256(json.dumps([data["ruleset_id"], data["version"], pairs]).encode()).hexdigest()
-    return WorkerProtocol(data["ruleset_id"], data["version"][:32], composed, tuple(stages), tuple(files))
+    material = [data["ruleset_id"], data["version"], pairs] + ([tool_pairs] if tool_pairs else [])
+    composed = hashlib.sha256(json.dumps(material).encode()).hexdigest()
+    return WorkerProtocol(data["ruleset_id"], data["version"][:32], composed, tuple(stages), tuple(files), tuple(tools))
 
 
 # -- artifact roots ------------------------------------------------------------------------------------------------------
@@ -232,13 +274,49 @@ def _verify_package(package_dir: Path, expected: dict[str, bytes]) -> bool:
         return False
 
 
+def incarnation_ref(incarnation: str) -> str:
+    """Stable, non-reversible correlation of the CLI incarnation for Run artifacts (the raw hook nonce never leaves
+    ROSC's private state)."""
+    return hashlib.sha256(f"rosc.incarnation:{incarnation}".encode()).hexdigest()[:32]
+
+
+def verify_published_package(package_dir: Path, manifest_sha256: str | None, protocol_sha256: str) -> dict | None:
+    """The published package's own ``run.json`` (digest == the recorded manifest digest, pinned protocol digest) when
+    every listed file is present with exactly its recorded bytes and nothing else is there; ``None`` otherwise.
+
+    It never consults the live ``global/`` rules: a package published under an older ruleset stays verifiable after
+    the ruleset changed, and it is never re-derived, rewritten or upgraded."""
+    try:
+        if package_dir.is_symlink() or not package_dir.is_dir() or manifest_sha256 is None:
+            return None
+        raw = _read_nofollow(package_dir / MANIFEST_NAME, MAX_PACKAGE_BYTES)
+        if hashlib.sha256(raw).hexdigest() != manifest_sha256:
+            return None
+        manifest = json.loads(raw.decode("utf-8"))
+        contents = manifest.get("contents") if isinstance(manifest, dict) else None
+        if (not isinstance(contents, list) or manifest.get("protocol", {}).get("sha256") != protocol_sha256):
+            return None
+        listed = {item.get("file"): item for item in contents if isinstance(item, dict)}
+        if sorted(entry.name for entry in package_dir.iterdir()) != sorted([*listed, MANIFEST_NAME]):
+            return None
+        for name, item in listed.items():
+            if not isinstance(name, str) or "/" in name or name == MANIFEST_NAME:
+                return None
+            data = _read_nofollow(package_dir / name, MAX_PACKAGE_BYTES)
+            if hashlib.sha256(data).hexdigest() != item.get("sha256") or len(data) != item.get("bytes"):
+                return None
+        return manifest
+    except (OSError, ValueError, UnicodeDecodeError, AttributeError):
+        return None
+
+
 class RunLaunchService:
     """Owner-only formal Run start/status/reconcile over the P041 package, the P042 Worker CLI and the P013 Run identity."""
 
     def __init__(self, session_factory: sessionmaker[Session], policy: authz.AuthorizationPolicy, workspace_root: Path,
                  workers: WorkerSessionService, authoring: TaskAuthoringService, library_root: Path, *,
                  artifact_roots: Mapping[int, Path] | None = None, private_paths: tuple[Path, ...] = (),
-                 clock=time.time, submit_wait: float = SUBMIT_WAIT_SECONDS) -> None:
+                 clock=time.time, submit_wait: float = SUBMIT_WAIT_SECONDS, handoff=None) -> None:
         self._sessions = session_factory
         self._policy = policy
         self._workspace = Path(workspace_root)
@@ -253,6 +331,13 @@ class RunLaunchService:
         self._submit_wait = submit_wait
         self._locks: dict[tuple[int, str], threading.Lock] = {}
         self._guard = threading.Lock()
+        self._advance_lock = threading.Lock()  # one monitor/reconcile pass at a time (in-process; DB guards the rest)
+        # P054B: Core-side reader of the Worker's local Run artifacts; ``handoff`` is the P052 seam that stores the ONE
+        # Worker -> Architect Task Conversation message atomically with the Run's ``reported`` transition.
+        if handoff is None:
+            from .worker_conversation import WorkerConversationCore  # the P052 attribution/envelope layer
+            handoff = WorkerConversationCore(session_factory, policy).post_run_handoff
+        self.artifacts = RunArtifactImporter(session_factory, self._artifact_root, handoff=handoff)
 
     # -- guards ---------------------------------------------------------------------------------------------------------
     def _authorize(self, actor: object, action: str, **scope) -> None:
@@ -512,7 +597,8 @@ class RunLaunchService:
                 row.spec_revision, row.spec_digest, row.prompt_revision, row.prompt_digest):
             raise RunLaunchConflict("The Execution Package no longer matches the Run snapshot", "digest_mismatch")
         if protocol.sha256 != row.protocol_sha256 or protocol.version != row.protocol_version:
-            raise RunLaunchUnavailable("The pinned Worker protocol changed after launch", "protocol_unavailable")
+            # Never publish a Run under rules other than the ones pinned at launch (nothing was sent yet).
+            raise RunLaunchUnavailable("The pinned Worker protocol changed after launch", "protocol_changed")
         with self._sessions() as session:
             project = self._project(session, row.project_id)
             binding = validate_project_identity(project)
@@ -531,6 +617,8 @@ class RunLaunchService:
             }
             for _id, name, raw in protocol.files:
                 files[name] = raw
+            for _id, name, _version, raw in protocol.tools:
+                files[name] = raw
             contents = [{"file": name, "sha256": hashlib.sha256(data).hexdigest(), "bytes": len(data)}
                         for name, data in sorted(files.items())]
             manifest = {
@@ -539,7 +627,8 @@ class RunLaunchService:
                 "task": {"id": f"T{row.task_id:04d}"},
                 "binding": {"version": binding.version, "root": binding.root_path},
                 "worker": {"agent_id": row.agent_id, "display_name": agent.display_name if agent else None,
-                           "worker_session_id": row.worker_session_id},
+                           "worker_session_id": row.worker_session_id,
+                           **({"incarnation_ref": incarnation_ref(row.incarnation)} if protocol.executable else {})},
                 "package": {"package_id": row.package_id, "prompt_approval_id": row.prompt_approval_id,
                             "spec_revision": row.spec_revision, "spec_digest": row.spec_digest,
                             "prompt_revision": row.prompt_revision, "prompt_digest": row.prompt_digest},
@@ -549,6 +638,12 @@ class RunLaunchService:
                 "operative_stages": list(protocol.operative_stages),
                 "contents": contents, "created_at": _iso(row.created_at),
             }
+            if protocol.executable:  # P054B: the run-pinned offline writer and the fixed artifact layout of this Run
+                _tid, tool_name, tool_version, tool_raw = protocol.tools[0]
+                manifest["tool"] = {"file": tool_name, "version": tool_version,
+                                    "sha256": hashlib.sha256(tool_raw).hexdigest(),
+                                    "invoke": f"python3 <package>/{tool_name}"}
+                manifest["artifacts"] = dict(ARTIFACT_LAYOUT)
         files[MANIFEST_NAME] = (json.dumps(manifest, ensure_ascii=False, indent=2, sort_keys=True) + "\n").encode("utf-8")
         if sum(len(data) for data in files.values()) > MAX_PACKAGE_BYTES:
             raise RunLaunchConflict("The Run package exceeds its size bound", "package_too_large")
@@ -629,13 +724,9 @@ class RunLaunchService:
                     problem = "bootstrap_not_confirmed"
             if problem is None:
                 package_dir = run_directory(root, row.project_id, row.task_id, row.run_id) / PACKAGE_DIRNAME
-                try:
-                    protocol = load_worker_protocol(self._library)
-                    files, _root = self._package_files(row, protocol)
-                except (RunLaunchError, AuthoringError):
-                    files = None
-                if (files is None or hashlib.sha256(files[MANIFEST_NAME]).hexdigest() != row.manifest_sha256
-                        or not _verify_package(package_dir, files)):
+                # P054B: the published package is verified against its OWN pinned snapshot (recorded manifest digest +
+                # every listed file), never re-derived from the live global/ rules that may have changed since launch.
+                if verify_published_package(package_dir, row.manifest_sha256, row.protocol_sha256) is None:
                     problem = "package_invalid"
             token, incarnation, manifest = row.run_token, row.incarnation, row.manifest_sha256
         if problem is not None:
@@ -675,6 +766,50 @@ class RunLaunchService:
         while self._clock() < deadline and not self._submitted(row_snapshot(run_id, self._sessions), base):
             time.sleep(0.25)
         self.reconcile_internal(run_id)
+
+    def _protocol_unchanged(self, row: ManagedRunState) -> bool:
+        try:
+            protocol = load_worker_protocol(self._library)
+        except RunLaunchError:
+            return False
+        return (protocol.sha256, protocol.version) == (row.protocol_sha256, row.protocol_version)
+
+    # -- P054B Owner reads of the imported facts (DB only + the registered report file) --------------------------------
+    def _own_run(self, actor: object, project_id: int, run_id: object) -> None:
+        if not authz.is_canonical_uuid4(run_id):
+            raise RunLaunchNotFound("Run not found")
+        self._authorize(actor, authz.RUN_READ, project_id=project_id, run_id=run_id)
+
+    def journal(self, actor: object, project_id: int, run_id: object, *, after: object = 0, limit: object = 100) -> dict:
+        self._own_run(actor, project_id, run_id)
+        after = after if isinstance(after, int) and not isinstance(after, bool) and after >= 0 else 0
+        limit = limit if isinstance(limit, int) and not isinstance(limit, bool) and 1 <= limit <= 500 else 100
+        with self._sessions() as session:
+            row = session.get(ManagedRunState, run_id)
+            if row is None or row.project_id != project_id:
+                raise RunLaunchNotFound("Run not found")
+            return self.artifacts.journal_page(session, run_id, after, limit)
+
+    def report(self, actor: object, project_id: int, run_id: object, *, offset: object = 0, limit: object = 65536) -> dict:
+        self._own_run(actor, project_id, run_id)
+        offset = offset if isinstance(offset, int) and not isinstance(offset, bool) and offset >= 0 else 0
+        limit = limit if isinstance(limit, int) and not isinstance(limit, bool) and limit >= 1 else 65536
+        with self._sessions() as session:
+            row = session.get(ManagedRunState, run_id)
+            if row is None or row.project_id != project_id:
+                raise RunLaunchNotFound("Run not found")
+            try:
+                return self.artifacts.read_report(session, row, offset, limit)
+            except ReportUnavailable as exc:
+                raise RunLaunchConflict("The Run Report is not available", exc.code) from None
+
+    def report_for_tool(self, session: Session, project_id: int, run_id: str, task_id: int | None,
+                        offset: int, limit: int) -> dict:
+        """Narrow seam for the Architect ``rosc_report_read`` Tool (the caller is already verified by the broker)."""
+        row = session.get(ManagedRunState, run_id)
+        if row is None or row.project_id != project_id or (task_id is not None and row.task_id != task_id):
+            raise ReportUnavailable("not_found")
+        return self.artifacts.read_report(session, row, offset, limit)
 
     def _note(self, run_id: str, reason: str) -> None:
         with self._sessions() as session:
@@ -719,9 +854,13 @@ class RunLaunchService:
         """Derived state from the recorded state + CLI-hook evidence + clock.  Never writes, sends or deletes anything."""
         state, reason = snap["state"], snap["reason"]
         evidence = {"submitted": False, "receipt": None, "required_reads": False, "missing_reads": []}
-        if state not in (RUN_DISPATCHING, RUN_SUBMITTED, RUN_UNKNOWN, RUN_ACKNOWLEDGED, RUN_DECLINED):
+        if state not in (RUN_DISPATCHING, RUN_SUBMITTED, RUN_UNKNOWN, RUN_ACKNOWLEDGED, RUN_DECLINED,
+                         RUN_EXEC_DISPATCHING, RUN_RUNNING, RUN_REPORTED, RUN_NOT_EXECUTED):
             return state, reason, evidence
-        final = state in (RUN_ACKNOWLEDGED, RUN_DECLINED)  # recorded outcome stands; evidence is shown, not re-decided
+        # recorded outcome stands; evidence is shown, not re-decided.  P054B: past the execution intent (or once the
+        # ACK led to a post-E0 state) the E0 outcome is final history, never re-derived.
+        final = (state in (RUN_ACKNOWLEDGED, RUN_DECLINED, RUN_EXEC_DISPATCHING, RUN_RUNNING, RUN_REPORTED,
+                           RUN_NOT_EXECUTED) or snap.get("exec_intent_at") is not None)
         base = self._workers.run_evidence_base(snap["incarnation"])
         evidence["submitted"] = self._submitted(snap, base)
         receipt = self._load_evidence(Path(f"{base}.run-{snap['run_token']}.receipt.json"))
@@ -762,6 +901,176 @@ class RunLaunchService:
             return RUN_SUBMITTED, "awaiting_worker_ack", evidence
         return state, reason, evidence
 
+
+    # -- P054B: execution continuation of the SAME Run (no second Owner click) ------------------------------------------
+    def _exec_files(self, snap: dict) -> tuple[Path, Path]:
+        base = self._workers.run_evidence_base(snap["incarnation"])
+        return Path(f"{base}.run-request.json"), Path(f"{base}.run-{snap['run_token']}.exec-submitted.json")
+
+    def _exec_submitted(self, snap: dict) -> bool:
+        """The CLI's own UserPromptSubmit hook saw THIS Run's execution line (correlated by the exec token)."""
+        _request, path = self._exec_files(snap)
+        data = self._load_evidence(path)
+        if (data is None or data.get("incarnation") != snap["incarnation"] or data.get("run_id") != snap["run_id"]
+                or data.get("exec_token") != snap["exec_token"] or snap["exec_intent_at"] is None):
+            return False
+        ancestors, stamp = data.get("ancestors"), data.get("acked_at")
+        if not isinstance(ancestors, list) or snap["pane_pid"] not in ancestors:
+            return False
+        if isinstance(stamp, bool) or not isinstance(stamp, (int, float)):
+            return False
+        return stamp >= _aware(snap["exec_intent_at"]).timestamp() - 5
+
+    def _execution_problem(self, session: Session, row: ManagedRunState) -> tuple[str | None, Path | None, object]:
+        """Why the execution line must NOT be sent now (``None`` = it may be sent once).  Read-only."""
+        if row.reason != "worker_acknowledged" or row.acknowledged_at is None:
+            return "ack_not_current", None, None  # a late/irregular ACK is not a grant to start work
+        if self._clock() - _aware(row.acknowledged_at).timestamp() > row.ack_timeout_seconds:
+            return "continuation_stale", None, None
+        project = self._project(session, row.project_id)
+        try:
+            binding = validate_project_identity(project)
+            root = self._artifact_root(session, project)
+            obs, worker = self._workers.run_target(session, project, row.agent_id)
+        except (RunLaunchError, ProjectIdentityError, AgentNotFound) as exc:
+            return getattr(exc, "code", "target_unavailable")[:40], None, None
+        if binding.version != row.root_binding_version:
+            return "binding_changed", None, None
+        if worker is None or worker.incarnation != row.incarnation or worker.pane_pid != row.pane_pid:
+            return "worker_changed", None, None
+        if obs.state != STATE_ACTIVE:
+            return "worker_not_active", None, None
+        package_dir = run_directory(root, row.project_id, row.task_id, row.run_id) / PACKAGE_DIRNAME
+        manifest = verify_published_package(package_dir, row.manifest_sha256, row.protocol_sha256)
+        if manifest is None:
+            return "package_invalid", None, None
+        if tuple(manifest.get("operative_stages") or ()) != FULL_STAGES or manifest.get("artifacts") != ARTIFACT_LAYOUT \
+                or not isinstance(manifest.get("tool"), dict):
+            return "e0_only_package", None, None  # historical P054A package: never upgraded or executed
+        return None, package_dir, worker
+
+    def _start_execution(self, run_id: str) -> None:
+        """``acknowledged`` -> one execution line, at most once.
+
+        Order (each crash window has one outcome):
+          1. persist the exec token (state stays ``acknowledged``; nothing sent)       crash -> step 1 again, same token
+          2. extend the CLI hook request with the exec token (file, nothing sent)       crash -> steps 2-3 again
+          3. DURABLE INTENT ``acknowledged -> exec_dispatching``                         crash -> never re-sent; UNKNOWN
+          4. type ONE pointer line into the bound pane                                  crash -> hook evidence decides
+          5. the CLI's own UserPromptSubmit hook proves submission -> ``running``       none in window -> UNKNOWN
+        A refused precondition (stale/late ACK, changed binding/CLI, invalid or E0-only package) is ``not_executed``:
+        provably nothing was sent after the ACK, the slot is released and no second writer can be overlapping."""
+        with self._sessions() as session:
+            row = session.get(ManagedRunState, run_id)
+            if row is None or row.state != RUN_ACKNOWLEDGED:
+                return
+            problem, package_dir, worker = self._execution_problem(session, row)
+            token = row.exec_token
+        if problem is not None:
+            self._transition(run_id, (RUN_ACKNOWLEDGED,), RUN_NOT_EXECUTED, problem)
+            return
+        if token is None:
+            token = str(uuid.uuid4())
+            with self._sessions() as session:
+                try:
+                    session.connection().exec_driver_sql("BEGIN IMMEDIATE")
+                    row = session.get(ManagedRunState, run_id)
+                    if row.state != RUN_ACKNOWLEDGED:
+                        session.rollback()
+                        return
+                    if row.exec_token is None:
+                        row.exec_token, row.updated_at = token, _now()
+                        row.state_revision += 1
+                    token = row.exec_token
+                    session.commit()
+                except (OperationalError, IntegrityError):
+                    session.rollback()
+                    return
+        snap = row_snapshot(run_id, self._sessions)
+        request, _submitted = self._exec_files(snap)
+        try:
+            temp = request.with_name(f"{request.name}.{uuid.uuid4().hex}.tmp")
+            fd = os.open(temp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+            with os.fdopen(fd, "w", encoding="utf-8") as handle:
+                json.dump({"incarnation": snap["incarnation"], "run_id": run_id, "token": snap["run_token"],
+                           "package_dir": str(package_dir), "manifest_sha256": snap["manifest_sha256"],
+                           "exec_token": token}, handle)
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.replace(temp, request)
+        except OSError:
+            return  # nothing sent; the next pass retries steps 2-3 with the same token
+        # DURABLE EXECUTION INTENT: from this commit on, the line may be delivered and is never repeated.
+        if not self._transition(run_id, (RUN_ACKNOWLEDGED,), RUN_EXEC_DISPATCHING, "exec_intent",
+                                exec_intent_at="now"):
+            return
+        text = (f"[{EXEC_MARKER} {token}] ROSC Core принял E0 ACK этого же формального Run: run_id={run_id} "
+                f"package={package_dir} manifest_sha256={snap['manifest_sha256']}. Продолжай ЭТОТ Run: выполни этапы "
+                f"E1-E6 по {package_dir / 'worker-execution-protocol.md'} строго в рамках утверждённых spec.md/prompt.md. "
+                f"Все артефакты Run записывай только командой python3 {package_dir / ARTIFACT_TOOL_FILE} "
+                f"(начни с: run start, затем plan add-step/plan publish до правок); вручную файлы Run не создавай.")
+        try:
+            self._workers.deliver_run_line(worker, text)
+        except SessionError:
+            self._note(run_id, "exec_send_uncertain")  # stays exec_dispatching -> unknown after the window
+            return
+        deadline = self._clock() + self._submit_wait
+        while self._clock() < deadline and not self._exec_submitted(row_snapshot(run_id, self._sessions)):
+            time.sleep(0.25)
+        self._reconcile_execution(run_id)
+
+    def _reconcile_execution(self, run_id: str, *, actor: str = "rosc-core") -> None:
+        """Evidence-only: CLI-hook submission proof and imported Journal facts move the state; nothing is ever sent."""
+        snap = row_snapshot(run_id, self._sessions)
+        if snap["state"] == RUN_EXEC_DISPATCHING:
+            if self._exec_submitted(snap):
+                self._transition(run_id, (RUN_EXEC_DISPATCHING,), RUN_RUNNING, "exec_submitted", actor=actor,
+                                 exec_submitted_at="now")
+        elif snap["state"] == RUN_UNKNOWN and snap["exec_intent_at"] is not None and snap["exec_submitted_at"] is None:
+            if self._exec_submitted(snap):
+                self._transition(run_id, (RUN_UNKNOWN,), RUN_RUNNING, "late_exec_submitted", actor=actor,
+                                 exec_submitted_at="now")
+        self.artifacts.import_run(run_id)
+        snap = row_snapshot(run_id, self._sessions)
+        if (snap["state"] == RUN_EXEC_DISPATCHING
+                and self._clock() - _aware(snap["exec_intent_at"]).timestamp() > snap["ack_timeout_seconds"]):
+            self._transition(run_id, (RUN_EXEC_DISPATCHING,), RUN_UNKNOWN, "no_exec_submit_within_timeout", actor=actor)
+
+    def advance(self, run_id: str, *, actor: str = "rosc-core", send: bool = True) -> None:
+        """One bounded, idempotent step of a holding managed Run, routed by its recorded state.  At-most-once sends
+        are guaranteed by the durable intents in the database, not by this call.  ``send=False`` (the Owner's
+        evidence-only reconcile) records evidence and imports artifacts but never types anything."""
+        with self._advance_lock:
+            with self._sessions() as session:
+                row = session.get(ManagedRunState, run_id)
+                if row is None:
+                    return
+                state, exec_intent = row.state, row.exec_intent_at
+            if state in (RUN_DISPATCHING, RUN_SUBMITTED) or (state == RUN_UNKNOWN and exec_intent is None):
+                self.reconcile_internal(run_id, actor=actor)
+                with self._sessions() as session:
+                    state = session.get(ManagedRunState, run_id).state
+            if state == RUN_ACKNOWLEDGED:
+                if send:
+                    self._start_execution(run_id)
+            elif state in (RUN_EXEC_DISPATCHING, RUN_RUNNING) or (state == RUN_UNKNOWN and exec_intent is not None):
+                self._reconcile_execution(run_id, actor=actor)
+
+    def tick(self) -> int:
+        """Startup catch-up and periodic in-process pass over holding managed Runs only (bounded batch).  Never
+        launches a Run, restarts/kills a CLI, re-sends an uncertain line or invokes a model."""
+        with self._sessions() as session:
+            ids = list(session.scalars(select(ManagedRunState.run_id).where(
+                ManagedRunState.state.in_((RUN_DISPATCHING, RUN_SUBMITTED, RUN_ACKNOWLEDGED, RUN_UNKNOWN,
+                                           RUN_EXEC_DISPATCHING, RUN_RUNNING)))
+                .order_by(ManagedRunState.updated_at).limit(MONITOR_BATCH)))
+        for run_id in ids:
+            try:
+                self.advance(run_id)
+            except Exception as exc:  # one broken Run never stops the others
+                log.warning("Managed Run %s could not be advanced: %s", run_id, type(exc).__name__)
+        return len(ids)
+
     # -- read / reconcile -----------------------------------------------------------------------------------------------
     def status(self, actor: object, project_id: int, run_id: object) -> dict:
         """Read-only: derived state; no DB write, no keystroke, no file change."""
@@ -789,7 +1098,7 @@ class RunLaunchService:
             row = session.get(ManagedRunState, run_id)
             if row is None or row.project_id != project_id:
                 raise RunLaunchNotFound("Run not found")
-        self.reconcile_internal(run_id, actor=getattr(actor, "actor_id", "rosc-core"))
+        self.advance(run_id, actor=getattr(actor, "actor_id", "rosc-core"), send=False)
         return self._view_by_id(project_id, run_id)
 
     def reconcile_internal(self, run_id: str, *, actor: str = "rosc-core") -> None:
@@ -814,6 +1123,9 @@ class RunLaunchService:
                 raise RunLaunchNotFound("Run not found")
             snap = row_snapshot(run_id, self._sessions, session=session)
             derived, reason, evidence = self._evaluate(session, snap)
+            progress = self.artifacts.progress(session, row)
+            if snap["exec_intent_at"] is not None:
+                evidence = {**evidence, "exec_submitted": self._exec_submitted(snap)}
             history = [] if not events else [
                 {"seq": e.seq, "from": e.from_state, "to": e.to_state, "reason": e.reason, "actor": e.actor,
                  "at": _iso(e.created_at)}
@@ -824,7 +1136,8 @@ class RunLaunchService:
             "task_id": f"T{row.task_id:04d}", "agent_id": row.agent_id, "launch_key": row.launch_key,
             "state": derived, "reason": reason, "recorded_state": row.state, "recorded_reason": row.reason,
             "holding": derived in MANAGED_HOLDING_STATES,
-            "resumable_with_same_key": row.state in (RUN_AUTHORIZED, RUN_DISPATCH_PENDING),
+            "resumable_with_same_key": row.state == RUN_DISPATCH_PENDING or (
+                row.state == RUN_AUTHORIZED and self._protocol_unchanged(row)),
             "package": {"package_id": row.package_id, "prompt_approval_id": row.prompt_approval_id,
                         "spec_revision": row.spec_revision, "spec_digest": row.spec_digest,
                         "prompt_revision": row.prompt_revision, "prompt_digest": row.prompt_digest,
@@ -836,8 +1149,17 @@ class RunLaunchService:
             "evidence": evidence,
             "created_at": _iso(row.created_at), "dispatch_intent_at": _iso(row.dispatch_intent_at),
             "submitted_at": _iso(row.submitted_at), "acknowledged_at": _iso(row.acknowledged_at),
-            # Explicitly NOT represented by any state of this slice (P054B / S2):
-            "work_started": False, "plan": None, "journal": None, "report": None,
+            # P054B: execution continuation of this same Run and the imported Worker artifacts (observed claims).
+            "execution": {"intent_at": _iso(row.exec_intent_at), "submitted_at": _iso(row.exec_submitted_at),
+                          "reported_at": _iso(row.reported_at), "outcome": row.outcome},
+            "work_started": bool(progress and (progress["started"] or progress["journal"]["events"])),
+            "plan": None if not progress else {"revision": progress["plan_revision"], "steps": progress["steps"],
+                                               "progress": progress["progress"]},
+            "progress": progress,
+            "report": progress["report"] if progress else None,
+            "review": {"state": "awaiting_architect_review" if derived == RUN_REPORTED else "not_ready",
+                       "next_actor": "Architect" if derived == RUN_REPORTED else None,
+                       "note": "A reported Run is a Worker claim: not VERIFIED, not Owner ACCEPTED"},
             "checked_at": _iso(_now()),
         }
         if events:
@@ -853,7 +1175,8 @@ def row_snapshot(run_id: str, sessions: sessionmaker[Session], *, session: Sessi
         row = s.get(ManagedRunState, run_id)
         return {name: getattr(row, name) for name in (
             "run_id", "project_id", "task_id", "agent_id", "incarnation", "pane_pid", "run_token", "state", "reason",
-            "manifest_sha256", "dispatch_intent_at", "submitted_at", "ack_timeout_seconds", "root_binding_version")}
+            "manifest_sha256", "dispatch_intent_at", "submitted_at", "ack_timeout_seconds", "root_binding_version",
+            "exec_token", "exec_intent_at", "exec_submitted_at", "acknowledged_at", "protocol_sha256")}
     if session is not None:
         return take(session)
     with sessions() as fresh:

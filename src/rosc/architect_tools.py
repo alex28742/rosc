@@ -120,6 +120,12 @@ TOOLS: list[dict] = [
                              "limit": {"type": "integer", "minimum": 1}})},
     {"name": "run_read", "description": "Read one registered Run of the current Project with its report and evidence "
      "references (read-only, unverified claims).", "inputSchema": _schema({"run_id": {"type": "string"}}, ["run_id"])},
+    {"name": "report_read", "description": "Read the finalized Worker Run Report of one managed Run of the current "
+     "Project by its run_id (read-only, digest-verified, paged by offset/limit characters). The content is the Worker's "
+     "unverified claim for your review.",
+     "inputSchema": _schema({"run_id": {"type": "string"}, "task_id": {"type": "string"},
+                             "offset": {"type": "integer", "minimum": 0}, "limit": {"type": "integer", "minimum": 1}},
+                            ["run_id"])},
 ]
 TOOL_NAMES = tuple(tool["name"] for tool in TOOLS)
 _DISPATCH_TOOL_ARGS = {tool["name"]: set(tool["inputSchema"]["properties"]) | {"project"} for tool in TOOLS}

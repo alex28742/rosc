@@ -6,6 +6,7 @@ import { useScrollRegions } from './scroll';
 import { useTaskAuthoring } from './useTaskAuthoring';
 import { useTaskConversation } from './useTaskConversation';
 import { useTaskWorkers } from './useTaskWorkers';
+import { useTaskRun } from './useTaskRun';
 import { useTextScale } from './useTextScale';
 import { useWorkspaceController } from './useWorkspaceController';
 
@@ -36,6 +37,9 @@ export function App({ api = coreApi }: { api?: CoreApi }) {
     route.kind === 'task' ? route.taskId : null);
   const taskWorkers = useTaskWorkers(api, route.kind === 'task' ? route.projectId : null,
     route.kind === 'task' ? route.taskId : null);
+  // P054B: the Task's managed Run (reads only; the one launch is an explicit button). A state change refreshes authoring.
+  const taskRun = useTaskRun(api, route.kind === 'task' ? route.projectId : null,
+    route.kind === 'task' ? route.taskId : null, taskAuthoring.onReload);
   // P047: Project-level Worker controls (read on open; only explicit buttons can start anything).
   const projectWorkers = useTaskWorkers(api, projectId, null);
   const taskLayerOpen = (route.kind === 'task' || route.kind === 'new-task') && project !== null;
@@ -99,6 +103,7 @@ export function App({ api = coreApi }: { api?: CoreApi }) {
       conversation={taskConversation}
       authoring={taskAuthoring}
       workers={taskWorkers}
+      run={taskRun}
       textScale={taskTextScale}
       onClose={close}
       onRetry={() => void actions.retry()}

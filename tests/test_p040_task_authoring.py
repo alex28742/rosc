@@ -145,9 +145,10 @@ class PromptTests(AuthoringCase):
         self.assertEqual((approval["spec_revision"], approval["prompt_revision"]), (1, 1))
         self.assertFalse(self.client.post(f"{self.t}/prompt/revisions/1/approve", json={"digest": one["digest"]}).json()["created"])
         p = self.proj()
+        # P054B: the approved Prompt offers the one explicit Owner Run start (the backend still gates the launch)
         self.assertEqual((p["prompt"]["state"], p["next"]["label"], p["next"]["enabled"]),
-                         ("approved", "Запустить Run", False))
-        self.assertIn("P042", p["next"]["hint"])
+                         ("approved", "Запустить Run", True))
+        self.assertIn("Owner запускает Run одной командой", p["next"]["hint"])
         two = self.prompt(1, 1, body="Edited after approval").json()["prompt"]
         self.assertEqual(two["state"], "unapproved")
         self.assertIsNone(two["approval"])

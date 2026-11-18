@@ -1089,10 +1089,18 @@ RUN_ACKNOWLEDGED = "acknowledged"        # correlated Worker ACCEPT receipt + re
 RUN_DECLINED = "declined"                # correlated Worker DECLINE receipt (terminal)
 RUN_UNKNOWN = "unknown"                  # no proof within the ACK window (or inconsistent evidence); holds the slot
 RUN_NOT_DELIVERED = "not_delivered"      # provably nothing was sent (failed before the dispatch intent); terminal
+# P054B (migration 0020): the SAME Run continues after a Core-accepted E0 ACK, without a second Owner click.
+RUN_EXEC_DISPATCHING = "exec_dispatching"  # durable execution-continuation intent: from here the line MAY have been sent
+RUN_RUNNING = "running"                  # CLI hook saw the execution line submitted, or valid Journal events imported
+RUN_REPORTED = "reported"                # closed Journal + digest-matching finalized Report + terminal record (terminal)
+RUN_NOT_EXECUTED = "not_executed"        # acknowledged, but Core provably never sent the execution line (terminal)
 MANAGED_RUN_STATES = (RUN_AUTHORIZED, RUN_DISPATCH_PENDING, RUN_DISPATCHING, RUN_SUBMITTED, RUN_ACKNOWLEDGED,
-                      RUN_DECLINED, RUN_UNKNOWN, RUN_NOT_DELIVERED)
+                      RUN_DECLINED, RUN_UNKNOWN, RUN_NOT_DELIVERED, RUN_EXEC_DISPATCHING, RUN_RUNNING, RUN_REPORTED,
+                      RUN_NOT_EXECUTED)
 MANAGED_HOLDING_STATES = (RUN_AUTHORIZED, RUN_DISPATCH_PENDING, RUN_DISPATCHING, RUN_SUBMITTED, RUN_ACKNOWLEDGED,
-                          RUN_UNKNOWN)
+                          RUN_UNKNOWN, RUN_EXEC_DISPATCHING, RUN_RUNNING)
+MANAGED_TERMINAL_STATES = (RUN_DECLINED, RUN_NOT_DELIVERED, RUN_REPORTED, RUN_NOT_EXECUTED)
+RUN_OUTCOMES = ("completed", "partial", "blocked", "failed")  # the Worker's claimed outcome of a reported Run
 _MANAGED_HOLDING = _in_list("state", MANAGED_HOLDING_STATES)
 
 
@@ -1106,10 +1114,18 @@ class ManagedRunState(Base):
         CheckConstraint("state_revision >= 1", name="ck_managed_run_states_revision"),
         CheckConstraint("spec_revision >= 1 AND prompt_revision >= 1 AND root_binding_version >= 1",
                         name="ck_managed_run_states_revisions"),
-        CheckConstraint("state NOT IN ('dispatching', 'submitted', 'acknowledged', 'declined') "
+        CheckConstraint("state NOT IN ('dispatching', 'submitted', 'acknowledged', 'declined', 'exec_dispatching', "
+                        "'running', 'reported', 'not_executed') "
                         "OR (dispatch_intent_at IS NOT NULL AND manifest_sha256 IS NOT NULL)",
                         name="ck_managed_run_states_intent"),
+        CheckConstraint("state NOT IN ('exec_dispatching', 'running', 'reported') OR (exec_intent_at IS NOT NULL "
+                        "AND exec_token IS NOT NULL AND acknowledged_at IS NOT NULL)", name="ck_managed_run_states_exec"),
+        CheckConstraint("state != 'not_executed' OR (acknowledged_at IS NOT NULL AND exec_intent_at IS NULL)",
+                        name="ck_managed_run_states_not_executed"),
+        CheckConstraint("(state = 'reported') = (outcome IS NOT NULL) AND (outcome IS NULL OR "
+                        + _in_list("outcome", RUN_OUTCOMES) + ")", name="ck_managed_run_states_outcome"),
         UniqueConstraint("run_token", name="uq_managed_run_states_token"),
+        UniqueConstraint("exec_token", name="uq_managed_run_states_exec_token"),
         ForeignKeyConstraint(["project_id", "root_binding_version"],
                              ["project_root_bindings.project_id", "project_root_bindings.version"],
                              ondelete="RESTRICT", name="fk_managed_run_states_binding"),
@@ -1148,6 +1164,12 @@ class ManagedRunState(Base):
     dispatch_intent_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     submitted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     acknowledged_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    # P054B execution continuation (0020): correlation nonce of the ONE execution line + its durable intent.
+    exec_token: Mapped[str | None] = mapped_column(String(36), nullable=True)
+    exec_intent_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    exec_submitted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    reported_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    outcome: Mapped[str | None] = mapped_column(String(16), nullable=True)
 
 
 class ManagedRunEvent(Base):
@@ -1169,4 +1191,92 @@ class ManagedRunEvent(Base):
     reason: Mapped[str] = mapped_column(String(48))
     evidence: Mapped[str | None] = mapped_column(Text, nullable=True)  # compact JSON of evidence facts, never content
     actor: Mapped[str] = mapped_column(String(64))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+
+
+# P054B (migration 0020): Core-owned import of a managed Run's local Worker artifacts.  Every row is an OBSERVED Worker
+# claim validated for identity/sequence/hash/size, never an Owner authorization or an independent verification.
+class ManagedRunImport(Base):
+    """Mutable import cursor/bookkeeping of one managed Run (independent of the Worker's own event history)."""
+
+    __tablename__ = "managed_run_imports"
+    __table_args__ = (CheckConstraint("journal_seq >= 0 AND plan_revision >= 0", name="ck_managed_run_imports_cursor"),)
+
+    run_id: Mapped[str] = mapped_column(ForeignKey("managed_run_states.run_id", ondelete="RESTRICT"), primary_key=True)
+    journal_seq: Mapped[int] = mapped_column(Integer, default=0)
+    journal_hash: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    plan_revision: Mapped[int] = mapped_column(Integer, default=0)
+    checkpoint_sha256: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    checkpoint_seq: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    checkpoint_body: Mapped[str | None] = mapped_column(Text, nullable=True)
+    torn_tail_bytes: Mapped[int] = mapped_column(Integer, default=0)
+    problem: Mapped[str | None] = mapped_column(String(48), nullable=True)
+    problem_detail: Mapped[str | None] = mapped_column(String(200), nullable=True)
+    last_event_at: Mapped[str | None] = mapped_column(String(32), nullable=True)  # Worker-claimed, as written
+    observed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)  # journal file mtime
+    imported_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    checked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
+class ManagedRunJournalEvent(Base):
+    """One imported, validated Worker Journal event (immutable; never deleted)."""
+
+    __tablename__ = "managed_run_journal_events"
+    __table_args__ = (
+        CheckConstraint("seq >= 1", name="ck_managed_run_journal_events_seq"),
+        CheckConstraint("length(data) <= 65536", name="ck_managed_run_journal_events_data"),
+        UniqueConstraint("run_id", "event_id", name="uq_managed_run_journal_events_id"),
+    )
+
+    run_id: Mapped[str] = mapped_column(ForeignKey("managed_run_states.run_id", ondelete="RESTRICT"), primary_key=True)
+    seq: Mapped[int] = mapped_column(Integer, primary_key=True)
+    event_id: Mapped[str] = mapped_column(String(32))
+    type: Mapped[str] = mapped_column(String(32))
+    step_id: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    plan_revision: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    at: Mapped[str] = mapped_column(String(32))          # Worker-claimed timestamp, as written
+    hash: Mapped[str] = mapped_column(String(64))
+    data: Mapped[str] = mapped_column(Text)              # canonical JSON of the event's data object
+    imported_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+
+
+class ManagedRunPlanRevision(Base):
+    """One imported immutable Working Plan revision (exact file digest + body)."""
+
+    __tablename__ = "managed_run_plan_revisions"
+    __table_args__ = (CheckConstraint("revision >= 1", name="ck_managed_run_plan_revisions_revision"),)
+
+    run_id: Mapped[str] = mapped_column(ForeignKey("managed_run_states.run_id", ondelete="RESTRICT"), primary_key=True)
+    revision: Mapped[int] = mapped_column(Integer, primary_key=True)
+    sha256: Mapped[str] = mapped_column(String(64))
+    body: Mapped[str] = mapped_column(Text)
+    imported_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+
+
+class ManagedRunReport(Base):
+    """Registry of the finalized Worker Run Report of a managed Run: verified file path identity + digest at import.
+    Distinct from P013 ``ReportRecord`` (Owner-registered external claims)."""
+
+    __tablename__ = "managed_run_reports"
+    __table_args__ = (CheckConstraint(_in_list("outcome", RUN_OUTCOMES), name="ck_managed_run_reports_outcome"),)
+
+    run_id: Mapped[str] = mapped_column(ForeignKey("managed_run_states.run_id", ondelete="RESTRICT"), primary_key=True)
+    report_path: Mapped[str] = mapped_column(String(64))
+    sha256: Mapped[str] = mapped_column(String(64))
+    bytes: Mapped[int] = mapped_column(Integer)
+    outcome: Mapped[str] = mapped_column(String(16))
+    journal_seq: Mapped[int] = mapped_column(Integer)
+    registered_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+
+
+class ManagedRunHandoff(Base):
+    """Receipt of the ONE Worker -> Architect handoff message of a terminal managed Run (written atomically with it)."""
+
+    __tablename__ = "managed_run_handoffs"
+
+    run_id: Mapped[str] = mapped_column(ForeignKey("managed_run_states.run_id", ondelete="RESTRICT"), primary_key=True)
+    message_id: Mapped[str] = mapped_column(ForeignKey("conversation_messages.message_id", ondelete="RESTRICT"),
+                                            unique=True)
+    conversation_id: Mapped[str] = mapped_column(ForeignKey("conversations.conversation_id", ondelete="RESTRICT"))
+    addressed_to: Mapped[str] = mapped_column(String(36))   # Architect agent id, or 'owner' when none is assigned
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))

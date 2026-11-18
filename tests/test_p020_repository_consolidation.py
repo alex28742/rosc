@@ -266,7 +266,7 @@ class GlobalLibraryTests(p19.ContextCase):
         names = {t["name"] for t in TOOLS}
         self.assertEqual(names, {"briefing", "global_list", "global_read", "docs_list", "docs_search", "docs_read",
                                  "docs_create", "docs_update", "docs_delete", "docs_restore", "source_list",
-                                 "source_read", "source_search", "source_git", "task_list", "task_read", "task_create", "task_spec_read", "task_spec_save", "prompt_draft_read", "prompt_draft_save", "run_list", "run_read"})
+                                 "source_read", "source_search", "source_git", "task_list", "task_read", "task_create", "task_spec_read", "task_spec_save", "prompt_draft_read", "prompt_draft_save", "run_list", "run_read", "report_read"})
         listing = next(t for t in TOOLS if t["name"] == "global_list")
         self.assertFalse(listing["inputSchema"]["additionalProperties"])
         self.assertEqual(set(listing["inputSchema"]["properties"]), {"path", "offset", "limit"})
@@ -283,6 +283,8 @@ class GlobalLibraryTests(p19.ContextCase):
             "agents/architect/templates/README.md", "agents/workers/README.md", "principles/context-economy.md",
             # P054A: pinned Worker Role Rules + Execution Protocol (delivered only through a Run package)
             "agents/workers/ruleset.yaml", "agents/workers/rules/role.md", "agents/workers/rules/execution-protocol.md",
+            # P054B: the pinned Worker Artifact Tool (published byte-exact only inside a Run package)
+            "agents/workers/tools/rosc_run_tool.py",
             "skills/README.md", "tools/README.md",
             *(f"agents/architect/rules/{n}.md" for n in (
                 "role", "onboarding", "context-maintenance", "pipeline-management", "autonomy", "research", "review",

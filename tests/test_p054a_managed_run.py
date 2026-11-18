@@ -207,7 +207,8 @@ class MigrationTests(RunCase):
                            "prompt_approval_id, spec_revision, spec_digest, prompt_revision, prompt_digest, "
                            "root_binding_version, agent_id, worker_session_id, incarnation, pane_pid, proc_start, "
                            "protocol_version, protocol_sha256, 'k-0002', ?, ack_timeout_seconds, 'authorized', 'x', "
-                           "NULL, 1, created_at, updated_at, NULL, NULL, NULL from managed_run_states where run_id=?",
+                           "NULL, 1, created_at, updated_at, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL "
+                           "from managed_run_states where run_id=?",
                            (other, str(uuid.uuid4()), rid))
         self.assertEqual(self.count("run_records"), 1)
         # P013 never links a managed Run to an Agent as an owner-curated claim
@@ -283,7 +284,9 @@ class AuthorizationTests(RunCase):
         self.activate()
         self.client.post(self.url("session/bootstrap"))
         self.client.get("/api/projects/P0001/workers")
-        self.assertEqual(self.client.get("/api/projects/P0001/tasks/T0001/authoring").json()["next"]["enabled"], False)
+        # P054B: the action is now offered to the Owner (enabled), but reading/activating/bootstrapping starts nothing
+        self.assertEqual(self.client.get("/api/projects/P0001/tasks/T0001/authoring").json()["next"]["action"],
+                         "authorize_run")
         self.assert_nothing()
 
     def test_unsafe_run_location_is_refused_before_any_write(self) -> None:
@@ -316,14 +319,19 @@ class AuthorizationTests(RunCase):
         for rel in ("ruleset.yaml", "README.md", "rules/role.md", "rules/execution-protocol.md"):
             self.assertNotIn("pending_owner_review", (workers / rel).read_text(), rel)
         protocol = load_worker_protocol(DEFAULT_GLOBAL_LIBRARY)
-        self.assertEqual((protocol.version, protocol.operative_stages), ("0.1.0", ("E0",)))
+        # P054B: 0.2.0 makes E0-E6 operative for NEW packages, always together with the pinned Artifact Tool
+        self.assertEqual((protocol.version, protocol.operative_stages), ("0.2.0", ("E0", "E1", "E2", "E3", "E4", "E5", "E6")))
+        self.assertTrue(protocol.executable)
         e0 = (workers / "rules/execution-protocol.md").read_text().split("## E1")[0]
         for name in ("run.json", "spec.md", "prompt.md", "DECLINE"):
             self.assertIn(name, e0)
         library = self.base / "library"
         shutil.copytree(workers, library / "agents" / "workers")
         target = library / "agents/workers/ruleset.yaml"
-        for bad in (("bytes: 2763", "bytes: 2764"), ("operative_stages: [E0]", "operative_stages: [E0, E1]")):
+        size = len((workers / "rules/execution-protocol.md").read_bytes())
+        stages = "operative_stages: [E0, E1, E2, E3, E4, E5, E6]"
+        for bad in ((f"bytes: {size}", f"bytes: {size + 1}"), (stages, "operative_stages: [E0, E1]"),
+                    ("package_file: rosc-run-tool.py", "package_file: other.py")):
             with self.subTest(bad=bad):
                 text = (workers / "ruleset.yaml").read_text()
                 self.assertIn(bad[0], text)
@@ -672,7 +680,8 @@ class OfflinePackageTests(RunCase):
         self.assertEqual(hashlib.sha256(manifest_bytes).hexdigest(), state["manifest_sha256"])
         manifest = json.loads(manifest_bytes)
         self.assertEqual((manifest["format"], manifest["run_id"], manifest["operative_stages"]),
-                         ("rosc.run.v1", run["run_id"], ["E0"]))
+                         ("rosc.run.v1", run["run_id"], ["E0", "E1", "E2", "E3", "E4", "E5", "E6"]))
+        self.assertIn("rosc-run-tool.py", [item["file"] for item in manifest["contents"]])  # P054B pinned writer
         for item in manifest["contents"]:
             data = (package / item["file"]).read_bytes()
             self.assertEqual((hashlib.sha256(data).hexdigest(), len(data)), (item["sha256"], item["bytes"]))

@@ -20,6 +20,10 @@ the project-bootstrap files above.  It is active only while Core has written ``<
 * ``stop``   writes the write-once ``<incarnation>.run-<token>.receipt.json`` when the finished turn's last message has
   the line ``ROSC-RUN-ACK <token> <run_id> <manifest_sha256> ACCEPT|DECLINE`` for exactly that request.
 
+P054B: after Core accepted the ACK it adds ``exec_token`` to the same request file before it types the ONE execution
+line; ``submit`` then writes ``<incarnation>.run-<token>.exec-submitted.json`` (first submission only) when the
+submitted prompt carries that exec token.  It proves the CLI received the execution line, never that work happened.
+
 These files are evidence for Core to evaluate, never a state change: Core alone decides ``acknowledged``/``declined``.
 
 Nothing here talks to the Engine or a model; every mode is a no-op outside a ROSC-managed session.
@@ -113,7 +117,17 @@ def _run_file(target: str, token: str, suffix: str) -> str:
 def _run_submit(target: str, nonce: str, event: dict) -> None:
     request = _run_request(target, nonce)
     prompt = event.get("prompt")
-    if request is None or not isinstance(prompt, str) or request["token"] not in prompt:
+    if request is None or not isinstance(prompt, str):
+        return
+    exec_token = request.get("exec_token")
+    if _canonical_token(exec_token) and exec_token in prompt:  # P054B: the ONE execution line of the same Run
+        path = _run_file(target, request["token"], ".exec-submitted.json")
+        if not os.path.exists(path):  # first submission only
+            _atomic_write(path, {"incarnation": nonce, "token": request["token"], "run_id": request["run_id"],
+                                 "exec_token": exec_token, "cli_session_id": str(event.get("session_id", ""))[:64],
+                                 "ancestors": ancestors(os.getpid()), "acked_at": time.time()})
+        return
+    if request["token"] not in prompt:
         return
     path = _run_file(target, request["token"], ".submitted.json")
     if os.path.exists(path):

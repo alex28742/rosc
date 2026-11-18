@@ -21,8 +21,9 @@ from sqlalchemy.orm import Session, sessionmaker
 
 from . import authorization as authz
 from . import rich_text
-from .models import (PROVENANCE_ARCHITECT, PROVENANCE_OWNER, ExecutionPackage, Project, PromptApproval, PromptRevision, Task,
-                     TaskSpecRevision, ProjectIdentityError, validate_project_identity)
+from .models import (MANAGED_HOLDING_STATES, PROVENANCE_ARCHITECT, PROVENANCE_OWNER, RUN_REPORTED, RUN_UNKNOWN,
+                     ExecutionPackage, ManagedRunState, Project, PromptApproval, PromptRevision, Task, TaskSpecRevision,
+                     ProjectIdentityError, validate_project_identity)
 from .workspace import READY, WorkspaceConflict, inspect_project, provision_task
 
 MAX_PROMPT_CHARS = 100_000
@@ -496,6 +497,7 @@ class TaskAuthoringService:
             prompt = prompt_view(head, state=state, approval=approval) if head else None
             task = session.get(Task, task_id)
             editable = task.status == EDITABLE_STATUS
+            run = self._run_summary(session, task_id)
             revisions = [r for r in session.scalars(select(PromptRevision).where(PromptRevision.task_id == task_id)
                                                     .order_by(PromptRevision.revision))]
             prompt_history = []
@@ -506,12 +508,41 @@ class TaskAuthoringService:
         return {
             "task_id": f"T{task_id:04d}", "editable": editable,
             "spec": spec_view(spec_head, head=True), "prompt": prompt, "prompt_history": prompt_history,
-            "run": {"authorized": False, "label": "Run не запускался", "worker": "Worker не запускался"},
-            "next": self._next(state, head, editable),
+            "run": run,
+            "next": self._next(state, head, editable, run),
         }
 
     @staticmethod
-    def _next(state: str | None, head: PromptRevision | None, editable: bool) -> dict:
+    def _run_summary(session: Session, task_id: int) -> dict:
+        """P054B: the Task's latest managed Run as recorded by Core (read-only; never derived from tmux activity)."""
+        row = session.scalars(select(ManagedRunState).where(ManagedRunState.task_id == task_id)
+                              .order_by(ManagedRunState.created_at.desc(), ManagedRunState.run_id.desc()).limit(1)).first()
+        if row is None:
+            return {"authorized": False, "label": "Run не запускался", "worker": "Worker не запускался",
+                    "run_id": None, "state": None, "holding": False}
+        labels = {"authorized": "Run: передача Worker", "dispatch_pending": "Run: передача Worker",
+                  "dispatching": "Run: передача Worker (E0)", "submitted": "Run: ожидает ACK Worker (E0)",
+                  "acknowledged": "Run: Worker принял (E0)", "exec_dispatching": "Run: передано исполнение",
+                  "running": "Run выполняется Worker", "unknown": "Run: состояние неизвестно",
+                  "reported": "Run: отчёт Worker получен", "declined": "Run отклонён Worker",
+                  "not_delivered": "Run не доставлен", "not_executed": "Run не начат"}
+        return {"authorized": True, "label": labels.get(row.state, row.state), "worker": row.agent_id,
+                "run_id": row.run_id, "state": row.state, "holding": row.state in MANAGED_HOLDING_STATES,
+                "outcome": row.outcome}
+
+    @staticmethod
+    def _next(state: str | None, head: PromptRevision | None, editable: bool, run: dict | None = None) -> dict:
+        if run and run.get("holding"):
+            if run["state"] == RUN_UNKNOWN:
+                return {"action": "observe_run", "label": "Run: состояние неизвестно", "enabled": False,
+                        "next_actor": "Owner", "hint": "ROSC не может подтвердить доставку или ход Run и ничего не "
+                        "отправляет повторно. Проверьте терминал Worker; второй Run этой Task не запускается."}
+            return {"action": "observe_run", "label": run["label"], "enabled": False, "next_actor": "Worker",
+                    "hint": "Run уже запущен: второй Run этой Task не запускается. Прогресс — по импортированному Journal."}
+        if run and run.get("state") == RUN_REPORTED:
+            return {"action": "awaiting_review", "label": "Ожидает Architect Review", "enabled": False,
+                    "next_actor": "Architect", "hint": "Отчёт Worker получен. Это заявление Worker: не VERIFIED и не "
+                    "принято Owner."}
         if not editable:
             return {"action": "none", "label": "Task не в стадии Draft", "enabled": False, "next_actor": "Owner",
                     "hint": "Правка Spec и Prompt после стадии Draft недоступна."}
@@ -524,5 +555,6 @@ class TaskAuthoringService:
         if state == "unapproved":
             return {"action": "review_prompt", "label": "Просмотреть и утвердить Prompt", "enabled": True,
                     "next_actor": "Owner", "hint": "Утверждение Draft не запускает Worker: Run запускает Owner одной командой."}
-        return {"action": "authorize_run", "label": "Запустить Run", "enabled": False, "next_actor": "Owner",
-                "hint": "Запуск Run станет доступен после подключения Worker и передачи задания (P042)", "secondary": "Просмотреть утверждённый Draft"}
+        return {"action": "authorize_run", "label": "Запустить Run", "enabled": True, "next_actor": "Owner",
+                "hint": "Выберите Worker с активной CLI и подтверждённым bootstrap: Owner запускает Run одной командой.",
+                "secondary": "Просмотреть утверждённый Draft"}

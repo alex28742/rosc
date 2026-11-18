@@ -222,7 +222,7 @@ class TransportTests(ContextCase):
         names = set(TOOL_NAMES)
         self.assertEqual(names, {"briefing", "global_list", "global_read", "docs_list", "docs_search", "docs_read",
                                  "docs_create", "docs_update", "docs_delete", "docs_restore", "source_list",
-                                 "source_read", "source_search", "source_git", "task_list", "task_read", "task_create", "task_spec_read", "task_spec_save", "prompt_draft_read", "prompt_draft_save", "run_list", "run_read"})
+                                 "source_read", "source_search", "source_git", "task_list", "task_read", "task_create", "task_spec_read", "task_spec_save", "prompt_draft_read", "prompt_draft_save", "run_list", "run_read", "report_read"})
         for tool in TOOLS:  # writes exist only for ROSC documents and name no target Project
             if tool["name"] in ("docs_create", "docs_update", "docs_delete", "docs_restore"):
                 self.assertNotIn("project", tool["inputSchema"]["properties"])

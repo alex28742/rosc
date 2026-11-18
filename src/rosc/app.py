@@ -47,6 +47,7 @@ from .workspace import (MAX_MANIFEST_BYTES, READY, WorkspaceConflict, WorkspaceE
 
 
 log = logging.getLogger(__name__)
+RUN_MONITOR_INTERVAL = 5.0  # P054B: seconds between passes over HOLDING managed Runs only
 
 
 class ProjectInput(BaseModel):
@@ -426,7 +427,8 @@ def create_app(db_path: Path | None = None, workspace_root: Path | None = None, 
                worker_session_service: WorkerSessionService | None = None,
                run_launch_service: RunLaunchService | None = None,
                group_transport_factory: TransportFactory | None = None,
-               conversation_trace: ctrace.ConversationTrace | None = None) -> FastAPI:
+               conversation_trace: ctrace.ConversationTrace | None = None,
+               run_monitor_interval: float | None = RUN_MONITOR_INTERVAL) -> FastAPI:
     """``auth_provider``/``authorization_policy`` and the ``extra_allowed_*`` sets are Python-level composition and
     test seams only. Nothing in a request (body, query, header, cookie) can select an actor, a role or these values,
     and there is deliberately no environment knob.
@@ -454,7 +456,7 @@ def create_app(db_path: Path | None = None, workspace_root: Path | None = None, 
         private_paths=(db_path.parent, *repo_private_paths()))
     context_broker = ProjectContextBroker(sessions, workspace_root, library_root,
                                         private_roots=(db_path.parent, db_path, *repo_private_paths()),
-                                        authoring=authoring)
+                                        authoring=authoring, run_reports=run_launch.report_for_tool)
     # P024: opt-in latency diagnostics (ROSC_ARCHITECT_LATENCY_TRACE); unset means DISABLED and zero output.  ``latency_trace``
     # is a Python-level test seam like the runtime; no request can enable or configure it.
     trace = latency_trace if latency_trace is not None else LatencyTrace.from_environment(db_path.parent)
@@ -483,14 +485,37 @@ def create_app(db_path: Path | None = None, workspace_root: Path | None = None, 
                              bodies=values.get(ctrace.SETTING_BODIES, False))
     load_diagnostics()
 
+    # P054B: bounded in-process monitor of HOLDING managed Runs only (startup catch-up + periodic pass).  It is not a
+    # general daemon: it never launches a Run, never re-sends an uncertain line, never restarts/kills a CLI and never
+    # invokes a model; at-most-once sends are enforced by the durable intents in the database.  ``None`` disables it
+    # (Python-level composition/test seam; no request can configure it).
+    monitor_stop = threading.Event()
+
+    def run_monitor() -> None:
+        while not monitor_stop.is_set():
+            try:
+                run_launch.tick()
+            except OperationalError:
+                log.warning("Managed Run monitor skipped: database is not migrated or busy")
+            except Exception as exc:  # the monitor must never take Core down
+                log.warning("Managed Run monitor pass failed: %s", type(exc).__name__)
+            monitor_stop.wait(run_monitor_interval or 5.0)
+
     @asynccontextmanager
     async def lifespan(_app: FastAPI):
+        monitor = None
+        if run_monitor_interval is not None:
+            monitor = threading.Thread(target=run_monitor, name="rosc-run-monitor", daemon=True)
+            monitor.start()
         try:
             architect.recover()  # pending work of a dead process becomes unknown (nothing re-sent); P028: Tools of a verified live session reconnect
         except OperationalError:
             log.warning("Architect recovery skipped: database is not migrated")
         group.recover_all()  # interrupted group turns become explicit states; no provider call
         yield
+        monitor_stop.set()
+        if monitor is not None:
+            monitor.join(timeout=10)
         tool_host.shutdown()
 
     app = FastAPI(title="ROSC Core", version="0.1.0", lifespan=lifespan)
@@ -904,6 +929,17 @@ def create_app(db_path: Path | None = None, workspace_root: Path | None = None, 
     @app.post("/api/projects/{project_id}/runs/{run_id}/reconcile")
     def reconcile_run(project_id: str, run_id: str) -> dict:
         return run_call(run_launch.reconcile, current_actor(), numeric_id(project_id, "P"), run_id)
+
+    # -- P054B read-only views of the imported Worker artifacts (never send, import-trigger or start anything) --------
+    @app.get("/api/projects/{project_id}/runs/{run_id}/journal")
+    def run_journal(project_id: str, run_id: str, after: int = 0, limit: int = 100) -> dict:
+        return run_call(run_launch.journal, current_actor(), numeric_id(project_id, "P"), run_id, after=after,
+                        limit=limit)
+
+    @app.get("/api/projects/{project_id}/runs/{run_id}/report")
+    def run_report(project_id: str, run_id: str, offset: int = 0, limit: int = 65536) -> dict:
+        return run_call(run_launch.report, current_actor(), numeric_id(project_id, "P"), run_id, offset=offset,
+                        limit=limit)
 
     @app.post("/api/projects/{project_id}/workers/{agent_id}/session/bootstrap")
     def worker_session_bootstrap(project_id: str, agent_id: str) -> dict:

@@ -1,16 +1,25 @@
 format: rosc.worker.ruleset.v1
 ruleset_id: rosc.worker.global
-version: 0.1.0
+version: 0.2.0
 # Universal ROSC Worker rules, versioned with the ROSC code.  They reach a Worker only through the pinned copy published
-# in a Run's package (exact bytes + digests below); operative_stages lists what ROSC actually supports (E0 only).
-operative_stages: [E0]
+# in a Run's package (exact bytes + digests below); operative_stages lists what ROSC actually supports for NEW Runs.
+# 0.2.0 (P054B): E0-E6 operative; every E1-E6 artifact is written only by the pinned Worker Artifact Tool below.
+operative_stages: [E0, E1, E2, E3, E4, E5, E6]
 # Paths are relative to the global/ library root.  Order is the read order and the order of the composed digest.
 files:
   - id: role
     path: agents/workers/rules/role.md
-    sha256: 3042249549b91b35e7e9f4277a0a66489958e4691d307b3791c807910f45212f
-    bytes: 1955
+    sha256: a1a66fb0594e60bdbd88bbcb77ce03e2bb97fd5e950fe5b54492071544a94fe0
+    bytes: 2278
   - id: execution-protocol
     path: agents/workers/rules/execution-protocol.md
-    sha256: 9a32c25f42990acc5304d336fa11acaed4fe147cbdcc1185e98ff8fa3dc72ae5
-    bytes: 2763
+    sha256: a26b74ed05fe2d681c24a45356a2a5fd61a6643cf058cf39eca4e04556b920a4
+    bytes: 6846
+# Executable helpers published byte-exact in the package (not natively read rules; part of the composed digest).
+tools:
+  - id: artifact-tool
+    path: agents/workers/tools/rosc_run_tool.py
+    package_file: rosc-run-tool.py
+    version: 1.0.0
+    sha256: 4d34bb32d840b1aa1c548733f7c08edd43376e19f95fcbf007a88747a23a4813
+    bytes: 49488

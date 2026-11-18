@@ -1,8 +1,8 @@
 // Test fixtures shared by the application tests. Not imported by production code.
 import { vi } from 'vitest';
-import type { GroupControls, TaskAuthoringControls, TaskWorkerControls } from './presentation/contracts';
+import type { GroupControls, TaskAuthoringControls, TaskRunControls, TaskWorkerControls } from './presentation/contracts';
 import type { CoreApi } from '../core/api';
-import type { GroupStatus, ProjectWorker, WorkerSession, TaskAuthoring, AgentDefinition, ArchitectStatus, ContextAccess, ConversationMessage, ConversationPage, ConversationParticipant, TaskArchitectStatus, ConversationMessageInput, Project, RoleAssignment, Task } from '../core/models';
+import type { RunView, GroupStatus, ProjectWorker, WorkerSession, TaskAuthoring, AgentDefinition, ArchitectStatus, ContextAccess, ConversationMessage, ConversationPage, ConversationParticipant, TaskArchitectStatus, ConversationMessageInput, Project, RoleAssignment, Task } from '../core/models';
 
 export const project = (id: string, over: Partial<Project> = {}): Project => ({
   id, name: `Project ${id}`, description: `About ${id}`, root_path: `/tmp/${id}`, mode: 'existing', docs_entrypoint: null,
@@ -108,6 +108,21 @@ export const workerControls = (over: Partial<TaskWorkerControls> = {}): TaskWork
   onBootstrap: vi.fn(async () => undefined), ...over,
 });
 
+/** P054B: a Task with no managed Run yet. */
+export const runControls = (over: Partial<TaskRunControls> = {}): TaskRunControls => ({
+  status: 'ready', run: null, stale: false, launching: false, launchError: null, onLaunch: vi.fn(async () => undefined),
+  onReload: vi.fn(), onLoadJournal: vi.fn(async () => ({ run_id: 'r', events: [], next_after: null, note: '' })),
+  onLoadReport: vi.fn(async () => 'not registered'), ...over,
+});
+
+export const RUN_ID = '11111111-2222-4333-8444-555555555555';
+export const runView = (over: Partial<RunView> = {}): RunView => ({
+  run_id: RUN_ID, task_id: 'T0001', agent_id: 'w-1', launch_key: 'ui-key-0001', state: 'dispatching', reason: 'dispatch_intent',
+  holding: true, created_at: '2026-11-17T10:00:00Z', acknowledged_at: null, checked_at: '2026-11-17T10:00:01Z',
+  execution: { intent_at: null, submitted_at: null, reported_at: null, outcome: null }, work_started: false, progress: null,
+  report: null, review: { state: 'not_ready', next_actor: null, note: '' }, ...over,
+});
+
 /** P046: an empty group room (no round, no members). */
 export const groupStatus = (over: Partial<GroupStatus> = {}): GroupStatus => ({
   conversation_id: null, roster: [], names: {}, settings: { passive_missed_message_threshold: 10, catchup_confirmation_chars: 2000, group_reply_quota_default: 3 },
@@ -185,6 +200,12 @@ export function stubApi(over: Partial<{ [K in keyof CoreApi]: ReturnType<typeof 
     savePrompt: vi.fn(async () => ({ created: true, prompt: { revision: 1, source_spec_revision: 1, summary: 's', body: 'b', digest: 'p'.repeat(64),
       rules_ref: null, state: 'unapproved' as const, actor: { kind: 'owner', id: 'local-owner' }, created_at: '2026-10-31T00:00:00Z', approval: null } })),
     approvePrompt: vi.fn(async () => ({ created: true, prompt: taskAuthoring().spec as never })),
+    listTaskRuns: vi.fn(async () => [] as RunView[]),
+    getRun: vi.fn(async () => runView()),
+    launchRun: vi.fn(async () => ({ ...runView(), created: true })),
+    getRunJournal: vi.fn(async () => ({ run_id: RUN_ID, events: [], next_after: null, note: '' })),
+    getRunReport: vi.fn(async () => ({ run_id: RUN_ID, path: 'reports/final.md', sha256: 'a'.repeat(64), bytes: 10, outcome: 'completed' as const,
+      status: 'worker_reported', offset: 0, content: '# Run Report', chars: 12, next_offset: null, note: '' })),
     ...over,
   };
   return api as typeof api & CoreApi;

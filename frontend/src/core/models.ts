@@ -372,13 +372,51 @@ export type PromptRevision = {
   state: PromptState; actor: AuthoringActor; created_at: string; approval: PromptApprovalRecord | null; current?: boolean;
 };
 export type NextAction = {
-  action: 'none' | 'create_prompt' | 'review_prompt' | 'update_prompt' | 'authorize_run';
+  action: 'none' | 'create_prompt' | 'review_prompt' | 'update_prompt' | 'authorize_run' | 'observe_run' | 'awaiting_review';
   label: string; enabled: boolean; next_actor: string; hint: string; secondary?: string;
 };
 export type TaskAuthoring = {
   task_id: string; editable: boolean; spec: SpecRevision; prompt: PromptRevision | null; prompt_history: PromptRevision[];
-  run: { authorized: boolean; label: string; worker: string }; next: NextAction;
+  run: { authorized: boolean; label: string; worker: string; run_id?: string | null; state?: RunState | null; holding?: boolean; outcome?: RunOutcome | null };
+  next: NextAction;
 };
+
+/** P054A/P054B managed Run lifecycle recorded by Core (delivery/import evidence only; never Task verification). */
+export type RunState = 'authorized' | 'dispatch_pending' | 'dispatching' | 'submitted' | 'acknowledged' | 'declined' | 'unknown'
+  | 'not_delivered' | 'exec_dispatching' | 'running' | 'reported' | 'not_executed';
+export type RunOutcome = 'completed' | 'partial' | 'blocked' | 'failed';
+export type StepImplementation = 'PENDING' | 'IN_PROGRESS' | 'PRODUCED' | 'BLOCKED' | 'FAILED' | 'UNCERTAIN';
+export type StepTest = 'NOT_TESTED' | 'TESTING' | 'PASSED' | 'FAILED' | 'INCONCLUSIVE' | 'STALE';
+export type RunStep = {
+  id: string; title: string | null; description: string | null; depends_on: string[]; expected_outcome: string | null;
+  test_intent: string | null; implementation: StepImplementation; test: StepTest; tests: string[];
+};
+export type RunTestAttempt = {
+  test_id: string; steps: string[]; command: string; exit_code: number; outcome: 'passed' | 'failed' | 'inconclusive';
+  limitations: string | null; at: string; evidence: { path: string; sha256: string; bytes: number; truncated: boolean } | null;
+};
+export type RunBlocker = { blocker_id: string; summary: string; step_id: string | null; next_action: string | null; owner_decision: boolean; open: boolean; at: string };
+export type RunReportRef = { path: string; sha256: string; bytes: number; outcome: RunOutcome; registered_at: string; note: string };
+export type RunProgress = {
+  plan_revision: number; steps: RunStep[];
+  progress: { total: number; produced: number; test_passed: number; note: string };
+  tests: RunTestAttempt[]; blockers: RunBlocker[]; started: boolean;
+  journal: { events: number; last_event_at: string | null; last_seq: number };
+  import: { imported_at: string | null; checked_at: string | null; journal_observed_at: string | null; problem: string | null; problem_detail: string | null; torn_tail_bytes: number };
+  checkpoint: { sha256: string; seq: number; current_step: string | null; note: string; saved_at: string | null } | null;
+  report: RunReportRef | null;
+  handoff: { message_id: string; addressed_to: string; created_at: string } | null;
+};
+export type RunView = {
+  run_id: string; task_id: string; agent_id: string; launch_key: string; state: RunState; reason: string; holding: boolean;
+  created_at: string | null; acknowledged_at: string | null; checked_at: string | null;
+  execution?: { intent_at: string | null; submitted_at: string | null; reported_at: string | null; outcome: RunOutcome | null };
+  work_started: boolean; progress?: RunProgress | null; report: RunReportRef | null;
+  review?: { state: 'awaiting_architect_review' | 'not_ready'; next_actor: string | null; note: string };
+};
+export type RunJournalEvent = { seq: number; event_id: string; type: string; step_id: string | null; plan_revision: number | null; at: string; data: Record<string, unknown>; imported_at: string | null };
+export type RunJournalPage = { run_id: string; events: RunJournalEvent[]; next_after: number | null; note: string };
+export type RunReportPage = { run_id: string; path: string; sha256: string; bytes: number; outcome: RunOutcome; status: string; offset: number; content: string; chars: number; next_offset: number | null; note: string };
 export type SpecSaveInput = { expected_revision: number; title: string; scope?: string | null; description: string; acceptance_criteria: string };
 export type PromptSaveInput = { expected_revision: number | null; source_spec_revision: number; body: string; summary: string };
 

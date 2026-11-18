@@ -11,6 +11,7 @@ import { Feedback } from '../ui/Feedback';
 import { TextViewControl } from '../ui/TextViewControl';
 import { TaskConversationPanel } from '../ui/TaskConversationPanel';
 import { WorkspaceActions } from '../ui/WorkspaceActions';
+import { RUN_STATE_TEXT, RunJournalDrawer, RunLaunchAction, RunReportDrawer, WorkingPlan, formatTime, outcomeText, planProgress } from '../ui/RunPanels';
 import { useApplyTextScale } from '../ui/useApplyTextScale';
 
 const LATER = 'Будет доступно позже';
@@ -25,7 +26,7 @@ function Later({ children, label }: { children: string; label?: string }) {
  * Working Plan | Context & Actions, full-height Task Conversation, full-width head/footer). Core data fills the
  * regions it has; the rest are honest empty states with disabled controls, never simulated state.
  */
-export function TaskView({ projectName, taskId, task, tasksStatus, feedback, inert, scroll, workspace, conversation, authoring, workers, textScale, onClose, onRetry }: TaskViewProps) {
+export function TaskView({ projectName, taskId, task, tasksStatus, feedback, inert, scroll, workspace, conversation, authoring, workers, run, textScale, onClose, onRetry }: TaskViewProps) {
   const scaleRef = useApplyTextScale(textScale.scale);
   const [chatCollapsed, setChatCollapsed] = useState(false);
   /** P048: narrow-width pane (Task work vs. Task Conversation); independent of the Project's own pane state. */
@@ -40,6 +41,9 @@ export function TaskView({ projectName, taskId, task, tasksStatus, feedback, ine
   const [title, setTitle] = useState('');
   const [scope, setScope] = useState('');
   const [activateFailure, setActivateFailure] = useState('');
+  const [runWorker, setRunWorker] = useState<string | null>(null);
+  const [journalOpen, setJournalOpen] = useState(false);
+  const [reportOpen, setReportOpen] = useState(false);
   const descriptionEditor = useRef<RichEditorHandle | null>(null);
   const criteriaEditor = useRef<RichEditorHandle | null>(null);
   const markDirty = useCallback(() => { setRichDirty(true); setSpecNote(''); }, []);
@@ -77,6 +81,11 @@ export function TaskView({ projectName, taskId, task, tasksStatus, feedback, ine
   const primaryEnabled = next !== null && next.enabled && !authoring.busy;
   const primaryTone = specDirty ? 'positive' : next === null ? 'neutral'
     : next.action === 'update_prompt' ? 'warning' : next.enabled && (next.action === 'create_prompt' || next.action === 'review_prompt') ? 'positive' : 'neutral';
+  const currentRun = run.run;
+  const progress = currentRun?.progress ?? null;
+  const planned = planProgress(currentRun);
+  const report = progress?.report ?? null;
+  const launchArea = next?.action === 'authorize_run' && !specDirty;
   const tca = conversation.taskArchitect;
   const architectView = describeTaskArchitect(tca.status, tca.info, tca.busy);
   const head = <>
@@ -91,7 +100,7 @@ export function TaskView({ projectName, taskId, task, tasksStatus, feedback, ine
     </div>
   </>;
   const footer = <>
-    <span className="rosc-task-foot__note">Spec и Prompt Draft хранятся версиями · утверждение Prompt не запускает Run; Run, Worker и приёмка — в следующих срезах</span>
+    <span className="rosc-task-foot__note">Spec и Prompt Draft хранятся версиями · утверждение Prompt не запускает Run · отчёт Worker не означает VERIFIED/ACCEPTED; Review и приёмка — в следующих срезах</span>
     <span className="rosc-task-foot__actions">
       <button type="button" className="rosc-btn rosc-btn--small" disabled title={LATER}>Принять задачу</button>
       <button type="button" className="rosc-btn rosc-btn--small" onClick={onClose}>К проекту</button>
@@ -176,16 +185,27 @@ export function TaskView({ projectName, taskId, task, tasksStatus, feedback, ine
           </section>
           <div className="rosc-task-lower">
             <section className="rosc-task-panel rosc-task-plan" aria-label="Рабочий план Worker">
-              <div className="rosc-task-panel__top"><h3>Рабочий план Worker</h3><span className="rosc-chip">Revision —</span></div>
-              <div className="rosc-task-plan__progress" aria-label="Прогресс плана недоступен">
-                <div className="rosc-task-plan__label"><strong>Прогресс не определён</strong><span>—</span></div>
-                <div className="rosc-task-plan__track" aria-hidden="true" />
-              </div>
+              <div className="rosc-task-panel__top"><h3>Рабочий план Worker</h3>
+                <span className="rosc-task-panel__chips">
+                  {currentRun && <span className={`rosc-tag ${currentRun.state === 'unknown' ? 'rosc-tag--warning' : 'rosc-tag--info'}`} data-testid="run-state">Run: {RUN_STATE_TEXT[currentRun.state] ?? currentRun.state}</span>}
+                  <span className="rosc-chip" data-testid="plan-revision">{progress && progress.plan_revision > 0 ? `Revision v${progress.plan_revision}` : 'Revision —'}</span>
+                </span></div>
+              {planned
+                ? <div className="rosc-task-plan__progress" aria-label="Прогресс реализации (не VERIFIED)">
+                  <div className="rosc-task-plan__label"><strong>Реализация: PRODUCED {planned.produced}/{planned.total}</strong><span>тесты PASSED {planned.passed}/{planned.total} · не VERIFIED</span></div>
+                  <div className="rosc-task-plan__track" aria-hidden="true"><div className={`rosc-task-plan__fill rosc-task-plan__fill--${planned.decile}`} /></div>
+                </div>
+                : <div className="rosc-task-plan__progress" aria-label="Прогресс плана недоступен">
+                  <div className="rosc-task-plan__label"><strong>Прогресс не определён</strong><span>—</span></div>
+                  <div className="rosc-task-plan__track" aria-hidden="true" />
+                </div>}
               <div className="rosc-task-panel__scroll">
-                <div className="rosc-state"><p>Рабочий план пока недоступен.</p><p>Шаги появятся, когда Worker подготовит план для этой Task.</p></div>
+                <WorkingPlan run={currentRun} controls={run} />
               </div>
               <div className="rosc-task-panel__foot">
-                <span>Ревизии плана будут доступны позже.</span>
+                {progress
+                  ? <span data-testid="run-freshness">Событие Worker: {formatTime(progress.journal.last_event_at)} · импорт Core: {formatTime(progress.import.imported_at)}</span>
+                  : <span>Ревизии плана будут доступны позже.</span>}
                 <Later>История ревизий</Later>
               </div>
             </section>
@@ -199,9 +219,14 @@ export function TaskView({ projectName, taskId, task, tasksStatus, feedback, ine
                   <div className="rosc-task-actions__row">
                     {specDirty
                       ? <button type="button" className="rosc-btn rosc-btn--primary" disabled={authoring.busy || title.trim() === ''} onClick={() => void saveSpec()}>Подготовить / Сохранить Spec</button>
-                      : <button type="button" className="rosc-btn rosc-btn--primary" disabled={!primaryEnabled}
-                        title={next && !next.enabled ? next.hint : undefined} onClick={() => setDraftOpen(true)}>{next?.label ?? 'Загрузка…'}</button>}
+                      : launchArea ? null
+                        : <button type="button" className="rosc-btn rosc-btn--primary" disabled={!primaryEnabled || next?.action === 'observe_run' || next?.action === 'awaiting_review'}
+                          title={next && !next.enabled ? next.hint : undefined} onClick={() => setDraftOpen(true)}>{next?.label ?? 'Загрузка…'}</button>}
                   </div>
+                  {launchArea && next && <RunLaunchAction next={next} workers={workers} run={run} busy={authoring.busy}
+                    selected={runWorker} onSelect={setRunWorker} />}
+                  {report && <p className="rosc-hint" data-testid="run-report-ref">Report: {outcomeText(report.outcome)} · sha256 {report.sha256.slice(0, 12)}… · {currentRun?.review?.state === 'awaiting_architect_review' ? 'ожидает Architect Review (не VERIFIED, не принято Owner)' : 'заявление Worker'}
+                    {' '}<button type="button" className="rosc-task-link" onClick={() => setReportOpen(true)}>Открыть Report</button></p>}
                 </div>
                 <div className="rosc-task-agents">
                   <div aria-label="Architect этой Task">
@@ -235,7 +260,9 @@ export function TaskView({ projectName, taskId, task, tasksStatus, feedback, ine
                   <div className="rosc-task-actions__row">
                     <button type="button" className="rosc-btn rosc-btn--small" disabled={!prompt}
                       title={prompt ? undefined : 'Prompt ещё не создан — начните с основного действия выше'} onClick={() => setDraftOpen(true)}>Prompt / контракт</button>
-                    <Later>Журнал выполнения</Later>
+                    {progress
+                      ? <button type="button" className="rosc-btn rosc-btn--small" onClick={() => setJournalOpen(true)}>Журнал выполнения</button>
+                      : <Later>Журнал выполнения</Later>}
                     <Later>Ревизии плана</Later>
                   </div>
                 </div>
@@ -248,6 +275,8 @@ export function TaskView({ projectName, taskId, task, tasksStatus, feedback, ine
           collapsed={chatCollapsed}
           onCollapsedChange={value => { setChatCollapsed(value); if (value) setMobilePane('work'); }} />
         {draftOpen && <PromptDraftDrawer key={`${task.project_id}/${task.id}`} taskId={task.id} authoring={authoring} onClose={() => setDraftOpen(false)} />}
+        {journalOpen && <RunJournalDrawer run={run} onClose={() => setJournalOpen(false)} />}
+        {reportOpen && <RunReportDrawer run={run} onClose={() => setReportOpen(false)} />}
       </div>}
     {task && <MobilePaneSwitch pane={mobilePane} workLabel="TASK" workName="рабочей области задачи" chatName="Task Conversation"
       onSwitch={next => { if (next === 'chat') setChatCollapsed(false); setMobilePane(next); }} />}

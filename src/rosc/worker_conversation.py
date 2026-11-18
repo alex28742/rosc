@@ -569,6 +569,50 @@ class WorkerConversationCore:
                     session.add(MessageParty(message_id=message_id, role=role, party_ref=ref,
                                              party_kind=roles.get(ref, ROLE_WORKER), agent_id=ref))
 
+    # ------------------------------------------------------------------ P054B managed Run handoff
+    def post_run_handoff(self, session: Session, *, project_id: int, task_id: int, agent_id: str, body: str,
+                         client_key: str, owner_actor: tuple[str, str]) -> tuple[str, str, str]:
+        """Store ONE immutable Worker-attributed message addressed to the Project Architect in the Run's own Task
+        Conversation, inside the CALLER's transaction (atomic with the Run's ``reported`` transition and its receipt).
+
+        Attribution is the verified original Worker (``kind='worker'``, ``agent_id``), never the Owner or the Architect.
+        It opens no group round, debits no reply grant, queues no turn, starts no delivery and invokes no model: an
+        offline Architect simply finds the addressed message later.  Idempotent by ``client_key``.  Returns
+        ``(message_id, conversation_id, addressed_to)``."""
+        actor = ActorContext("owner", owner_actor[0][:64], owner_actor[1][:32])
+        room = self._room(session, project_id, task_id, create=True, actor=actor)
+        existing = session.scalars(select(ConversationMessage).where(
+            ConversationMessage.conversation_id == room.conversation_id,  # type: ignore[union-attr]
+            ConversationMessage.client_key == client_key)).first()
+        architect = session.scalars(select(RoleAssignment).where(
+            RoleAssignment.project_id == project_id, RoleAssignment.role == ROLE_ARCHITECT,
+            RoleAssignment.state == ASSIGNMENT_ACTIVE).order_by(RoleAssignment.created_at)).first()
+        to = architect.agent_id if architect is not None else PARTY_OWNER_REF
+        if existing is not None:
+            return existing.message_id, existing.conversation_id, to
+        participant = session.scalars(select(ConversationParticipant).where(
+            ConversationParticipant.conversation_id == room.conversation_id,  # type: ignore[union-attr]
+            ConversationParticipant.kind == ROLE_WORKER, ConversationParticipant.agent_id == agent_id)).first()
+        if participant is None:
+            participant = ConversationParticipant(
+                participant_id=str(uuid.uuid4()), conversation_id=room.conversation_id,  # type: ignore[union-attr]
+                kind=ROLE_WORKER, actor_id=agent_id, actor_assurance="rosc:managed_run", agent_id=agent_id,
+                created_at=_now())
+            session.add(participant)
+            session.flush()
+        message = ConversationMessage(
+            message_id=str(uuid.uuid4()), conversation_id=room.conversation_id,  # type: ignore[union-attr]
+            sender_participant_id=participant.participant_id,
+            ordinal=self._max_ordinal(session, room.conversation_id) + 1,  # type: ignore[union-attr]
+            body=body, client_key=client_key, recipient=None, created_at=_now())
+        session.add(message)
+        session.flush()
+        session.add(MessageEnvelope(message_id=message.message_id, reply_to_message_id=None, round_id=None,
+                                    turn_id=None, sender_agent_id=agent_id))
+        self._write_parties(session, message.message_id, room.conversation_id, [to])  # type: ignore[union-attr]
+        session.flush()
+        return message.message_id, message.conversation_id, to
+
     # ------------------------------------------------------------------ Owner message
     def post_owner_message(self, actor: ActorContext, project_id: object, *, client_key: object, body: object,
                            to: object = None, reply_to: object = None, task_id: object = None) -> dict:

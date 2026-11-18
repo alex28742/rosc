@@ -51,12 +51,13 @@ from .architect_store import (ArchitectDocumentStore, Document, DocumentExists, 
                               CommitUncertain, normalize_doc_id)
 from .models import (ASSIGNMENT_ACTIVE, ROLE_ARCHITECT, SESSION_READY,
                      AgentDefinition, ArchitectSession, ArchitectToolAudit, Conversation, ConversationMessage,
-                     EvidenceRecord, Project, ProjectIdentityError, ReportRecord, RoleAssignment, RunAgentLink, RunRecord, Task,
-                     validate_project_identity, CONVERSATION_KIND_PROJECT)
+                     EvidenceRecord, ManagedRunReport, ManagedRunState, Project, ProjectIdentityError, ReportRecord,
+                     RoleAssignment, RunAgentLink, RunRecord, Task, validate_project_identity, CONVERSATION_KIND_PROJECT)
 from . import rich_text
 from .authorization import LocalOwnerPolicy
 from .task_authoring import ArchitectAuthor, AuthoringError, TaskAuthoringService
 from .run_provenance import evidence_view, link_view, report_view, run_view
+from .run_artifacts import ReportUnavailable
 from .workspace import READY, inspect_project
 
 log = logging.getLogger(__name__)
@@ -272,8 +273,12 @@ def _bounded_int(value: object, default: int, low: int, high: int) -> int:
 class ProjectContextBroker:
     def __init__(self, session_factory: sessionmaker[Session], workspace_root: Path,
                  global_library_root: Path | None = None, private_roots: tuple[Path, ...] = (),
-                 authoring: TaskAuthoringService | None = None) -> None:
+                 authoring: TaskAuthoringService | None = None,
+                 run_reports: Callable[..., dict] | None = None) -> None:
         self._sessions = session_factory
+        # P054B: narrow, trusted composition seam to the managed Run report registry (``RunLaunchService.report_for_tool``):
+        # keyed by canonical Run id only; no path is ever taken from a Tool argument.
+        self._run_reports = run_reports
         # P040: the SAME guarded service the Owner API uses; Tool calls reach it only as an ``ArchitectAuthor`` built
         # from the verified live session below, never from a model-supplied identity.
         self._authoring = authoring or TaskAuthoringService(session_factory, LocalOwnerPolicy(), Path(workspace_root))
@@ -570,9 +575,35 @@ class ProjectContextBroker:
             EvidenceRecord.created_at, EvidenceRecord.evidence_id)).all()
         links = session.scalars(select(RunAgentLink).where(RunAgentLink.run_id == run.run_id).order_by(
             RunAgentLink.resulting_revision)).all()
+        managed = session.get(ManagedRunReport, run.run_id)
+        state = session.get(ManagedRunState, run.run_id)
         return {"kind": "run", "access": "read_only", **run_view(run), "reports": [report_view(r) for r in reports],
                 "evidence": [evidence_view(e) for e in evidence], "agent_link_history": [link_view(x) for x in links],
+                "managed_state": None if state is None else {"state": state.state, "outcome": state.outcome},
+                "managed_report": None if managed is None else {
+                    "path": managed.report_path, "sha256": managed.sha256, "bytes": managed.bytes,
+                    "outcome": managed.outcome, "read_with": "rosc_report_read",
+                    "note": "Digest/path identity verified at import; content is an unverified Worker claim"},
                 "note": "Registered claims only; nothing here is verified.", "fetched_at": _iso()}
+
+    def tool_report_read(self, session: Session, caller: Caller, args: dict) -> dict:
+        """P054B: bounded read of the REGISTERED finalized Worker Report of one managed Run of the caller's Project."""
+        self._require(caller, CAP_CONTEXT_READ)
+        run_id = args.get("run_id")
+        if not isinstance(run_id, str) or not re.fullmatch(r"[0-9a-f-]{36}", run_id) or self._run_reports is None:
+            raise ToolError("not_found", "No registered Run Report for this Run in the current Project")
+        task_id = None
+        if args.get("task_id") not in (None, ""):
+            task_id = self._own_task(session, caller, args.get("task_id")).id
+        offset = _bounded_int(args.get("offset"), 0, 0, 10 ** 9)
+        limit = _bounded_int(args.get("limit"), 16000, 1, 65536)
+        try:
+            result = self._run_reports(session, caller.project_id, run_id, task_id, offset, limit)
+        except ReportUnavailable as exc:
+            if exc.code == "report_integrity_failed":
+                raise ToolError("report_integrity_failed", "The Run Report no longer matches its registered digest") from None
+            raise ToolError("not_found", "No registered Run Report for this Run in the current Project") from None
+        return {"kind": "run_report", "access": "read_only", **result, "fetched_at": _iso()}
 
     # -- global library (read-only) ---------------------------------------------------------------------------------
     def _global(self) -> str | None:
