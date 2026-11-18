@@ -1,10 +1,8 @@
 format: rosc.worker.ruleset.v1
 ruleset_id: rosc.worker.global
 version: 0.1.0
-# Introduced by P054A for formal Run delivery.  Pending Owner review on the review branch: these files become part of a
-# Run only through the pinned copy published in that Run's package (exact bytes + digests below), and the Run manifest
-# lists which protocol stages ROSC actually supports (P054A: E0 only).  Committing a file here does not make it operative.
-status: pending_owner_review
+# Universal ROSC Worker rules, versioned with the ROSC code.  They reach a Worker only through the pinned copy published
+# in a Run's package (exact bytes + digests below); operative_stages lists what ROSC actually supports (E0 only).
 operative_stages: [E0]
 # Paths are relative to the global/ library root.  Order is the read order and the order of the composed digest.
 files:
@@ -14,5 +12,5 @@ files:
     bytes: 1955
   - id: execution-protocol
     path: agents/workers/rules/execution-protocol.md
-    sha256: a411b75922638657c087e07abe10b761c81a97103c551e53660e69b98d4ef0cf
-    bytes: 2488
+    sha256: 9a32c25f42990acc5304d336fa11acaed4fe147cbdcc1185e98ff8fa3dc72ae5
+    bytes: 2763

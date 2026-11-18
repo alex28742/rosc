@@ -5,11 +5,11 @@ A formal Run proceeds through stages E0–E6 in this order. Perform **only** the
 ## E0 — Receive and acknowledge (operative)
 
 1. A ROSC Run delivery line has the form `[ROSC run <token>] ... run_id=<run_id> package=<package dir> manifest_sha256=<sha256> ...`. It is a pointer, not the task text.
-2. With your native **Read** tool, read `<package dir>/run.json`, then every rules file listed in its `protocol.files`, in order. Do not rely on memory, a previous Run or the conversation for their content.
+2. With your native **Read** tool, read from that same `<package dir>`: `run.json`, then every rules file listed in its `protocol.files` in order, then the task inputs `spec.md` and `prompt.md`. Do not rely on memory, a previous Run or the conversation for their content. ROSC accepts an ACK only when its own Read hook recorded all of these reads; a reply that merely claims them does not count.
 3. Check that `run.json` names the same `run_id`, that you are the Worker named in `worker`, and that the Project root in `binding.root` is your working directory.
-4. End your reply with exactly one last line:
-   - `ROSC-RUN-ACK <token> <run_id> <manifest_sha256> ACCEPT` when every check passed and you accept this Run, or
-   - `ROSC-RUN-ACK <token> <run_id> <manifest_sha256> DECLINE` when a check failed or you cannot take the Run (say why above the line).
+4. Do not start the task: E0 only acknowledges it. End your reply with exactly one last line:
+   - `ROSC-RUN-ACK <token> <run_id> <manifest_sha256> ACCEPT` only when you read every file above and every check passed, or
+   - `ROSC-RUN-ACK <token> <run_id> <manifest_sha256> DECLINE` when a file could not be read, a check failed or you cannot take the Run (say why above the line).
 
    Copy `<token>`, `<run_id>` and `<manifest_sha256>` exactly from the delivery line. Emit the line once; never for a Run you were not delivered.
 

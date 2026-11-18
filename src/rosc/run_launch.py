@@ -66,6 +66,8 @@ RUN_MANIFEST_FORMAT = "rosc.run.v1"
 WORKER_RULESET = "agents/workers/ruleset.yaml"
 PACKAGE_DIRNAME = "package"
 MANIFEST_NAME = "run.json"
+# Package files a Worker must natively Read before an E0 ACCEPT counts (P054A r02: the task inputs, not just the rules).
+E0_REQUIRED_READS = (MANIFEST_NAME, "worker-role.md", "worker-execution-protocol.md", "spec.md", "prompt.md")
 _LAUNCH_KEY = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:-]{7,95}", re.ASCII)
 _SHA = re.compile(r"[0-9a-f]{64}", re.ASCII)
 _ROLE_FILE = re.compile(r"[a-z][a-z0-9-]{0,40}", re.ASCII)
@@ -123,7 +125,6 @@ def _iso(value: datetime | None) -> str | None:
 class WorkerProtocol:
     ruleset_id: str
     version: str
-    status: str
     sha256: str                                   # composed digest of version + ordered (id, sha256) pairs
     operative_stages: tuple[str, ...]
     files: tuple[tuple[str, str, bytes], ...]     # (id, package file name, exact bytes)
@@ -166,8 +167,7 @@ def load_worker_protocol(library_root: Path) -> WorkerProtocol:
     if len(set(names)) != len(names) or "worker-execution-protocol.md" not in names or "worker-role.md" not in names:
         raise RunLaunchUnavailable("The pinned Worker protocol is incomplete", "protocol_unavailable")
     composed = hashlib.sha256(json.dumps([data["ruleset_id"], data["version"], pairs]).encode()).hexdigest()
-    return WorkerProtocol(data["ruleset_id"], data["version"][:32], str(data.get("status", ""))[:48], composed,
-                          tuple(stages), tuple(files))
+    return WorkerProtocol(data["ruleset_id"], data["version"][:32], composed, tuple(stages), tuple(files))
 
 
 # -- artifact roots ------------------------------------------------------------------------------------------------------
@@ -543,7 +543,7 @@ class RunLaunchService:
                 "package": {"package_id": row.package_id, "prompt_approval_id": row.prompt_approval_id,
                             "spec_revision": row.spec_revision, "spec_digest": row.spec_digest,
                             "prompt_revision": row.prompt_revision, "prompt_digest": row.prompt_digest},
-                "protocol": {"ruleset_id": protocol.ruleset_id, "version": protocol.version, "status": protocol.status,
+                "protocol": {"ruleset_id": protocol.ruleset_id, "version": protocol.version,
                              "sha256": protocol.sha256,
                              "files": [name for _id, name, _raw in protocol.files]},
                 "operative_stages": list(protocol.operative_stages),
@@ -718,7 +718,7 @@ class RunLaunchService:
     def _evaluate(self, session: Session, snap: dict) -> tuple[str, str, dict]:
         """Derived state from the recorded state + CLI-hook evidence + clock.  Never writes, sends or deletes anything."""
         state, reason = snap["state"], snap["reason"]
-        evidence = {"submitted": False, "receipt": None, "required_reads": False}
+        evidence = {"submitted": False, "receipt": None, "required_reads": False, "missing_reads": []}
         if state not in (RUN_DISPATCHING, RUN_SUBMITTED, RUN_UNKNOWN, RUN_ACKNOWLEDGED, RUN_DECLINED):
             return state, reason, evidence
         final = state in (RUN_ACKNOWLEDGED, RUN_DECLINED)  # recorded outcome stands; evidence is shown, not re-decided
@@ -738,9 +738,10 @@ class RunLaunchService:
                            / PACKAGE_DIRNAME).resolve()
             reads = receipt.get("observed_reads")
             seen = {os.path.realpath(p) for p in reads if isinstance(p, str)} if isinstance(reads, list) else set()
-            required = {str(package_dir / MANIFEST_NAME), str(package_dir / "worker-role.md"),
-                        str(package_dir / "worker-execution-protocol.md")}
-            evidence["required_reads"] = required <= seen
+            # E0: the manifest, the pinned rules AND the task inputs of THIS Run's package, each a native Read recorded
+            # by the CLI's own PostToolUse hook; the Worker's reply alone never proves a read.
+            missing = [name for name in E0_REQUIRED_READS if str(package_dir / name) not in seen]
+            evidence["required_reads"], evidence["missing_reads"] = not missing, missing
             if final:
                 return state, reason, evidence
             if binding.version != snap["root_binding_version"]:

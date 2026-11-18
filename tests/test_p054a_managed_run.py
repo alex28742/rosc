@@ -20,6 +20,7 @@ import uuid
 from pathlib import Path
 from unittest.mock import patch
 
+import yaml
 from alembic import command
 from fastapi.testclient import TestClient
 
@@ -127,14 +128,16 @@ class RunCase(SessionCase):
         worker_ack._stop(self.target(incarnation), incarnation, event)
         worker_ack._run_stop(self.target(incarnation), incarnation, event)
 
-    def worker_accepts(self, incarnation: str, run: dict, decision: str = "ACCEPT", reads: bool = True) -> None:
+    def worker_accepts(self, incarnation: str, run: dict, decision: str = "ACCEPT", reads: bool = True,
+                       skip: tuple[str, ...] = ()) -> None:
         text = self.run_sends()[-1]
         self.cli_submit(incarnation, text)
         package = self.package_dir(run["run_id"])
         if reads:
             manifest = json.loads((package / "run.json").read_text())
-            for name in ["run.json", *manifest["protocol"]["files"]]:
-                self.cli_read(incarnation, package / name)
+            for name in ["run.json", *manifest["protocol"]["files"], "spec.md", "prompt.md"]:
+                if name not in skip:
+                    self.cli_read(incarnation, package / name)
         state = self.state_row(run["run_id"])
         self.cli_stop(incarnation, f"Checked.\nROSC-RUN-ACK {state['run_token']} {run['run_id']} "
                                    f"{state['manifest_sha256']} {decision}")
@@ -306,6 +309,28 @@ class AuthorizationTests(RunCase):
         self.assert_nothing()
 
 
+    def test_tracked_ruleset_has_no_approval_marker_and_pins_stay_authoritative(self) -> None:
+        workers = DEFAULT_GLOBAL_LIBRARY / "agents" / "workers"
+        ruleset = yaml.safe_load((workers / "ruleset.yaml").read_text())
+        self.assertNotIn("status", ruleset)
+        for rel in ("ruleset.yaml", "README.md", "rules/role.md", "rules/execution-protocol.md"):
+            self.assertNotIn("pending_owner_review", (workers / rel).read_text(), rel)
+        protocol = load_worker_protocol(DEFAULT_GLOBAL_LIBRARY)
+        self.assertEqual((protocol.version, protocol.operative_stages), ("0.1.0", ("E0",)))
+        e0 = (workers / "rules/execution-protocol.md").read_text().split("## E1")[0]
+        for name in ("run.json", "spec.md", "prompt.md", "DECLINE"):
+            self.assertIn(name, e0)
+        library = self.base / "library"
+        shutil.copytree(workers, library / "agents" / "workers")
+        target = library / "agents/workers/ruleset.yaml"
+        for bad in (("bytes: 2763", "bytes: 2764"), ("operative_stages: [E0]", "operative_stages: [E0, E1]")):
+            with self.subTest(bad=bad):
+                text = (workers / "ruleset.yaml").read_text()
+                self.assertIn(bad[0], text)
+                target.write_text(text.replace(bad[0], bad[1]))
+                with self.assertRaises(RunLaunchUnavailable):
+                    load_worker_protocol(library)
+
 class IdempotencyTests(RunCase):
     def test_exact_retry_returns_the_same_run_without_a_second_send(self) -> None:
         incarnation, _pid = self.ready_worker()
@@ -468,6 +493,49 @@ class AckEvidenceTests(RunCase):
         view = self.reconcile()
         self.assertEqual((view["state"], view["reason"]), ("unknown", "ack_without_required_reads"))
 
+    def assert_unread_task_input_blocks_ack(self, name: str) -> None:
+        # r02: the rules alone are not enough; each task input must be a hook-recorded Read of THIS package
+        self.worker_accepts(self.incarnation, self.run, skip=(name,))
+        view = self.reconcile()
+        self.assertEqual((view["state"], view["reason"], view["evidence"]["required_reads"],
+                          view["evidence"]["missing_reads"]), ("unknown", "ack_without_required_reads", False, [name]))
+        self.cli_read(self.incarnation, self.package_dir(self.rid) / name)  # reading later cannot repair the receipt
+        self.assertEqual(self.reconcile()["state"], "unknown")
+        self.assertEqual(len(self.run_sends()), 1)  # UNKNOWN is never resent
+
+    def test_accept_without_reading_spec_is_not_acknowledged(self) -> None:
+        self.assert_unread_task_input_blocks_ack("spec.md")
+
+    def test_accept_without_reading_prompt_is_not_acknowledged(self) -> None:
+        self.assert_unread_task_input_blocks_ack("prompt.md")
+
+    def test_task_reads_outside_the_package_or_by_other_hooks_do_not_count(self) -> None:
+        state = self.state_row(self.rid)
+        package = self.package_dir(self.rid)
+        self.cli_submit(self.incarnation, self.run_sends()[-1])
+        for name in ("run.json", "worker-role.md", "worker-execution-protocol.md"):
+            self.cli_read(self.incarnation, package / name)
+        copy = self.base / "elsewhere" / "spec.md"  # same name, wrong path
+        copy.parent.mkdir()
+        copy.write_bytes((package / "spec.md").read_bytes())
+        self.cli_read(self.incarnation, copy)
+        stale = str(uuid.uuid4())  # an old/other incarnation's hook records nothing for this Run
+        worker_ack._run_read(self.target(stale), stale, {"tool_name": "Read",
+                                                         "tool_input": {"file_path": str(package / "prompt.md")}})
+        event = {"tool_name": "Read", "tool_input": {"file_path": str(package / "prompt.md")}}
+        worker_ack._read(self.target(self.incarnation), self.incarnation, event)  # bootstrap hook only
+        worker_ack._run_read(self.target(self.incarnation), self.incarnation,
+                             {"tool_name": "Grep", "tool_input": {"file_path": str(package / "prompt.md")}})
+        self.cli_stop(self.incarnation, "I read spec.md and prompt.md.\nROSC-RUN-ACK "
+                                        f"{state['run_token']} {self.rid} {state['manifest_sha256']} ACCEPT")
+        view = self.reconcile()
+        self.assertEqual((view["state"], view["evidence"]["missing_reads"]), ("unknown", ["spec.md", "prompt.md"]))
+
+    def test_decline_without_task_reads_is_legitimate(self) -> None:
+        self.worker_accepts(self.incarnation, self.run, decision="DECLINE", skip=("spec.md", "prompt.md"))
+        view = self.reconcile()
+        self.assertEqual((view["state"], view["reason"]), ("declined", "worker_declined"))
+
     def test_decline_releases_the_slot(self) -> None:
         self.worker_accepts(self.incarnation, self.run, decision="DECLINE")
         self.assertEqual(self.reconcile()["state"], "declined")
@@ -478,7 +546,8 @@ class AckEvidenceTests(RunCase):
         good = {"incarnation": self.incarnation, "token": state["run_token"], "run_id": self.rid,
                 "manifest_sha256": state["manifest_sha256"], "decision": "ACCEPT",
                 "observed_reads": [str(self.package_dir(self.rid) / n) for n in
-                                   ("run.json", "worker-role.md", "worker-execution-protocol.md")],
+                                   ("run.json", "worker-role.md", "worker-execution-protocol.md", "spec.md",
+                                    "prompt.md")],
                 "ancestors": [self.pid, 1], "acked_at": time.time()}
         receipt = self.state_dir / f"{self.incarnation}.run-{state['run_token']}.receipt.json"
         for bad in ({"token": str(uuid.uuid4())}, {"incarnation": str(uuid.uuid4())}, {"run_id": str(uuid.uuid4())},
