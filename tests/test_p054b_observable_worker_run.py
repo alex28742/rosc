@@ -509,6 +509,157 @@ class ArtifactToolTests(WorkerRunCase):
         self.assertIn("No Working Plan was published.", (self.run_dir(rid) / "reports/final.md").read_text())
 
 
+CRASH_DRIVER = '''import importlib.util, os, sys
+tool, kind, argv = sys.argv[1], sys.argv[2], sys.argv[3:]
+spec = importlib.util.spec_from_file_location("pinned_tool", tool)
+mod = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(mod)
+real = mod.append_event
+def crashing(run, events, k, data, **kw):
+    if k == kind:
+        os._exit(137)
+    return real(run, events, k, data, **kw)
+mod.append_event = crashing
+raise SystemExit(mod.main(argv))
+'''
+
+
+class CrashWindowTests(WorkerRunCase):
+    """r02: a process crash AFTER publish_once(plan/vNNN.json | reports/final.md) and BEFORE the matching Journal
+    append.  The REAL pinned tool is loaded from its package path by a driver that os._exit()s exactly at that append."""
+
+    def crash(self, rid: str, kind: str, *args: str) -> None:
+        before = [e["type"] for e in self.journal(rid)].count(kind)
+        driver = self.base / "crash_driver.py"
+        driver.write_text(CRASH_DRIVER)
+        env = {"PATH": os.environ.get("PATH", "/usr/bin:/bin"), "HOME": str(self.base), "LANG": "C.UTF-8"}
+        proc = subprocess.run([sys.executable, "-I", "-S", str(driver), str(self.package_dir(rid) / "rosc-run-tool.py"),
+                               kind, *args], cwd=self.root, env=env, capture_output=True, timeout=60)
+        self.assertEqual(proc.returncode, 137, proc.stdout + proc.stderr)
+        self.assertEqual([e["type"] for e in self.journal(rid)].count(kind), before)  # file published, no event
+
+    def add(self, rid: str, *sids: str) -> None:
+        for sid in sids:
+            self.tool(rid, "plan", "add-step", "--id", sid, "--title", f"Step {sid}", "--description", "how",
+                      "--expect", "works", "--test-intent", "unit")
+
+    def published(self, rid: str) -> list[dict]:
+        return [e for e in self.journal(rid) if e["type"] == "plan.published"]
+
+    def orphan_v001(self, rid: str) -> bytes:
+        self.tool(rid, "run", "start")
+        self.add(rid, "S01", "S02")
+        self.crash(rid, "plan.published", "plan", "publish", "--reason", "initial plan")
+        raw = (self.run_dir(rid) / "plan/v001.json").read_bytes()
+        status = self.tool(rid, "status")
+        self.assertEqual((status["plan_revision"], status["steps"]), (0, []))  # a file alone is NOT a published Plan
+        self.assertEqual(self.tool(rid, "step", "start", "--id", "S01", ok=False)["error"], "plan_not_published")
+        return raw
+
+    def test_plan_publish_crash_is_repaired_by_one_event_for_the_existing_file(self) -> None:
+        rid = self.running()["run_id"]
+        raw = self.orphan_v001(rid)
+        retry = self.tool(rid, "plan", "publish", "--reason", "initial plan")
+        self.assertEqual((retry["published"], retry["recovered"], retry["sha256"]), (1, True, hashlib.sha256(raw).hexdigest()))
+        self.assertEqual((self.run_dir(rid) / "plan/v001.json").read_bytes(), raw)  # never rewritten
+        events = len(self.journal(rid))
+        self.assertTrue(self.tool(rid, "plan", "publish", "--reason", "initial plan")["unchanged"])  # repeat: no dup
+        self.assertEqual((len(self.journal(rid)), len(self.published(rid))), (events, 1))
+        self.assertEqual(self.published(rid)[0]["data"]["sha256"], hashlib.sha256(raw).hexdigest())
+        self.tool(rid, "step", "start", "--id", "S01")  # ordinary progress continues
+        self.assertEqual(sorted(p.name for p in (self.run_dir(rid) / "plan").glob("v*.json")), ["v001.json"])
+
+    def test_plan_revise_crash_is_repaired_once_and_normal_path_is_unchanged(self) -> None:
+        rid = self.running()["run_id"]
+        self.tool(rid, "run", "start")
+        self.add(rid, "S01")
+        first = self.tool(rid, "plan", "publish", "--reason", "initial plan")
+        self.assertNotIn("recovered", first)  # the ordinary path is untouched
+        self.assertTrue(self.tool(rid, "plan", "publish", "--reason", "initial plan")["unchanged"])
+        self.add(rid, "S02")
+        self.crash(rid, "plan.published", "plan", "revise", "--reason", "add S02")
+        raw = (self.run_dir(rid) / "plan/v002.json").read_bytes()
+        self.assertEqual(self.tool(rid, "status")["plan_revision"], 1)
+        self.assertEqual(self.tool(rid, "plan", "publish", ok=False)["error"], "plan_exists")  # wrong command
+        retry = self.tool(rid, "plan", "revise", "--reason", "add S02")
+        self.assertEqual((retry["published"], retry["recovered"], retry["plan_revision"]), (2, True, 2))
+        self.assertTrue(self.tool(rid, "plan", "revise", "--reason", "add S02")["unchanged"])
+        self.assertEqual([e["data"]["revision"] for e in self.published(rid)], [1, 2])
+        self.assertEqual(self.published(rid)[1]["data"]["sha256"], hashlib.sha256(raw).hexdigest())
+        self.assertEqual((self.run_dir(rid) / "plan/v002.json").read_bytes(), raw)
+        self.tool(rid, "step", "start", "--id", "S02")
+
+    def test_mismatched_or_tampered_orphan_plan_fails_closed_and_is_kept(self) -> None:
+        rid = self.running()["run_id"]
+        raw = self.orphan_v001(rid)
+        events = self.journal(rid)
+        self.assertEqual(self.tool(rid, "plan", "publish", "--reason", "other", ok=False)["error"], "plan_conflict")
+        self.assertEqual(self.tool(rid, "plan", "revise", "--reason", "x", ok=False)["error"], "plan_not_published")
+        self.add(rid, "S03")  # the draft no longer matches the orphan: intent cannot be proven
+        self.assertEqual(self.tool(rid, "plan", "publish", "--reason", "initial plan", ok=False)["error"],
+                         "plan_conflict")
+        self.tool(rid, "plan", "remove-step", "--id", "S03")
+        draft = self.run_dir(rid) / "plan/draft.json"
+        kept = draft.read_bytes()
+        draft.unlink()  # without the draft the file would only "prove itself": refused
+        self.assertEqual(self.tool(rid, "plan", "publish", "--reason", "initial plan", ok=False)["error"],
+                         "plan_conflict")
+        draft.write_bytes(kept)
+        orphan = self.run_dir(rid) / "plan/v001.json"
+        os.chmod(orphan, 0o600)
+        orphan.write_bytes(raw.replace(b'"Step S02"', b'"Step SX"'))  # tampered, still well-formed and linked
+        self.assertEqual(self.tool(rid, "plan", "publish", "--reason", "initial plan", ok=False)["error"],
+                         "plan_conflict")
+        self.assertEqual(self.journal(rid), events)  # no event was appended by any refusal
+        self.assertEqual(sorted(p.name for p in (self.run_dir(rid) / "plan").glob("v*.json")), ["v001.json"])
+        orphan.write_bytes(raw)  # restored genuine bytes: the same retry now recovers
+        self.assertTrue(self.tool(rid, "plan", "publish", "--reason", "initial plan")["recovered"])
+
+    def orphan_report(self, rid: str, outcome: str = "partial") -> tuple[Path, bytes]:
+        self.plan(rid, steps=("S01",))
+        body = self.base / "body.md"
+        body.write_text("Partial work.\n")
+        self.crash(rid, "report.finalized", "report", "finalize", "--outcome", outcome, "--body-file", str(body))
+        raw = (self.run_dir(rid) / "reports/final.md").read_bytes()
+        self.assertEqual(self.tool(rid, "run", "finish", ok=False)["error"], "report_missing")
+        return body, raw
+
+    def test_report_finalize_crash_is_repaired_once_and_imports(self) -> None:
+        rid = self.running()["run_id"]
+        body, raw = self.orphan_report(rid)
+        retry = self.tool(rid, "report", "finalize", "--outcome", "partial", "--body-file", str(body))
+        self.assertEqual((retry["recovered"], retry["sha256"], retry["bytes"]),
+                         (True, hashlib.sha256(raw).hexdigest(), len(raw)))
+        self.assertTrue(self.tool(rid, "report", "finalize", "--outcome", "partial", "--body-file", str(body))["unchanged"])
+        self.assertEqual([e["type"] for e in self.journal(rid)].count("report.finalized"), 1)
+        self.assertEqual((self.run_dir(rid) / "reports/final.md").read_bytes(), raw)
+        self.tool(rid, "run", "finish")
+        self.runs.tick()
+        self.assertEqual(self.state_row(rid)["state"], "reported")
+        self.assertEqual(self.count("managed_run_handoffs"), 1)
+
+    def test_mismatched_or_tampered_orphan_report_fails_closed_and_is_kept(self) -> None:
+        rid = self.running()["run_id"]
+        body, raw = self.orphan_report(rid)
+        report = self.run_dir(rid) / "reports/final.md"
+        events = self.journal(rid)
+        other = self.base / "other.md"
+        other.write_text("Different body.\n")
+        for outcome, path in (("partial", other), ("failed", body)):
+            self.assertEqual(self.tool(rid, "report", "finalize", "--outcome", outcome, "--body-file", str(path),
+                                       ok=False)["error"], "report_conflict")
+        os.chmod(report, 0o600)
+        report.write_bytes(raw + b"forged\n")
+        self.assertEqual(self.tool(rid, "report", "finalize", "--outcome", "partial", "--body-file", str(body),
+                                   ok=False)["error"], "report_conflict")
+        self.assertEqual((self.journal(rid), report.read_bytes()), (events, raw + b"forged\n"))  # kept, nothing added
+        report.write_bytes(raw)
+        self.tool(rid, "note", "--kind", "action", "--text", "later note")  # the Journal moved on: pre-finalization state no longer proven
+        self.assertEqual(self.tool(rid, "report", "finalize", "--outcome", "partial", "--body-file", str(body),
+                                   ok=False)["error"], "report_conflict")
+        self.assertEqual(report.read_bytes(), raw)
+
+
 class ImportTests(WorkerRunCase):
     def test_completion_requires_report_closed_journal_and_terminal(self) -> None:
         run = self.running()

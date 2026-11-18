@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""ROSC Worker Artifact Tool (rosc.run-tool 1.0.0) - the ONLY writer of a formal Run's local artifacts.
+"""ROSC Worker Artifact Tool (rosc.run-tool 1.0.1) - the ONLY writer of a formal Run's local artifacts.
 
 A byte-exact copy of this file is pinned in every Run package that makes stages E1-E6 operative
 (``<run dir>/package/rosc-run-tool.py``).  Invoke it from the Project root as::
@@ -59,7 +59,7 @@ import subprocess
 import sys
 import time
 
-TOOL_VERSION = "1.0.0"
+TOOL_VERSION = "1.0.1"
 ARTIFACT_FORMAT = "rosc.run-artifacts.v1"
 PLAN_SCHEMA = "rosc.run-plan.v1"
 EVENT_SCHEMA = "rosc.run-event.v1"
@@ -536,10 +536,34 @@ def cmd_plan_show(ctx: Context, args) -> dict:
     return {"draft": load_draft(ctx.run, ctx.plans), "published_revision": ctx.state["plan_revision"]}
 
 
+def recover_plan(ctx: Context, draft: list[dict], reason: str | None) -> dict:
+    """Crash after publish_once(vNNN.json) but before its Journal event: append the single missing plan.published for
+    the EXISTING file, only if it is exactly what this retried command would have published.  The file alone never
+    counts as published; it is never rewritten or deleted."""
+    orphan = ctx.plans[-1]
+    revision = orphan["revision"]
+    name = f"v{revision:03d}.json"
+    # plan_revisions() already proved schema, contiguous revision, Run identity and the previous-digest link to the
+    # last Journal-published revision (check_plan_events); here: exactly one orphan, same tool, same draft, same reason.
+    if (len(ctx.plans) != ctx.state["plan_revision"] + 1
+            or not os.path.lexists(os.path.join(ctx.run.root, "plan", "draft.json"))
+            or orphan.get("tool_version") != TOOL_VERSION or orphan.get("steps") != draft
+            or orphan.get("reason") != reason):
+        raise Refused("plan_conflict", f"plan/{name} exists without its Journal record and does not match this "
+                                       "command's draft/reason; it is kept unchanged")
+    ctx.append("plan.published", {"revision": revision, "sha256": orphan["_sha256"], "steps": len(draft),
+                                  "reason": reason}, plan_revision=revision)
+    ctx.state = fold(ctx.plans, ctx.events)
+    return {"published": revision, "recovered": True, "sha256": orphan["_sha256"], "path": f"plan/{name}",
+            **summary(ctx)}
+
+
 def publish_plan(ctx: Context, reason: str | None) -> dict:
     ctx.writable()
     draft = load_draft(ctx.run, ctx.plans)
     validate_steps(draft)
+    if len(ctx.plans) > ctx.state["plan_revision"]:
+        return recover_plan(ctx, draft, reason)
     if ctx.plans and ctx.plans[-1]["steps"] == draft:
         return {"unchanged": True, "revision": len(ctx.plans)}
     revision = len(ctx.plans) + 1
@@ -563,15 +587,16 @@ def publish_plan(ctx: Context, reason: str | None) -> dict:
 
 
 def cmd_plan_publish(ctx: Context, args) -> dict:
-    if ctx.plans:
-        if ctx.plans[-1]["steps"] == load_draft(ctx.run, ctx.plans):
-            return {"unchanged": True, "revision": len(ctx.plans)}
+    published = ctx.state["plan_revision"]
+    if published:
+        if len(ctx.plans) == published and ctx.plans[-1]["steps"] == load_draft(ctx.run, ctx.plans):
+            return {"unchanged": True, "revision": published}
         raise Refused("plan_exists", "A Plan is already published; use plan revise --reason")
     return publish_plan(ctx, text(args.reason, MAX_TEXT, "--reason"))
 
 
 def cmd_plan_revise(ctx: Context, args) -> dict:
-    if not ctx.plans:
+    if not ctx.state["plan_revision"]:
         raise Refused("plan_not_published", "Nothing to revise yet; use plan publish")
     return publish_plan(ctx, text(args.reason, MAX_TEXT, "--reason", True))
 
@@ -816,14 +841,27 @@ def cmd_report_finalize(ctx: Context, args) -> dict:
             return {"unchanged": True, **existing}
         raise Refused("report_conflict", "The Report is already finalized with other content")
     directory = ctx.run.sub("reports")
-    if os.path.lexists(os.path.join(directory, "final.md")):
-        raise Refused("report_conflict", "reports/final.md exists without its Journal record")
     data = report_markdown(ctx, args.outcome, body)
-    publish_once(directory, "final.md", data)
+    recovered = os.path.lexists(os.path.join(directory, "final.md"))
+    if recovered:
+        # Crash after publish_once(final.md) but before report.finalized: the Report bytes are a deterministic function
+        # of the Journal/Plan state, outcome and body, so the orphan is adopted only if it is byte-identical to what
+        # this retry renders from the unchanged pre-finalization Journal.  Anything else is kept and refused.
+        try:
+            existing = read_bounded(os.path.join(directory, "final.md"), len(data))
+        except Refused as exc:
+            if exc.code != "too_large":
+                raise
+            existing = None
+        if existing != data:
+            raise Refused("report_conflict", "reports/final.md exists without its Journal record and does not match "
+                                             "this outcome/body/Journal state; it is kept unchanged")
+    else:
+        publish_once(directory, "final.md", data)
     record = {"path": "reports/final.md", "sha256": sha(data), "bytes": len(data), "outcome": args.outcome,
               "body_sha256": body_sha}
     ctx.append("report.finalized", record, plan_revision=ctx.state["plan_revision"] or None)
-    return {"finalized": True, **record}
+    return {"finalized": True, **({"recovered": True} if recovered else {}), **record}
 
 
 def cmd_run_finish(ctx: Context, args) -> dict:

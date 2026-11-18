@@ -20,6 +20,6 @@ tools:
   - id: artifact-tool
     path: agents/workers/tools/rosc_run_tool.py
     package_file: rosc-run-tool.py
-    version: 1.0.0
-    sha256: 4d34bb32d840b1aa1c548733f7c08edd43376e19f95fcbf007a88747a23a4813
-    bytes: 49488
+    version: 1.0.1
+    sha256: 70436fa1e808024c6a293c8bb12fdc26c56344752dc1a13f60a4bf39c99b52d4
+    bytes: 52031
