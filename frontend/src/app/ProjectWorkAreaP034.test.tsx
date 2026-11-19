@@ -35,7 +35,7 @@ describe('P034 Aa · Вид text scale', () => {
     expect(drawer().style.getPropertyValue('--rosc-text-scale')).toBe('1.1');
     expect(window.localStorage.getItem('rosc.text-scale.project:P0001')).toBe('110');
 
-    fireEvent.click(within(drawer()).getByText('T0001 · Task T0001'));
+    fireEvent.click(within(drawer()).getByText('№1 · Task T0001'));
     const taskDrawer = await screen.findByLabelText('Task Work Area');
     expect((taskDrawer as HTMLElement).style.getPropertyValue('--rosc-text-scale')).toBe('1');
 
@@ -109,7 +109,7 @@ describe('P034 Task list header, filters, views and pagination', () => {
 describe('P034 Task item menu', () => {
   it('opens a three-item menu without opening the Task; only Open is actionable', async () => {
     render(<App api={open({ listTasks: vi.fn(async () => [task('T0001', 'P0001')]) })} />);
-    await screen.findByText('T0001 · Task T0001');
+    await screen.findByText('№1 · Task T0001');
 
     fireEvent.click(screen.getByLabelText('Действия с задачей Task T0001'));
     const menu = screen.getByRole('menu', { name: 'Действия с задачей Task T0001' });
@@ -133,7 +133,7 @@ describe('P034 Task item menu', () => {
 
   it('offers the same menu in card view', async () => {
     render(<App api={open({ listTasks: vi.fn(async () => [task('T0001', 'P0001')]) })} />);
-    await screen.findByText('T0001 · Task T0001');
+    await screen.findByText('№1 · Task T0001');
     fireEvent.click(screen.getByRole('button', { name: /Карточки/ }));
     expect(document.querySelectorAll('.rosc-task-card').length).toBe(1);
     fireEvent.click(screen.getByLabelText('Действия с задачей Task T0001'));
@@ -190,7 +190,7 @@ describe('Architect-created Tasks appear without a browser reload', () => {
       let coreTasks = [task('T0001', 'P0001')];
       const listTasks = vi.fn(async () => coreTasks);
       render(<App api={open({ listTasks })} />);
-      await screen.findByText('T0001 · Task T0001');
+      await screen.findByText('№1 · Task T0001');
       expect(screen.getByText('1 из 1')).toBeTruthy();
 
       // Architect creates the Task through rosc_task_create, not through the frontend's New Task form.
@@ -199,7 +199,7 @@ describe('Architect-created Tasks appear without a browser reload', () => {
         vi.advanceTimersByTime(4000);
         await Promise.resolve();
       });
-      expect(screen.getByText('T0002 · Created by Architect')).toBeTruthy();
+      expect(screen.getByText('№2 · Created by Architect')).toBeTruthy();
       expect(screen.getByText('2 из 2')).toBeTruthy();
       expect(listTasks).toHaveBeenCalledTimes(2);
 
@@ -223,12 +223,12 @@ describe('Architect-created Tasks appear without a browser reload', () => {
         .mockResolvedValueOnce([task('T0001', 'P0001')])
         .mockRejectedValueOnce(new Error('temporary network failure'));
       render(<App api={open({ listTasks })} />);
-      await screen.findByText('T0001 · Task T0001');
+      await screen.findByText('№1 · Task T0001');
       await act(async () => {
         vi.advanceTimersByTime(4000);
         await Promise.resolve();
       });
-      expect(screen.getByText('T0001 · Task T0001')).toBeTruthy();
+      expect(screen.getByText('№1 · Task T0001')).toBeTruthy();
       expect(screen.queryByText('Не удалось загрузить задачи.')).toBeNull();
     } finally {
       vi.useRealTimers();

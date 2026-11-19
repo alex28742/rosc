@@ -23,8 +23,11 @@ export type Project = {
 };
 
 export type Task = {
+  /** Global technical identity (T0105): routes and refs only, never the human-facing number. */
   id: string;
   project_id: string;
+  /** P058: stable Project-local ordinal shown as "№N"; null/absent until loaded (show a neutral placeholder). */
+  project_number?: number | null;
   title: string;
   description: string;
   acceptance_criteria: string;

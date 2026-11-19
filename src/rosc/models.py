@@ -34,6 +34,7 @@ class Project(Base):
         # registration root. A later Unlink/Rebind slice drops this CHECK together with ``root_path``.
         CheckConstraint("registration_root_path = root_path", name="ck_projects_registration_root"),
     )
+    __mapper_args__ = {"eager_defaults": False}  # P058: see ``last_task_number``
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     name: Mapped[str] = mapped_column(String(160))
@@ -48,6 +49,10 @@ class Project(Base):
     project_uuid: Mapped[str] = mapped_column(String(36), unique=True)
     # Immutable original registration root: the ownership reference for legacy v1/v2 manifests.
     registration_root_path: Mapped[str] = mapped_column(Text)
+    # P058: high-water mark of the Project-local Task ordinal; bumped once per created Task, never decreases (0023).
+    # Deferred and server-defaulted (never written on insert; ``eager_defaults`` off, so no RETURNING fetch either): a
+    # database not yet upgraded to 0023 keeps serving Project reads and registration exactly as before.
+    last_task_number: Mapped[int] = deferred(mapped_column(Integer, server_default="0"))
     bindings: Mapped[list[ProjectRootBinding]] = relationship(
         back_populates="project", lazy="selectin", order_by="ProjectRootBinding.version")
 
@@ -640,6 +645,10 @@ class Task(Base):
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     project_id: Mapped[int] = mapped_column(ForeignKey("projects.id", ondelete="RESTRICT"), index=True)
+    # P058: immutable Project-local ordinal shown as "№N" in the UI; unique per Project (migration 0023).  It is NOT an
+    # identifier: routes, refs and Workspace paths keep using the global ``id`` (T%04d).  Deferred: a database not yet
+    # upgraded to 0023 keeps serving every other Task read (the API then reports ``project_number: null``).
+    project_number: Mapped[int] = deferred(mapped_column(Integer))
     title: Mapped[str] = mapped_column(String(160))
     description: Mapped[str] = mapped_column(Text)
     acceptance_criteria: Mapped[str] = mapped_column(Text)

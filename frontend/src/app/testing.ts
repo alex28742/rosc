@@ -10,7 +10,7 @@ export const project = (id: string, over: Partial<Project> = {}): Project => ({
 });
 
 export const task = (id: string, projectId: string, over: Partial<Task> = {}): Task => ({
-  id, project_id: projectId, title: `Task ${id}`, description: `Do ${id}`, acceptance_criteria: `Done ${id}`, status: 'Draft',
+  id, project_id: projectId, project_number: Number(id.slice(1)), title: `Task ${id}`, description: `Do ${id}`, acceptance_criteria: `Done ${id}`, status: 'Draft',
   workspace_state: 'ready', workspace_problem: null, worker: 'not_assigned', created_at: '2026-10-31T00:00:00Z', ...over,
 });
 

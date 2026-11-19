@@ -94,7 +94,7 @@ describe('Work area presentation', () => {
     const drawer = screen.getByLabelText('Project Work Area');
     expect(within(drawer).getByLabelText('Закрыть проект')).toBeTruthy();
     expect(within(drawer).getByText('Tasks (1)')).toBeTruthy();
-    expect(within(drawer).getByText('T0001 · Срез работ')).toBeTruthy();
+    expect(within(drawer).getByText('№1 · Срез работ')).toBeTruthy();
     expect(within(drawer).getByText('Draft', { selector: '.rosc-tag' })).toBeTruthy();
   });
 
@@ -117,6 +117,37 @@ describe('Work area presentation', () => {
     expect(screen.getByText('Режим')).toBeTruthy();
     expect(screen.getByText('Подробнее о назначениях — в настройках проекта')).toBeTruthy();
     expect(screen.getByText('Документация', { selector: 'dt' })).toBeTruthy();
+  });
+
+  it('P058: shows the Project-local №N, never the global technical ID, in the Task list and cards', () => {
+    const fifth = task('T0105', 'P0002', { project_number: 5, title: 'Пятая задача', description: 'Описание' });
+    const pending = task('T0106', 'P0002', { project_number: null, title: 'Без номера', description: 'Описание' });
+    const onOpenTask = vi.fn();
+    render(<ProjectView {...projectProps} tasks={[fifth, pending]} onOpenTask={onOpenTask} />);
+    const drawer = screen.getByLabelText('Project Work Area');
+    expect(within(drawer).getByText('№5 · Пятая задача')).toBeTruthy();
+    expect(within(drawer).getByText('№— · Без номера')).toBeTruthy();  // neutral placeholder, not a fabricated number
+    expect(within(drawer).queryByText(/T0105|№105/)).toBeNull();
+    fireEvent.click(within(drawer).getByText('▦ Карточки'));
+    expect(within(drawer).getByText('№5 · Пятая задача', { selector: '.rosc-task-title' })).toBeTruthy();
+    fireEvent.click(within(drawer).getByText('№5 · Пятая задача'));
+    expect(onOpenTask).toHaveBeenCalledWith('T0105');  // navigation still uses the global Task.id
+  });
+
+  it('P058: the Task drawer heading reads Task №N; the technical ID is only a secondary detail', () => {
+    const fifth = task('T0105', 'P0002', { project_number: 5, title: 'Пятая задача' });
+    render(<TaskView projectName="ROSC Platform" taskId="T0105" task={fifth} tasksStatus="ready" feedback={feedback} inert={false} scroll={scroll} workspace={workspace} conversation={taskConversation()} authoring={authoringControls()} workers={workerControls()} run={runControls()} textScale={textScale} onClose={vi.fn()} onRetry={vi.fn()} />);
+    const drawer = screen.getByLabelText('Task Work Area');
+    const heading = within(drawer).getByRole('heading', { level: 2 });
+    expect(heading.textContent).toMatch(/^Task №5 · /);  // title comes from the Spec head of the authoring fixture
+    expect(heading.textContent).not.toContain('T0105');
+    expect(within(drawer).getByText(/^Task №5 · Spec/).textContent).toContain('тех. ID T0105');
+  });
+
+  it('P058: a Task not loaded yet shows a neutral heading, never the technical ID as its number', () => {
+    render(<TaskView projectName="ROSC Platform" taskId="T0105" task={null} tasksStatus="loading" feedback={feedback} inert={false} scroll={scroll} workspace={workspace} conversation={taskConversation()} authoring={authoringControls()} workers={workerControls()} run={runControls()} textScale={textScale} onClose={vi.fn()} onRetry={vi.fn()} />);
+    expect(screen.getByRole('heading', { level: 2 }).textContent).toBe('Task');
+    expect(screen.queryByText(/T0105/)).toBeNull();
   });
 
   it('renders a nested Task layer that reads the Task without offering a Run', () => {
