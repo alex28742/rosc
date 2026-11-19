@@ -375,16 +375,33 @@ export type PromptRevision = {
   revision: number; source_spec_revision: number; summary: string; body?: string; digest: string; rules_ref: string | null;
   state: PromptState; actor: AuthoringActor; created_at: string; approval: PromptApprovalRecord | null; current?: boolean;
 };
+/** P056: the Owner's decision on a reported, reviewed Run (accept -> Task Completed; request_rework -> stays Active). */
+export type OwnerDecisionKind = 'accept' | 'request_rework';
+export type OwnerDecision = {
+  decision_id: string; run_id: string; task_id: string; decision: OwnerDecisionKind; reason: string | null;
+  review_id: string; review_version: number; review_verdict: RunReviewVerdict; report_sha256: string;
+  spec_revision: number; prompt_revision: number; actor: { kind: string; id: string; assurance: string }; decided_at: string | null;
+};
 export type NextAction = {
   action: 'none' | 'create_prompt' | 'review_prompt' | 'update_prompt' | 'authorize_run' | 'observe_run' | 'awaiting_review'
-    | 'owner_decision' | 'review_changes_requested' | 'review_incomplete';
+    | 'owner_decision' | 'review_changes_requested' | 'review_incomplete' | 'completed';
   label: string; enabled: boolean; next_actor: string; hint: string; secondary?: string;
+  /** P056: the real Owner decisions Core allows for the current recorded Review (absent = none). */
+  decisions?: OwnerDecisionKind[];
+  /** P056: the Owner returned the last reviewed Run for rework; ordinary authoring continues. */
+  rework?: { reason: string | null; decided_at: string | null; run_id: string };
 };
+/** P056: Task lifecycle status from Core; the current work step is derived, never stored on the Task. */
+export type TaskStatus = 'Draft' | 'Active' | 'Completed';
+export type TaskStep = 'draft' | 'preparation' | 'run_in_progress' | 'awaiting_architect_review' | 'awaiting_owner_decision'
+  | 'review_incomplete' | 'rework_needed' | 'completed';
 export type TaskAuthoring = {
-  task_id: string; editable: boolean; spec: SpecRevision; prompt: PromptRevision | null; prompt_history: PromptRevision[];
-  run: { authorized: boolean; label: string; worker: string; run_id?: string | null; state?: RunState | null; holding?: boolean; outcome?: RunOutcome | null };
+  task_id: string; task_status?: TaskStatus | string; step?: TaskStep; editable: boolean; spec: SpecRevision; prompt: PromptRevision | null; prompt_history: PromptRevision[];
+  run: { authorized: boolean; label: string; worker: string; run_id?: string | null; state?: RunState | null; holding?: boolean; outcome?: RunOutcome | null;
+    review?: RunReviewState; decision?: OwnerDecision | null };
   next: NextAction;
 };
+export type OwnerDecisionInput = { decision: OwnerDecisionKind; review_id: string; review_version: number; request_key: string; reason?: string | null };
 
 /** P054A/P054B managed Run lifecycle recorded by Core (delivery/import evidence only; never Task verification). */
 export type RunState = 'authorized' | 'dispatch_pending' | 'dispatching' | 'submitted' | 'acknowledged' | 'declined' | 'unknown'

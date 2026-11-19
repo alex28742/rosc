@@ -116,9 +116,10 @@ describe('P054B one-click Run launch', () => {
     const authoring = taskAuthoring({ prompt: approved, next: { action: 'observe_run', label: 'Run выполняется Worker', enabled: false,
       next_actor: 'Worker', hint: 'Run уже запущен: второй Run этой Task не запускается.' } });
     render(<App api={open({ listTaskRuns: vi.fn(async () => [running()]), getRun: vi.fn(async () => running()) }, undefined, authoring)} />);
-    const button = await (await context()).findByRole('button', { name: 'Run выполняется Worker' }) as HTMLButtonElement;
-    expect(button.disabled).toBe(true);
-    expect(button.title).toContain('второй Run');
+    // P056: a status is a heading with its reason, never a disabled button repeating the label
+    expect(await (await context()).findByRole('heading', { name: 'Run выполняется Worker' })).toBeTruthy();
+    expect((await context()).getByText(/второй Run этой Task не запускается/)).toBeTruthy();
+    expect((await context()).queryByRole('button', { name: 'Run выполняется Worker' })).toBeNull();
     expect((await context()).queryByRole('button', { name: 'Запустить Run' })).toBeNull();
   });
 });
