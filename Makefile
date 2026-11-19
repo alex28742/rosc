@@ -1,4 +1,4 @@
-.PHONY: local-up local-down local-status local-logs local-app-check test agent-sync-check read-path-check agent-sync-status agent-sync-auth
+.PHONY: local-up local-down local-status local-logs local-app-check db-upgrade db-restore db-upgrade-check test agent-sync-check read-path-check agent-sync-status agent-sync-auth
 
 PYTHON ?= .venv/bin/python3
 
@@ -34,3 +34,14 @@ local-logs:
 
 local-app-check:
 	@$(PYTHON) -m unittest discover -s scripts/local_app_tests -t . -p 'test_*.py'
+
+# P057: offline SQLite snapshot + Alembic upgrade; refuses if ROSC is running.
+db-upgrade:
+	@$(PYTHON) scripts/db_upgrade.py upgrade
+
+# Example: make db-restore ARGS="--backup data/backups/rosc-before-0021-...db --yes"
+db-restore:
+	@$(PYTHON) scripts/db_upgrade.py restore $(ARGS)
+
+db-upgrade-check:
+	@$(PYTHON) -m unittest discover -s scripts/db_upgrade_tests -t . -p 'test_*.py'
