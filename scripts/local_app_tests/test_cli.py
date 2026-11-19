@@ -174,6 +174,28 @@ class CliSurfaceTests(unittest.TestCase):
             self.assertIn(cmd.name, text)
         for name in la.CHECKS:
             self.assertIn(f"check {name}", text)
+        for make, _ in la.MAINTENANCE:
+            self.assertIn(make, text)
+        self.assertIn(la.MAINTENANCE_ORDER, text)
+
+    def test_database_maintenance_help_is_display_only_and_matches_makefile(self):
+        # The help lists real, copyable Make targets; the launcher grows no db-* sub-command.
+        parser = la.build_parser()
+        for bogus in ("db-upgrade", "db-restore"):
+            with self.assertRaises(SystemExit), mock.patch("sys.stderr"):
+                parser.parse_args([bogus])
+        targets = [make.split()[1] for make, _ in la.MAINTENANCE]
+        self.assertEqual(targets, ["db-upgrade", "db-restore", "db-upgrade-check"])
+        r = subprocess.run(["make", "-n", *targets], cwd=la.ROOT, capture_output=True, text=True)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("scripts/db_upgrade.py upgrade", r.stdout)
+        self.assertIn("scripts/db_upgrade.py restore", r.stdout)
+        self.assertIn("scripts/db_upgrade_tests", r.stdout)
+        for argv in (["--help"], ["help"]):
+            code, out, _ = call(argv, la.ROOT)
+            self.assertEqual(code, 0, argv)
+            self.assertIn("DATABASE MAINTENANCE", out)
+            self.assertIn('make db-restore ARGS="--backup <path> --yes"', out)
 
     @unittest.skipUnless(ENTRY.exists(), "installed entry point missing: pip install -e '.[dev]' in .venv")
     def test_installed_entry_point_from_foreign_cwd(self):
@@ -184,7 +206,8 @@ class CliSurfaceTests(unittest.TestCase):
                 return subprocess.run([str(ENTRY), *a], cwd=cwd, env=env, capture_output=True, text=True, timeout=60)
             r = run("--help")
             self.assertEqual(r.returncode, 0, r.stderr)
-            for token in ("APPLICATION", "DIAGNOSTICS", "DEVELOPMENT CHECKS", "GENERAL", "check read-path", "up", "logs"):
+            for token in ("APPLICATION", "DIAGNOSTICS", "DEVELOPMENT CHECKS", "DATABASE MAINTENANCE", "GENERAL",
+                          "check read-path", "up", "logs", "make db-upgrade"):
                 self.assertIn(token, r.stdout)
             self.assertRegex(run("--version").stdout, r"^local-app \d+\.\d+")
             for args in (("up", "--help"), ("logs", "--help"), ("check", "--help"), ("help", "up"),

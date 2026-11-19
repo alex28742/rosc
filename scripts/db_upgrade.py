@@ -109,6 +109,29 @@ def ensure_app_stopped(root: Path, data_dir: Path) -> None:
                             raise UpgradeError(f"Process {pid.name} still holds the ROSC database open; stop it first.")
 
 
+def _sidecars(path: Path) -> list[Path]:
+    return [Path(str(path) + suffix) for suffix in ("-wal", "-shm", "-journal")]
+
+
+def _seal(path: Path) -> None:
+    """Make a private temp copy a self-contained single file (rollback-journal mode, no WAL sidecars).
+
+    ``Connection.backup`` and a file copy keep the source's WAL flag; a later read-only open of a WAL-flagged
+    file would leave ``-wal``/``-shm`` sidecars behind.  ROSC itself never enables WAL, so DELETE mode is the
+    application's normal mode and does not change any row."""
+    with contextlib.closing(sqlite3.connect(path)) as db:
+        if db.execute("PRAGMA journal_mode=DELETE").fetchone() != ("delete",):
+            raise UpgradeError(f"Cannot switch {path} to a self-contained rollback-journal file")
+
+
+def _fsync_dir(directory: Path) -> None:
+    fd = os.open(directory, os.O_RDONLY)
+    try:
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+
+
 def backup_db(db_path: Path, backups: Path, revision: str) -> Path:
     backups.mkdir(mode=0o700, parents=True, exist_ok=True)
     filename = f"rosc-before-{revision.split('_', 1)[0]}-{stamp()}.db"
@@ -121,21 +144,26 @@ def backup_db(db_path: Path, backups: Path, revision: str) -> Path:
         with contextlib.closing(sqlite3.connect(db_path.as_uri() + "?mode=ro", uri=True, timeout=5)) as src:
             with contextlib.closing(sqlite3.connect(tmp)) as out:
                 src.backup(out)  # consistent snapshot, including uncheckpointed WAL pages
+        _seal(tmp)
         if inspect_db(tmp) != revision:
             raise UpgradeError("The backup revision differs from the source revision")
         with tmp.open("rb") as stream:
             os.fsync(stream.fileno())
         os.replace(tmp, dest)
+        _fsync_dir(backups)
         return dest
     finally:
-        tmp.unlink(missing_ok=True)
+        for leftover in (tmp, *_sidecars(tmp)):
+            leftover.unlink(missing_ok=True)
 
 
-def restore_backup(db_path: Path, backup: Path, backups: Path) -> str:
+def restore_backup(db_path: Path, backup: Path, backups: Path, *, keep_current: bool = True) -> str:
     """Restore exact verified snapshot with an atomic DB-file replacement.
 
     Preconditions: app is stopped and no process holds DB/WAL/SHM files.
-    Quarantine any old WAL/SHM alongside a best-effort failed DB copy.
+    The database being replaced is first copied (with any WAL/SHM moved beside it) into ``backups``.  With
+    ``keep_current`` (manual restore: it may hold Owner work done after the upgrade) a failed copy aborts the
+    restore; the automatic restore of a failed migration treats that copy as best effort.
     """
     backup = backup.resolve()
     old_version = inspect_db(backup)
@@ -147,13 +175,18 @@ def restore_backup(db_path: Path, backup: Path, backups: Path) -> str:
     try:
         os.chmod(tmp, 0o600)
         shutil.copyfile(backup, tmp)
+        _seal(tmp)
         if inspect_db(tmp) != old_version:
             raise UpgradeError("The restored candidate does not match the verified backup revision")
         with tmp.open("rb") as stream:
             os.fsync(stream.fileno())
-        failed = f"rosc-failed-{stamp()}"
-        with contextlib.suppress(OSError):
+        failed = f"rosc-{'replaced' if keep_current else 'failed'}-{stamp()}"
+        try:
             shutil.copy2(db_path, backups / f"{failed}.db")
+        except OSError as exc:
+            if keep_current:
+                raise UpgradeError(f"Cannot keep a copy of the current database before restoring ({exc}); "
+                                   "nothing was changed") from exc
         for suffix in ("-wal", "-shm"):
             sidecar = Path(str(db_path) + suffix)
             if sidecar.exists():
@@ -166,12 +199,14 @@ def restore_backup(db_path: Path, backup: Path, backups: Path) -> str:
             for quarantine, sidecar in reversed(moved):
                 os.replace(quarantine, sidecar)
             raise
+        _fsync_dir(db_path.parent)
         version = inspect_db(db_path)
         if version != old_version:
             raise UpgradeError(f"Post-restore revision mismatch: {version} vs {old_version}")
         return version
     finally:
-        tmp.unlink(missing_ok=True)
+        for leftover in (tmp, *_sidecars(tmp)):
+            leftover.unlink(missing_ok=True)
 
 
 def upgrade(root: Path, data_dir: Path) -> None:
@@ -198,7 +233,7 @@ def upgrade(root: Path, data_dir: Path) -> None:
         print(f"MIGRATION FAILED: {exc}. Restoring verified backup…", file=sys.stderr, flush=True)
         try:
             ensure_app_stopped(root, data_dir)
-            restored = restore_backup(db_path, snapshot, backups)
+            restored = restore_backup(db_path, snapshot, backups, keep_current=False)
         except Exception as restore_exc:
             raise UpgradeError(f"Automatic restore FAILED: {restore_exc}; keep ROSC stopped and restore manually "
                                f"from {snapshot} (original migration error: {exc})") from restore_exc
@@ -222,7 +257,10 @@ def main(argv: list[str] | None = None, *, root: Path = ROOT) -> int:
             raise UpgradeError(f"Data root is not an existing normal directory: {data_dir}")
         lock_path = data_dir / ".db-upgrade.lock"
         with lock_path.open("a+b") as lock:
-            fcntl.flock(lock.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+            try:
+                fcntl.flock(lock.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError:
+                raise UpgradeError("Another db-upgrade/db-restore is already running for this data root") from None
             if args.command == "upgrade":
                 upgrade(root, data_dir)
             else:

@@ -79,6 +79,10 @@ make db-restore ARGS="--backup data/backups/rosc-before-0021-<timestamp>.db --ye
 ```
 
 Use the exact path printed by `db-upgrade`; the example above is illustrative.
+Backups are self-contained single files (no `-wal`/`-shm` sidecars). Before overwriting,
+`db-restore` copies the database it replaces to `<data-dir>/backups/rosc-replaced-<timestamp>.db`
+and refuses to restore if that copy cannot be made. These Make targets are also listed under
+`DATABASE MAINTENANCE` in `local-app help`.
 For a nondefault data root, set `ROSC_DATA_DIR=/path/to/data` for both commands.
 After successful restore, running a **newer ROSC code revision with an older DB schema
 is unsafe**: use matching code/schema or apply the migration again before `make local-up`.

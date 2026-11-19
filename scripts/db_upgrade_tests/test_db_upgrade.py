@@ -167,6 +167,72 @@ class UpgradeTests(unittest.TestCase):
             with sqlite3.connect(snapshot) as b:
                 self.assertEqual(b.execute("SELECT status FROM tasks WHERE id=8").fetchone(), ("Active",))
 
+    def test_wal_source_gives_self_contained_backup_without_sidecars(self):
+        cn = sqlite3.connect(self.db)
+        self.addCleanup(cn.close)
+        cn.execute("PRAGMA journal_mode=WAL")
+        cn.execute("INSERT INTO tasks VALUES(8, 'Active')")
+        cn.commit()
+        snapshot = d.backup_db(self.db, self.data / "backups", CURRENT)
+        self.assertEqual(sorted(p.name for p in (self.data / "backups").iterdir()), [snapshot.name])
+        self.assertEqual(snapshot.read_bytes()[18:20], b"\x01\x01")  # rollback-journal header
+        d.inspect_db(snapshot)
+        self.assertEqual(sorted(p.name for p in (self.data / "backups").iterdir()), [snapshot.name])
+
+    def test_restore_of_wal_flagged_backup_leaves_no_temp_sidecars(self):
+        legacy = self.root / "legacy.db"
+        cn = sqlite3.connect(legacy)
+        cn.execute("PRAGMA journal_mode=WAL")
+        cn.executescript(f"""CREATE TABLE alembic_version (version_num VARCHAR(64) NOT NULL);
+                            INSERT INTO alembic_version VALUES ('{CURRENT}');""")
+        cn.close()  # checkpointed; the file keeps its WAL flag
+        self.assertEqual(legacy.read_bytes()[18:20], b"\x02\x02")
+        self.assertEqual(d.restore_backup(self.db, legacy, self.data / "backups"), CURRENT)
+        self.assertEqual([p.name for p in self.data.iterdir() if p.name.startswith(".rosc-restore-")], [])
+
+    def test_manual_restore_keeps_replaced_database(self):
+        snapshot = d.backup_db(self.db, self.data / "backups", CURRENT)
+        with sqlite3.connect(self.db) as cn:
+            cn.execute("UPDATE alembic_version SET version_num=?", (HEAD,))
+        d.restore_backup(self.db, snapshot, self.data / "backups")
+        kept = list((self.data / "backups").glob("rosc-replaced-*.db"))
+        self.assertEqual(len(kept), 1)
+        self.assertEqual(d.inspect_db(kept[0]), HEAD)
+
+    def test_manual_restore_aborts_when_current_db_cannot_be_kept(self):
+        snapshot = d.backup_db(self.db, self.data / "backups", CURRENT)
+        with sqlite3.connect(self.db) as cn:
+            cn.execute("UPDATE alembic_version SET version_num=?", (HEAD,))
+        with patch.object(d.shutil, "copy2", side_effect=OSError("disk full")):
+            with self.assertRaisesRegex(d.UpgradeError, "nothing was changed"):
+                d.restore_backup(self.db, snapshot, self.data / "backups")
+            self.assertEqual(d.inspect_db(self.db), HEAD)
+            # The automatic restore after a failed migration still proceeds (that copy is best effort).
+            self.assertEqual(d.restore_backup(self.db, snapshot, self.data / "backups", keep_current=False), CURRENT)
+        self.assertEqual([p.name for p in self.data.iterdir() if p.name.startswith(".rosc-restore-")], [])
+
+    def test_concurrent_run_is_refused_with_a_clear_message(self):
+        import fcntl
+        import io
+        from contextlib import redirect_stderr
+        with open(self.data / ".db-upgrade.lock", "a+b") as held:
+            fcntl.flock(held.fileno(), fcntl.LOCK_EX)
+            err = io.StringIO()
+            with patch.object(d, "upgrade") as run, redirect_stderr(err):
+                self.assertEqual(d.main(["--data-dir", str(self.data), "upgrade"], root=self.root), 1)
+            run.assert_not_called()
+        self.assertIn("already running", err.getvalue())
+
+    def test_restore_cli_requires_yes_and_leaves_db_untouched(self):
+        snapshot = d.backup_db(self.db, self.data / "backups", CURRENT)
+        with sqlite3.connect(self.db) as cn:
+            cn.execute("UPDATE alembic_version SET version_num=?", (HEAD,))
+        with patch.object(d, "ensure_app_stopped") as stopped:
+            self.assertEqual(d.main(["--data-dir", str(self.data), "restore", "--backup", str(snapshot)],
+                                    root=self.root), 1)
+            stopped.assert_not_called()
+        self.assertEqual(d.inspect_db(self.db), HEAD)
+
 
 if __name__ == "__main__":
     unittest.main()
