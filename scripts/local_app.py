@@ -731,7 +731,7 @@ def cmd_logs(cfg: Config, which: str, lines: int, follow: bool) -> int:
 # ------------------------------------------------------------------------------------ command registry / CLI
 
 PROG = "local-app"
-GROUPS = ("APPLICATION", "DIAGNOSTICS", "DEVELOPMENT CHECKS", "GENERAL")
+GROUPS = ("APPLICATION", "DIAGNOSTICS", "DEVELOPMENT CHECKS", "DATABASE MAINTENANCE", "GENERAL")
 
 
 @dataclass(frozen=True)
@@ -750,6 +750,17 @@ CHECKS: dict[str, Check] = {
     "read-path": Check("Documentation read-path telemetry tests",
                        ("-s", "scripts/read_path/tests", "-t", ".", "-p", "test_*.py")),
 }
+
+
+# Display-only: offline SQLite maintenance is executed by the Makefile targets / scripts/db_upgrade.py, never by
+# this launcher (no `local-app db-*` sub-commands).  Listed here so `local-app help` shows the copyable commands.
+MAINTENANCE: tuple[tuple[str, str], ...] = (
+    ("make db-upgrade", "Verified backup -> Alembic upgrade -> integrity/revision check (ROSC stopped)"),
+    ('make db-restore ARGS="--backup <path> --yes"',
+     "Restore the WHOLE database from that backup; not a downgrade (ROSC stopped)"),
+    ("make db-upgrade-check", "Tests of the maintenance script (temporary SQLite only)"),
+)
+MAINTENANCE_ORDER = "Order: make local-down -> make db-upgrade -> make local-up"
 
 
 @dataclass(frozen=True)
@@ -832,6 +843,10 @@ def grouped_help() -> str:
                 lines.extend(f"  check {n:<10}{c.summary}" for n, c in CHECKS.items())
             elif cmd.name != "help":
                 lines.append(f"  {cmd.name:<16}{cmd.summary}")
+        if group == "DATABASE MAINTENANCE":
+            for make, summary in MAINTENANCE:
+                lines.extend((f"  {make}", f"  {'':<16}{summary}"))
+            lines.append(f"  {MAINTENANCE_ORDER}")
         if group == "GENERAL":
             lines.append(f"  {'help [command]':<16}Show help for a command: `help up`, `help check backend`")
             lines.append(f"  {'--help':<16}This overview")
