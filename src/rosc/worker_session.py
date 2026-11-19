@@ -458,14 +458,16 @@ class WorkerSessionService:
             # explicit «Подготовить контекст» introduces it once, even when the project has no entry-point files.
             if not found and identity == "missing":
                 return out(B_NONE, "identity_missing", can=True)
-            return out(B_NONE, "not_requested" if found else "no_sources", sources=names, can=bool(found))
+            # P055: a Project with no entry-point files still needs the native identity ACK before a formal Run.  Only
+            # the Owner's explicit bootstrap action sends it (never activation or a status read; see _maybe_bootstrap).
+            return out(B_NONE, "not_requested" if found else "no_sources", sources=names, can=True)
         requested = json.loads(row.bootstrap_sources or "[]")
         if row.bootstrap_digest != digest:
-            return out(B_STALE, "binding_changed", sources=requested, can=bool(found))
+            return out(B_STALE, "binding_changed", sources=requested, can=True)  # P055: identity-only too
         result = self._read_bootstrap(row)
         if result is not None:
             state, reason, when = result
-            return out(state, reason, sources=requested, can=state == B_FAILED and bool(found),
+            return out(state, reason, sources=requested, can=state == B_FAILED,
                        when=when if state == B_CONFIRMED else None)
         sent = _aware(row.bootstrap_sent_at) if row.bootstrap_sent_at else None
         if sent is not None and self._clock() - sent.timestamp() <= BOOTSTRAP_WAIT_SECONDS:
@@ -630,9 +632,11 @@ class WorkerSessionService:
                 obs, row = self._observe(session, project, agent, assignment)
                 if row is None:
                     return self._view(project_id, agent_key, obs)
-                return self._view(project_id, agent_key, self._maybe_bootstrap(session, row, project, obs))
+                return self._view(project_id, agent_key, self._maybe_bootstrap(session, row, project, obs,
+                                                                               explicit=True))
 
-    def _maybe_bootstrap(self, session: Session, row: WorkerSession | None, project: Project, obs: Observation) -> Observation:
+    def _maybe_bootstrap(self, session: Session, row: WorkerSession | None, project: Project, obs: Observation, *,
+                         explicit: bool = False) -> Observation:
         """Send the bootstrap request only for a verified active CLI whose context is not already prepared/in flight.
         pending/unknown/confirmed are never resent (no blind retry, no tokens spent twice)."""
         if row is None or obs.state != STATE_ACTIVE or not obs.bootstrap or not obs.bootstrap["can_bootstrap"]:
@@ -643,7 +647,8 @@ class WorkerSessionService:
             found, digest = self._bootstrap_sources(project)
         except ProjectIdentityError:
             return obs
-        if not found and obs.bootstrap.get("identity") != "missing":
+        if not found and not explicit and obs.bootstrap.get("reason") != "identity_missing":
+            # P055: identity-only bootstrap of a Project without entry points is an explicit Owner action only.
             return obs
         token = str(uuid.uuid4())
         names = [name for name, _ in found]

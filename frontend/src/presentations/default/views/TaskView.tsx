@@ -1,5 +1,5 @@
 import { useCallback, useRef, useState } from 'react';
-import type { SpecRevision } from '../../../core/models';
+import type { RunReview, SpecRevision } from '../../../core/models';
 import { describeTaskArchitect } from '../ui/architectView';
 import { WorkerRows } from '../ui/WorkerRows';
 import { MobilePaneSwitch } from '../ui/MobilePaneSwitch';
@@ -26,6 +26,25 @@ function Later({ children, label }: { children: string; label?: string }) {
  * Working Plan | Context & Actions, full-height Task Conversation, full-width head/footer). Core data fills the
  * regions it has; the rest are honest empty states with disabled controls, never simulated state.
  */
+const VERDICT_TEXT: Record<RunReview['verdict'], string> = {
+  review_passed: 'Architect Review пройден',
+  changes_requested: 'Architect запросил изменения',
+  inconclusive: 'Review incomplete / needs evidence',
+};
+
+/** P055: the recorded Architect Review (from the Architect's `rosc_review_submit` Tool only; a chat reply never sets it). */
+function RecordedReview({ review }: { review: RunReview }) {
+  const author = review.architect.display_name ?? `агент ${review.architect.agent_id.slice(0, 8)}`;
+  return <div className="rosc-hint" data-testid="run-review" aria-live="polite">
+    <p><strong>{VERDICT_TEXT[review.verdict]}</strong> · {author} · v{review.version} · Report sha256 {review.report_sha256.slice(0, 12)}…
+      {review.recorded_at ? ` · ${formatTime(review.recorded_at)}` : ''}</p>
+    <p>{review.summary}</p>
+    {review.findings.length > 0 && <ul aria-label="Блокирующие замечания">{review.findings.map((item, i) => <li key={i}>{item}</li>)}</ul>}
+    {review.limitations.length > 0 && <ul aria-label="Ограничения evidence">{review.limitations.map((item, i) => <li key={i}>{item}</li>)}</ul>}
+    <p>Оценка Architect по evidence Worker: не VERIFIED, не приёмка Task и не разрешение на merge или новый Run.</p>
+  </div>;
+}
+
 export function TaskView({ projectName, taskId, task, tasksStatus, feedback, inert, scroll, workspace, conversation, authoring, workers, run, textScale, onClose, onRetry }: TaskViewProps) {
   const scaleRef = useApplyTextScale(textScale.scale);
   const [chatCollapsed, setChatCollapsed] = useState(false);
@@ -220,13 +239,15 @@ export function TaskView({ projectName, taskId, task, tasksStatus, feedback, ine
                     {specDirty
                       ? <button type="button" className="rosc-btn rosc-btn--primary" disabled={authoring.busy || title.trim() === ''} onClick={() => void saveSpec()}>Подготовить / Сохранить Spec</button>
                       : launchArea ? null
-                        : <button type="button" className="rosc-btn rosc-btn--primary" disabled={!primaryEnabled || next?.action === 'observe_run' || next?.action === 'awaiting_review'}
+                        : <button type="button" className="rosc-btn rosc-btn--primary" disabled={!primaryEnabled || next?.action === 'observe_run' || next?.action === 'awaiting_review'
+                          || next?.action === 'owner_decision' || next?.action === 'review_changes_requested' || next?.action === 'review_incomplete'}
                           title={next && !next.enabled ? next.hint : undefined} onClick={() => setDraftOpen(true)}>{next?.label ?? 'Загрузка…'}</button>}
                   </div>
                   {launchArea && next && <RunLaunchAction next={next} workers={workers} run={run} busy={authoring.busy}
                     selected={runWorker} onSelect={setRunWorker} />}
                   {report && <p className="rosc-hint" data-testid="run-report-ref">Report: {outcomeText(report.outcome)} · sha256 {report.sha256.slice(0, 12)}… · {currentRun?.review?.state === 'awaiting_architect_review' ? 'ожидает Architect Review (не VERIFIED, не принято Owner)' : 'заявление Worker'}
                     {' '}<button type="button" className="rosc-task-link" onClick={() => setReportOpen(true)}>Открыть Report</button></p>}
+                  {currentRun?.review?.latest && <RecordedReview review={currentRun.review.latest} />}
                 </div>
                 <div className="rosc-task-agents">
                   <div aria-label="Architect этой Task">

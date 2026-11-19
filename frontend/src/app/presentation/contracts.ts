@@ -314,6 +314,8 @@ export type TaskConversationControls = {
   /** Re-reads this Task's Architect status (and the Project host's, internally) from Core. */
   onRefreshArchitect: () => void;
   onReload: () => void;
+  /** P055: bounded silent re-read of this Task's history (no loading state; merges by message id, keeps older pages). */
+  onRevalidate: () => void;
   onLoadOlder: () => void;
   /**
    * Resolves to `null` once the message is stored, otherwise to an error message. A message addressed to the Architect

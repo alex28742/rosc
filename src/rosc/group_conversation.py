@@ -253,6 +253,7 @@ class GroupConversationBridge:
             # P047 r02: a direct request attached to a running group round keeps that round current.
             latest_round = latest_envelope.round_id if latest_envelope is not None else None
             invitation = self._core.latest_invitation(session, room.conversation_id) if room is not None else None
+            handoffs = self._run_handoffs(session, room.conversation_id) if room is not None else []
         core = self._core.room_status(actor, project_id, task_id=task_id) if room is not None else None
         activity = None
         if core is not None and core["holding_turn"] is not None:
@@ -289,12 +290,12 @@ class GroupConversationBridge:
             "stop_reason": core["stop_reason"] if core else None,
             "members": core["members"] if core else [],
             "catchup": catchup,
+            "run_handoffs": handoffs,
             "driver": {"running": self.running(conversation_id) if conversation_id else False,
                        "last": self._last.get(conversation_id) if conversation_id else None},
         }
 
-    @staticmethod
-    def _last_agent_message_addresses_peer(session: Session, conversation_id: str) -> bool:
+    def _last_agent_message_addresses_peer(self, session: Session, conversation_id: str) -> bool:
         """Agent -> another Agent with the Owner observing (R-15.24): the room's latest Agent message names a peer."""
         from .models import MessageEnvelope, MessageParty
         row = session.execute(select(ConversationMessage.message_id, MessageEnvelope.sender_agent_id).outerjoin(
@@ -303,9 +304,30 @@ class GroupConversationBridge:
             ConversationMessage.ordinal.desc()).limit(1)).first()
         if row is None or row[1] is None:
             return False
+        if self._core.is_run_handoff(session, row[0]):
+            return False  # P055: a managed Run handoff is a service message, not an Agent -> Agent discussion
         return session.scalar(select(MessageParty.party_ref).where(
             MessageParty.message_id == row[0], MessageParty.role == "to", MessageParty.party_kind != "owner",
             MessageParty.party_ref != row[1]).limit(1)) is not None
+
+    @staticmethod
+    def _run_handoffs(session: Session, conversation_id: str) -> list[dict]:
+        """P055: managed Run handoff messages of this room (durable receipts) with their recorded review state.  A
+        handoff is a service message: no discussion was opened, no model was called for it."""
+        from .models import ManagedRunHandoff, ManagedRunState
+        from .run_review import review_state
+        rows = session.execute(select(ManagedRunHandoff, ConversationMessage.ordinal).join(
+            ConversationMessage, ConversationMessage.message_id == ManagedRunHandoff.message_id).where(
+            ManagedRunHandoff.conversation_id == conversation_id).order_by(
+            ConversationMessage.ordinal.desc()).limit(20)).all()
+        out = []
+        for handoff, ordinal in rows:
+            run = session.get(ManagedRunState, handoff.run_id)
+            review = review_state(session, handoff.run_id, run.state if run is not None else "")
+            out.append({"message_id": handoff.message_id, "ordinal": ordinal, "run_id": handoff.run_id,
+                        "addressed_to": handoff.addressed_to, "review_state": review["state"],
+                        "next_actor": review["next_actor"]})
+        return out
 
     def _activity(self, turn: dict) -> str | None:
         state = turn["state"]

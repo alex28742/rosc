@@ -195,6 +195,14 @@ export function useTaskConversation(api: CoreApi, projectId: string | null, task
     void load(current, projectId, taskId);
   }, [load, patch, projectId, taskId]);
 
+  /** P055: bounded silent re-read (e.g. a managed Run handoff became known): no loading flash, merge by message id,
+   * older pages and the pagination cursor are preserved by `load`; a result for another Task is dropped. */
+  const onRevalidate = useCallback(() => {
+    const current = scopeRef.current;
+    if (!current || !projectId || !taskId || cacheRef.current.scope !== current) return;
+    void load(current, projectId, taskId);
+  }, [load, projectId, taskId]);
+
   const onLoadOlder = useCallback(async () => {
     const current = scopeRef.current;
     const state = cacheRef.current;
@@ -251,7 +259,11 @@ export function useTaskConversation(api: CoreApi, projectId: string | null, task
     setCache(prev => prev.scope !== current ? prev
       : { ...prev, conversationId: message.conversation_id, messages: merge(prev.messages, [message]) });
   }, []);
-  const group = useGroupConversation(api, projectId && taskId ? projectId : null, taskId, reloadGroupMessages, mergeGroupMessage);
+  // P055 (QA-ARCH-STATUS-UI): revalidate the TC roster when the polled, verified Architect status changes.
+  const archInfo = cache.scope === scope ? cache.architect.info : null;
+  const architectKey = archInfo ? `${archInfo.state}:${archInfo.agent?.agent_id ?? ''}:${archInfo.session?.session_id ?? ''}` : null;
+  const group = useGroupConversation(api, projectId && taskId ? projectId : null, taskId, reloadGroupMessages,
+    mergeGroupMessage, architectKey);
   // P052 r03: a finished legacy direct Architect delivery may have opened a bounded peer discussion: follow it (bounded).
   const followGroup = group.onFollow;
   const wasAwaiting = useRef<string | null>(null);
@@ -267,6 +279,6 @@ export function useTaskConversation(api: CoreApi, projectId: string | null, task
     const current = scopeRef.current;
     if (current && projectId && taskId) { void loadArchitect(current, projectId); void loadTaskArchitect(current, projectId, taskId); }
   }, [loadArchitect, loadTaskArchitect, projectId, taskId]);
-  return { state, group, architect, taskArchitect, onActivateTaskArchitect, onRefreshArchitect, onReload, onLoadOlder: () => void onLoadOlder(), onSend, onSendToArchitect, onReconcile,
+  return { state, group, architect, taskArchitect, onActivateTaskArchitect, onRefreshArchitect, onReload, onRevalidate, onLoadOlder: () => void onLoadOlder(), onSend, onSendToArchitect, onReconcile,
     onRetryDelivery };
 }

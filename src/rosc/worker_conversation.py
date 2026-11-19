@@ -70,8 +70,8 @@ from .models import (ASSIGNMENT_ACTIVE, CONVERSATION_KIND_PROJECT, CONVERSATION_
                      TURN_HOLDING_STATES, TURN_PUBLISHED, TURN_QUEUED, TURN_REPLY_CAPTURED, TURN_RESERVED,
                      TURN_SUBMITTED, TURN_UNKNOWN, AgentDefinition, AgentNativeLane, Conversation,
                      ConversationDispatchControl, ConversationMember, ConversationMemberGap, ConversationMessage,
-                     ConversationParticipant, GroupRound, GroupRoundGrant, GroupTurn, InboundCursor, MessageEnvelope,
-                     MessageParty, Project, ProjectIdentityError, RoleAssignment, RoscSetting, Task,
+                     ConversationParticipant, GroupRound, GroupRoundGrant, GroupTurn, InboundCursor, ManagedRunHandoff,
+                     MessageEnvelope, MessageParty, Project, ProjectIdentityError, RoleAssignment, RoscSetting, Task,
                      validate_project_identity)
 
 # -- canonical ROSC Settings schema (the ONLY place these defaults exist) ----------------------------------------------
@@ -1546,6 +1546,12 @@ class WorkerConversationCore:
                 "round_id": None if rnd is None else rnd.round_id, "round_no": None if rnd is None else rnd.round_no,
                 "owner_message_id": envelope.reply_to_message_id}
 
+    @staticmethod
+    def is_run_handoff(session: Session, message_id: str) -> bool:
+        """P055: durable provenance - this message is the stored Worker -> Architect handoff of a managed Run."""
+        return session.scalar(select(ManagedRunHandoff.run_id).where(
+            ManagedRunHandoff.message_id == message_id).limit(1)) is not None
+
     def latest_invitation(self, session: Session, conversation_id: str) -> dict | None:
         """Status projection: the invitation outcome of the room's latest Agent message when it is a bridged direct
         Architect reply addressing peers (truthful without the diagnostics switch; never a body)."""
@@ -1572,6 +1578,10 @@ class WorkerConversationCore:
         message, sender = row
         if self.message_intent(session, message.message_id) == INTENT_FINISH:
             return []  # P052 r04: an explicit final answer asks nobody; its recipient is not "waiting"
+        if self.is_run_handoff(session, message.message_id):
+            # P055: the managed Run's ONE service handoff (durable receipt, not text/@name) opens no discussion and
+            # invites nobody to a turn: its addressee is awaiting a Review, not an unanswered peer prompt.
+            return []
         targets = [p.party_ref for p in session.scalars(select(MessageParty).where(
             MessageParty.message_id == message.message_id, MessageParty.role == "to"))
             if p.party_ref not in (PARTY_OWNER_REF, sender)]

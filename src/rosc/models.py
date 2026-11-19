@@ -1280,3 +1280,44 @@ class ManagedRunHandoff(Base):
     conversation_id: Mapped[str] = mapped_column(ForeignKey("conversations.conversation_id", ondelete="RESTRICT"))
     addressed_to: Mapped[str] = mapped_column(String(36))   # Architect agent id, or 'owner' when none is assigned
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+
+
+# P055: recorded Architect Review of a reported managed Run (structured verdict; never VERIFIED or Owner ACCEPTED).
+REVIEW_PASSED, REVIEW_CHANGES_REQUESTED, REVIEW_INCONCLUSIVE = "review_passed", "changes_requested", "inconclusive"
+REVIEW_VERDICTS = (REVIEW_PASSED, REVIEW_CHANGES_REQUESTED, REVIEW_INCONCLUSIVE)
+
+
+class ManagedRunReview(Base):
+    """One immutable Architect Review submission for a ``reported`` managed Run and its exact registered Report digest.
+    A revision is a NEW row (``version`` + 1, ``supersedes_review_id`` = the previous latest); nothing is replaced."""
+
+    __tablename__ = "managed_run_reviews"
+    __table_args__ = (CheckConstraint(_in_list("verdict", REVIEW_VERDICTS), name="ck_managed_run_reviews_verdict"),
+                      CheckConstraint("version >= 1", name="ck_managed_run_reviews_version"),
+                      CheckConstraint("(verdict = 'inconclusive' AND continue_by IN ('architect', 'owner')) "
+                                      "OR (verdict != 'inconclusive' AND continue_by IS NULL)",
+                                      name="ck_managed_run_reviews_continue_by"),
+                      CheckConstraint("verdict != 'review_passed' OR findings = '[]'",
+                                      name="ck_managed_run_reviews_pass_clean"),
+                      UniqueConstraint("run_id", "version", name="uq_managed_run_reviews_version"),
+                      Index("ix_managed_run_reviews_task", "task_id"))
+
+    review_id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    run_id: Mapped[str] = mapped_column(ForeignKey("managed_run_states.run_id", ondelete="RESTRICT"))
+    project_id: Mapped[int] = mapped_column(ForeignKey("projects.id", ondelete="RESTRICT"))
+    task_id: Mapped[int] = mapped_column(ForeignKey("tasks.id", ondelete="RESTRICT"))
+    version: Mapped[int] = mapped_column(Integer)
+    supersedes_review_id: Mapped[str | None] = mapped_column(
+        ForeignKey("managed_run_reviews.review_id", ondelete="RESTRICT"), nullable=True)
+    verdict: Mapped[str] = mapped_column(String(24))
+    summary: Mapped[str] = mapped_column(Text)
+    findings: Mapped[str] = mapped_column(Text)
+    limitations: Mapped[str] = mapped_column(Text)
+    continue_by: Mapped[str | None] = mapped_column(String(16), nullable=True)
+    report_path: Mapped[str] = mapped_column(String(64))
+    report_sha256: Mapped[str] = mapped_column(String(64))
+    submission_sha256: Mapped[str] = mapped_column(String(64))
+    architect_agent_id: Mapped[str] = mapped_column(String(36))
+    architect_assignment_id: Mapped[str] = mapped_column(String(36))
+    architect_session_id: Mapped[str] = mapped_column(String(36))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))

@@ -554,10 +554,13 @@ class BootstrapTests(SessionCase):
     def test_no_entry_point_means_nothing_is_sent_and_nothing_is_claimed(self) -> None:
         (self.root / "AGENTS.md").unlink()
         self.make_active()
-        self.client.post(self.url("session/bootstrap"))
-        self.assertEqual(self.tmux.sent, [])
+        self.activate()
+        self.status()
+        self.assertEqual(self.tmux.sent, [])  # reads and (re)activation never send anything
         state = self.bootstrap_state()
-        self.assertEqual((state["state"], state["reason"], state["can_bootstrap"]), ("none", "no_sources", False))
+        # P055: no files to read, but the Owner may explicitly request the identity-only acknowledgement
+        self.assertEqual((state["state"], state["reason"], state["can_bootstrap"]), ("none", "no_sources", True))
+        self.assertIsNone(state["confirmed_at"])  # nothing is claimed
 
     def test_new_incarnation_does_not_inherit_a_bootstrap_claim(self) -> None:
         incarnation, pid = self.make_active()

@@ -526,9 +526,11 @@ class TaskAuthoringService:
                   "running": "Run выполняется Worker", "unknown": "Run: состояние неизвестно",
                   "reported": "Run: отчёт Worker получен", "declined": "Run отклонён Worker",
                   "not_delivered": "Run не доставлен", "not_executed": "Run не начат"}
+        from .run_review import review_state  # P055: recorded Architect Review only (never chat text)
+        review = review_state(session, row.run_id, row.state)
         return {"authorized": True, "label": labels.get(row.state, row.state), "worker": row.agent_id,
                 "run_id": row.run_id, "state": row.state, "holding": row.state in MANAGED_HOLDING_STATES,
-                "outcome": row.outcome}
+                "outcome": row.outcome, "review": review}
 
     @staticmethod
     def _next(state: str | None, head: PromptRevision | None, editable: bool, run: dict | None = None) -> dict:
@@ -540,9 +542,28 @@ class TaskAuthoringService:
             return {"action": "observe_run", "label": run["label"], "enabled": False, "next_actor": "Worker",
                     "hint": "Run уже запущен: второй Run этой Task не запускается. Прогресс — по импортированному Journal."}
         if run and run.get("state") == RUN_REPORTED:
+            review = run.get("review") or {}
+            latest = review.get("latest") or {}
+            state = review.get("state")
+            if state == "review_passed":
+                return {"action": "owner_decision", "label": "Ожидает решения Owner", "enabled": False,
+                        "next_actor": "Owner", "hint": "Architect Review пройден: Architect оценил evidence Worker. Это не "
+                        "VERIFIED и не приёмка Task; Run Worker остаётся reported. Решение — за Owner."}
+            if state == "changes_requested":
+                count = len(latest.get("findings") or [])
+                return {"action": "review_changes_requested", "label": "Architect запросил изменения — нужно решение Owner",
+                        "enabled": False, "next_actor": "Owner",
+                        "hint": f"Блокирующих замечаний: {count}. Новый Run, правка Spec или делегирование не создаются "
+                        "автоматически."}
+            if state == "inconclusive":
+                actor = review.get("next_actor") or "Owner"
+                return {"action": "review_incomplete", "label": "Review incomplete / needs evidence", "enabled": False,
+                        "next_actor": actor,
+                        "hint": ("Architect может продолжить чтение evidence своими Tools." if actor == "Architect" else
+                                 "Нужны авторизация Owner или внешнее evidence.") + " Это не пройденный Review."}
             return {"action": "awaiting_review", "label": "Ожидает Architect Review", "enabled": False,
                     "next_actor": "Architect", "hint": "Отчёт Worker получен. Это заявление Worker: не VERIFIED и не "
-                    "принято Owner."}
+                    "принято Owner. Review фиксируется только инструментом Architect rosc_review_submit."}
         if not editable:
             return {"action": "none", "label": "Task не в стадии Draft", "enabled": False, "next_actor": "Owner",
                     "hint": "Правка Spec и Prompt после стадии Draft недоступна."}

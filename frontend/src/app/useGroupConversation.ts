@@ -27,7 +27,7 @@ const BLOCKED_TEXT: Record<string, string> = {
  * `onMessages` re-reads the canonical history; `onMessage` merges one Core-confirmed message immediately.
  */
 export function useGroupConversation(api: CoreApi, projectId: string | null, taskId: string | null,
-  onMessages: () => void, onMessage: (message: ConversationMessage) => void): GroupControls {
+  onMessages: () => void, onMessage: (message: ConversationMessage) => void, revalidateKey: string | null = null): GroupControls {
   const scope = projectId ? `${projectId}/${taskId ?? 'PC'}` : null;
   const [cache, setCache] = useState<Cache>(() => emptyFor(scope));
   const scopeRef = useRef(scope);
@@ -58,6 +58,17 @@ export function useGroupConversation(api: CoreApi, projectId: string | null, tas
     setCache(emptyFor(scope));
     if (scope && projectId) void load(scope, projectId, taskId);
   }, [scope, projectId, taskId, load]);
+
+  /** P055 (QA-ARCH-STATUS-UI): the roster's eligibility is a snapshot.  When the caller's independently verified
+   * Architect status changes (activated, became ready, agent/session changed) the room status is re-read ONCE, so a
+   * fresh room never refuses a legitimate group Send on a stale «Architect не активен»; Core still decides eligibility. */
+  const lastKey = useRef<{ scope: string | null; key: string | null }>({ scope, key: revalidateKey });
+  useEffect(() => {
+    const previous = lastKey.current;
+    lastKey.current = { scope, key: revalidateKey };
+    if (!scope || !projectId || previous.scope !== scope || previous.key === revalidateKey) return;
+    void load(scope, projectId, taskId);
+  }, [revalidateKey, scope, projectId, taskId, load]);
 
   const followUntil = useRef(0);
   const info = visible.info;

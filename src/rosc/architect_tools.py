@@ -126,6 +126,35 @@ TOOLS: list[dict] = [
      "inputSchema": _schema({"run_id": {"type": "string"}, "task_id": {"type": "string"},
                              "offset": {"type": "integer", "minimum": 0}, "limit": {"type": "integer", "minimum": 1}},
                             ["run_id"])},
+    {"name": "evidence_list", "description": "List the evidence files (evidence/, e.g. T01.log from test.recorded) of "
+     "one managed Run of the current Project, any Task: names, byte sizes, SHA-256 and the Journal test claims that "
+     "reference them (unreferenced/missing files are labelled). Pass run_id (discover with rosc_run_list) or a task_id "
+     "with exactly one managed Run; there is no implicit current Run. Read-only; Worker-authored, not VERIFIED.",
+     "inputSchema": _schema({"run_id": {"type": "string"}, "task_id": {"type": "string"},
+                             "offset": {"type": "integer", "minimum": 0}, "limit": {"type": "integer", "minimum": 1}})},
+    {"name": "evidence_read", "description": "Read one evidence file of a managed Run as bounded text pages: path is "
+     "Run-relative (evidence/T01.log), never a host path. Returns sha256, bytes, next_offset and the comparison with "
+     "the Journal's recorded digest (matches_journal / mismatch_journal / unreferenced). A match is not independent "
+     "execution.",
+     "inputSchema": _schema({"run_id": {"type": "string"}, "task_id": {"type": "string"}, "path": {"type": "string"},
+                             "offset": {"type": "integer", "minimum": 0}, "limit": {"type": "integer", "minimum": 1}},
+                            ["path"])},
+    {"name": "review_submit", "description": "Record YOUR finished Architect Review of one reported managed Run of the "
+     "current Project (call it once, after investigating). verdict: review_passed (no blocking findings), "
+     "changes_requested (blocking_findings required) or inconclusive (limitations = missing evidence, continue_by = "
+     "'architect' if you can keep reading with Tools or 'owner' if Owner authorization/external evidence is needed). "
+     "report_sha256 = the Report digest you reviewed (rosc_report_read). To supersede an inconclusive review pass "
+     "expected_version = its version. Identical replays are idempotent. A pass means you assessed Worker evidence: "
+     "never VERIFIED, never Owner acceptance; it starts no Run and changes no Spec.",
+     "inputSchema": _schema({"run_id": {"type": "string"}, "task_id": {"type": "string"},
+                             "verdict": {"type": "string", "enum": ["review_passed", "changes_requested", "inconclusive"]},
+                             "summary": {"type": "string"},
+                             "blocking_findings": {"type": "array", "items": {"type": "string"}},
+                             "limitations": {"type": "array", "items": {"type": "string"}},
+                             "continue_by": {"type": "string", "enum": ["architect", "owner"]},
+                             "report_sha256": {"type": "string"},
+                             "expected_version": {"type": "integer", "minimum": 0}},
+                            ["run_id", "verdict", "summary", "report_sha256"])},
 ]
 TOOL_NAMES = tuple(tool["name"] for tool in TOOLS)
 _DISPATCH_TOOL_ARGS = {tool["name"]: set(tool["inputSchema"]["properties"]) | {"project"} for tool in TOOLS}

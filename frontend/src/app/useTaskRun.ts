@@ -45,7 +45,9 @@ export function useTaskRun(api: CoreApi, projectId: string | null, taskId: strin
       if (mine !== seq.current || scopeRef.current !== forScope) return;
       setCache(prev => {
         if (prev.scope !== forScope) return prev;
-        if (prev.run && run && prev.run.state !== run.state) changed.current?.();
+        // P055: a recorded Architect Review changes the next action without changing the Run state.
+        const reviewOf = (r: RunView) => `${r.review?.state ?? ''}:${r.review?.latest?.version ?? 0}`;
+        if (prev.run && run && (prev.run.state !== run.state || reviewOf(prev.run) !== reviewOf(run))) changed.current?.();
         return { ...prev, status: 'ready', run, stale: false };
       });
     } catch {
