@@ -1321,3 +1321,43 @@ class ManagedRunReview(Base):
     architect_assignment_id: Mapped[str] = mapped_column(String(36))
     architect_session_id: Mapped[str] = mapped_column(String(36))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+
+
+# P056: Task lifecycle (``Task.status``) and the Owner Decision on a reviewed managed Run.
+TASK_DRAFT, TASK_ACTIVE, TASK_COMPLETED = "Draft", "Active", "Completed"
+TASK_STATUSES = (TASK_DRAFT, TASK_ACTIVE, TASK_COMPLETED)
+DECISION_ACCEPT, DECISION_REWORK = "accept", "request_rework"
+OWNER_DECISIONS = (DECISION_ACCEPT, DECISION_REWORK)
+
+
+class TaskOwnerDecision(Base):
+    """One immutable Owner decision on ONE reported managed Run, bound to the exact recorded Architect Review, the
+    registered Worker Report digest and the Run's frozen Spec/Prompt revisions.  At most one per Run (a second,
+    different request is refused, never overwrites history).  ``accept`` completes the Task; ``request_rework`` keeps it
+    Active.  Neither changes the Run, the Review or any Spec/Prompt revision, and neither starts anything."""
+
+    __tablename__ = "task_owner_decisions"
+    __table_args__ = (CheckConstraint(_in_list("decision", OWNER_DECISIONS), name="ck_task_owner_decisions_decision"),
+                      CheckConstraint("decision != 'request_rework' OR length(trim(reason)) >= 1",
+                                      name="ck_task_owner_decisions_reason"),
+                      UniqueConstraint("run_id", name="uq_task_owner_decisions_run"),
+                      UniqueConstraint("task_id", "request_key", name="uq_task_owner_decisions_request"),
+                      Index("ix_task_owner_decisions_task", "task_id"))
+
+    decision_id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    project_id: Mapped[int] = mapped_column(ForeignKey("projects.id", ondelete="RESTRICT"))
+    task_id: Mapped[int] = mapped_column(ForeignKey("tasks.id", ondelete="RESTRICT"))
+    run_id: Mapped[str] = mapped_column(ForeignKey("managed_run_states.run_id", ondelete="RESTRICT"))
+    review_id: Mapped[str] = mapped_column(ForeignKey("managed_run_reviews.review_id", ondelete="RESTRICT"))
+    review_version: Mapped[int] = mapped_column(Integer)
+    review_verdict: Mapped[str] = mapped_column(String(24))
+    report_sha256: Mapped[str] = mapped_column(String(64))
+    spec_revision: Mapped[int] = mapped_column(Integer)
+    prompt_revision: Mapped[int] = mapped_column(Integer)
+    decision: Mapped[str] = mapped_column(String(16))
+    reason: Mapped[str | None] = mapped_column(Text, nullable=True)
+    request_key: Mapped[str] = mapped_column(String(MAX_CLIENT_KEY))
+    actor_kind: Mapped[str] = mapped_column(String(16))
+    actor_id: Mapped[str] = mapped_column(String(64))
+    actor_assurance: Mapped[str] = mapped_column(String(32))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))

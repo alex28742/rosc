@@ -61,6 +61,7 @@ from .conversation import (ConversationConflict, ConversationDenied, Conversatio
                            InvalidConversationInput, UnsafeProjectIdentity, _architect_body, _body, _client_key)
 from .conversation_trace import ConversationTrace
 from .mentions import find_mentions
+from .task_lifecycle import activate_for_conversation
 from .models import (ASSIGNMENT_ACTIVE, CONVERSATION_KIND_PROJECT, CONVERSATION_KIND_TASK, GAP_OWNER_SKIP,
                      GAP_RELEASED_PERIOD, LANE_ACTIVE, LANE_INVALIDATED, MEMBER_ACTIVE, MEMBER_PASSIVE,
                      MEMBER_RELEASED, PARTICIPANT_OWNER, PARTY_OWNER_REF, ROLE_ARCHITECT, ROLE_WORKER, ROUND_AWAITING_OWNER,
@@ -658,6 +659,8 @@ class WorkerConversationCore:
                                         round_id=None, turn_id=None, sender_agent_id=None))
             self._write_parties(session, message.message_id, room.conversation_id, to_refs)
             session.flush()
+            if any(ref != PARTY_OWNER_REF for ref in to_refs):  # P056: addressed to an Agent (not an Owner-only note)
+                activate_for_conversation(session, room.conversation_id)
             return {"message": self._message_view(session, message, to_room=to is None), "replayed": False}
 
         with self._sessions() as session:
@@ -732,6 +735,8 @@ class WorkerConversationCore:
             session.add(envelope)
             self._write_parties(session, message.message_id, room.conversation_id, to_refs)
             session.flush()
+            if any(ref != PARTY_OWNER_REF for ref in to_refs):  # P056: addressed to an Agent (not an Owner-only note)
+                activate_for_conversation(session, room.conversation_id)
             rnd = None
             granted = [a for a in to_refs if a in set(grant)]  # type: ignore[arg-type]
             self._note(session, "owner_message_committed", room.conversation_id, message_id=message.message_id,
@@ -2147,6 +2152,7 @@ class WorkerConversationCore:
             self._write_parties(session, message.message_id, turn.conversation_id, refs)
             turn.state, turn.reply_message_id, turn.updated_at = TURN_PUBLISHED, message.message_id, _now()
             session.flush()
+            activate_for_conversation(session, turn.conversation_id)  # P056: an Agent reply published in a Task room
             if self.trace.enabled:
                 rnd = session.get(GroupRound, turn.round_id)
                 self._note(session, "reply_published", turn.conversation_id, turn_id=turn.turn_id,

@@ -72,7 +72,7 @@ const earlier = conversationMessage('Сделай задачу', { message_id: '
 const handoffProgress = { plan_revision: 1, steps: [], progress: { total: 0, produced: 0, test_passed: 0, note: '' }, tests: [], blockers: [],
   started: true, journal: { events: 5, last_event_at: null, last_seq: 5 },
   import: { imported_at: null, checked_at: null, journal_observed_at: null, problem: null, problem_detail: null, torn_tail_bytes: 0 },
-  checkpoint: null, report: { path: 'reports/final.md', sha256: 'a'.repeat(64), bytes: 10, outcome: 'completed' as const, registered_at: null, note: '' },
+  checkpoint: null, report: { path: 'reports/final.md', sha256: 'a'.repeat(64), bytes: 10, outcome: 'completed' as const, registered_at: '2026-11-18T10:00:00Z', note: '' },
   handoff: { message_id: HANDOFF_ID, addressed_to: ARCH, created_at: '2026-11-18T10:00:00Z' } };
 const reported = (over: Partial<RunView> = {}) => runView({ state: 'reported', reason: 'worker_reported', holding: false,
   progress: handoffProgress as RunView['progress'], report: handoffProgress.report as RunView['report'],

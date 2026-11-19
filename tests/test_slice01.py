@@ -659,7 +659,11 @@ class HardeningTests(StageCase):
                                   "agent_inbound_cursors", "conversation_dispatch_controls", "group_rounds",
                                   "group_round_grants", "group_turns", "rosc_settings",
                                   # P054A managed Run foundation (additive; empty after registration)
-                                  "managed_run_states", "managed_run_events"})
+                                  "managed_run_states", "managed_run_events",
+                                  # P054B observable Worker execution, P055 reviews, P056 Owner decisions (all empty)
+                                  "managed_run_imports", "managed_run_journal_events", "managed_run_plan_revisions",
+                                  "managed_run_reports", "managed_run_handoffs", "managed_run_reviews",
+                                  "task_owner_decisions"})
 
 
 if __name__ == "__main__":

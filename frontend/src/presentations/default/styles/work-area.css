@@ -2540,6 +2540,157 @@
   color: var(--rosc-secondary);
 }
 
+/* P056: Owner Decision directly under the status heading; Report and the compact Review card follow it. */
+.rosc-task-primary .rosc-task-decision {
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.rosc-task-rework {
+  display: grid;
+  gap: 6px;
+  margin: 9px 0 0;
+}
+
+.rosc-task-rework label {
+  font-size: calc(11px * var(--rosc-text-scale, 1));
+  font-weight: 700;
+}
+
+.rosc-task-rework textarea {
+  width: 100%;
+  min-height: 52px;
+  padding: 7px 9px;
+  border: 1px solid var(--rosc-line);
+  border-radius: var(--rosc-radius-sm);
+  font: inherit;
+  font-size: calc(12px * var(--rosc-text-scale, 1));
+  resize: vertical;
+}
+
+.rosc-task-rework__note {
+  margin: 0 0 9px;
+  font-size: calc(11px * var(--rosc-text-scale, 1));
+  overflow-wrap: anywhere;
+}
+
+.rosc-task-ref {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  margin: 0 0 10px;
+  padding: 9px 12px;
+  border: 1px solid var(--rosc-line);
+  border-radius: 9px;
+  font-size: calc(11px * var(--rosc-text-scale, 1));
+}
+
+.rosc-task-ref__icon {
+  flex: none;
+  color: var(--rosc-secondary);
+}
+
+.rosc-task-ref__text {
+  flex: 1;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.rosc-task-ref .rosc-task-link {
+  flex: none;
+}
+
+.rosc-task-review {
+  margin: 0 0 10px;
+  padding: 10px 12px;
+  border: 1px solid var(--rosc-line);
+  border-radius: 9px;
+  font-size: calc(11px * var(--rosc-text-scale, 1));
+}
+
+.rosc-task-review__head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.rosc-task-review__mark {
+  display: inline-flex;
+  flex: none;
+  align-items: center;
+  justify-content: center;
+  width: 26px;
+  height: 26px;
+  border-radius: 50%;
+  background: var(--rosc-soft-amber);
+  color: var(--rosc-amber);
+  font-weight: 700;
+}
+
+.rosc-task-review--review_passed .rosc-task-review__mark {
+  background: var(--rosc-soft-green);
+  color: var(--rosc-green);
+}
+
+.rosc-task-review__title {
+  display: grid;
+  flex: 1;
+  min-width: 0;
+  gap: 1px;
+}
+
+.rosc-task-review__title strong {
+  font-size: calc(13px * var(--rosc-text-scale, 1));
+}
+
+.rosc-task-review__title span {
+  color: var(--rosc-secondary);
+}
+
+.rosc-task-review__chevron {
+  flex: none;
+  border: 0;
+  background: none;
+  color: var(--rosc-secondary);
+  font-size: calc(14px * var(--rosc-text-scale, 1));
+  font-weight: 700;
+}
+
+.rosc-task-review__summary,
+.rosc-task-review__full {
+  margin: 8px 0 0;
+  padding-top: 8px;
+  border-top: 1px solid var(--rosc-line-soft);
+  color: var(--rosc-secondary);
+  overflow-wrap: anywhere;
+}
+
+.rosc-task-review__full {
+  white-space: pre-wrap;
+}
+
+.rosc-task-review__details h5 {
+  margin: 8px 0 3px;
+  font-size: calc(11px * var(--rosc-text-scale, 1));
+}
+
+.rosc-task-review__details ul {
+  margin: 0;
+  padding-left: 18px;
+}
+
+.rosc-task-review__details .rosc-hint {
+  margin: 8px 0 0;
+}
+
+.rosc-task-review__more {
+  margin-top: 8px;
+  padding: 8px 0 0;
+  width: 100%;
+  border-top: 1px solid var(--rosc-line-soft);
+  text-align: left;
+}
+
 .rosc-task-agents {
   display: grid;
   grid-template-columns: minmax(0, 1fr);

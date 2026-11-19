@@ -33,6 +33,8 @@ from .models import (CONVERSATION_KIND_PROJECT, MAX_CLIENT_KEY, MAX_MESSAGE_BODY
                      ConversationDelivery, ConversationParticipant, CONVERSATION_KIND_TASK, GroupTurn, MessageEnvelope,
                      MessageParty, RECIPIENT_ARCHITECT, Project, ProjectIdentityError, Task, validate_project_identity)
 
+from .task_lifecycle import activate_task
+
 # Failure codes after which nothing can have reached the provider, so an explicit retry cannot duplicate a turn.
 SAFE_RETRY_CODES = frozenset({"session_not_ready", "connection_failed", "not_received", "assignment_changed"})
 DEFAULT_PAGE_SIZE = 50
@@ -468,6 +470,9 @@ class ProjectConversationService:
                     sender_participant_id=owner.participant_id, ordinal=ordinal, body=text, client_key=key,
                     recipient=addressee, created_at=_now())
                 session.add(message)
+                if addressee is not None:  # P056: an Owner message explicitly addressed to an Agent in a Task
+                    session.flush()
+                    activate_task(session, scoped_task)
                 session.commit()
                 created = True
                 view = message_view(message, owner)

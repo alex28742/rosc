@@ -90,7 +90,7 @@ export const authoringControls = (over: Partial<TaskAuthoringControls> = {}): Ta
   status: 'ready', data: taskAuthoring(), specHistory: [], error: '', busy: false, onReload: vi.fn(),
   onSaveSpec: vi.fn(async () => ({ error: null, created: true })), onLoadSpecRevision: vi.fn(async () => taskAuthoring().spec),
   onLoadPromptRevision: vi.fn(async () => ({ revision: 1, source_spec_revision: 1, summary: 's', body: 'b', digest: 'x'.repeat(64), rules_ref: null, state: 'superseded' as const, actor: { kind: 'owner', id: 'local-owner' }, created_at: '2026-10-31T00:00:00Z', approval: null })),
-  onSavePrompt: vi.fn(async () => null), onApprove: vi.fn(async () => null), ...over,
+  onSavePrompt: vi.fn(async () => null), onApprove: vi.fn(async () => null), onDecide: vi.fn(async () => null), ...over,
 });
 
 export const workerSession = (over: Partial<WorkerSession> = {}): WorkerSession => ({
@@ -200,6 +200,7 @@ export function stubApi(over: Partial<{ [K in keyof CoreApi]: ReturnType<typeof 
     savePrompt: vi.fn(async () => ({ created: true, prompt: { revision: 1, source_spec_revision: 1, summary: 's', body: 'b', digest: 'p'.repeat(64),
       rules_ref: null, state: 'unapproved' as const, actor: { kind: 'owner', id: 'local-owner' }, created_at: '2026-10-31T00:00:00Z', approval: null } })),
     approvePrompt: vi.fn(async () => ({ created: true, prompt: taskAuthoring().spec as never })),
+    submitOwnerDecision: vi.fn(async () => ({ recorded: true, replayed: false, decision: {} as never, task_status: 'Completed' })),
     listTaskRuns: vi.fn(async () => [] as RunView[]),
     getRun: vi.fn(async () => runView()),
     launchRun: vi.fn(async () => ({ ...runView(), created: true })),

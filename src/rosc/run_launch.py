@@ -56,6 +56,8 @@ from .models import (ASSIGNMENT_ACTIVE, ATTRIBUTION_CLAIMED, LINK_UNLINKED, MANA
                      RunRecord, Task, TaskSpecRevision, WorkerSession, validate_project_identity)
 from .run_artifacts import EvidenceUnavailable, ReportUnavailable, RunArtifactImporter, RunEvidenceReader
 from .run_review import review_state
+from .task_lifecycle import activate_task
+from .models import TASK_COMPLETED
 from .task_authoring import AuthoringError, TaskAuthoringService, prompt_digest, spec_digest
 from .worker_session import B_CONFIRMED, STATE_ACTIVE, STATE_NOT_ASSIGNED, SessionError, WorkerSessionService
 from .workspace import (READY, WorkspaceConflict, check_run_parents, create_run_directory, inspect_project, inspect_task,
@@ -429,6 +431,8 @@ class RunLaunchService:
             task = session.get(Task, task_id)
             if task is None or task.project_id != project_id:
                 raise RunLaunchNotFound("Task not found in this Project")
+            if task.status == TASK_COMPLETED:
+                raise RunLaunchConflict("The Task is Completed: no new Run is started", "task_completed")
             if (inspect_project(self._workspace, project).problem != READY
                     or inspect_task(self._workspace, task).problem != READY):
                 raise RunLaunchConflict("Project/Task identity manifests are not ready", "workspace_not_ready")
@@ -509,6 +513,7 @@ class RunLaunchService:
                     reason="owner_launch", manifest_sha256=None, state_revision=1, created_at=now, updated_at=now))
                 session.flush()
                 self._event(session, run_id, None, RUN_AUTHORIZED, "owner_launch", actor.actor_id, now)
+                activate_task(session, tid)  # P056: the Owner's formal Run launch is Task collaboration
                 session.commit()
                 return run_id, True
             except OperationalError:
@@ -535,6 +540,8 @@ class RunLaunchService:
         task = session.get(Task, tid)
         if task is None or task.project_id != pid:
             raise RunLaunchNotFound("Task not found in this Project")
+        if task.status == TASK_COMPLETED:
+            raise RunLaunchConflict("The Task is Completed: no new Run is started", "task_completed")
         spec_head = session.scalars(select(TaskSpecRevision).where(TaskSpecRevision.task_id == tid)
                                     .order_by(TaskSpecRevision.revision.desc()).limit(1)).first()
         prompt = session.scalars(select(PromptRevision).where(PromptRevision.task_id == tid)

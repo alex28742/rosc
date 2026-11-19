@@ -2,7 +2,7 @@
 // callbacks; they never reach the API client, the router or Core persistence.
 import type { ComponentType, ReactNode } from 'react';
 import type { RunJournalPage, RunReportPage, RunView } from '../../core/models';
-import type { AgentDefinition, AgentFormValues, ArchitectStatus, ContextAccess, ConversationDiagnostics, ConversationMessage, GroupStatus, MessageRecipient, Project, PromptRevision, ProjectFormValues, RepairConfirmation, RoleAssignment, SpecRevision, SpecRevisionSummary, Task, TaskArchitectStatus, TaskAuthoring, TaskFormValues, ProjectWorker } from '../../core/models';
+import type { AgentDefinition, AgentFormValues, ArchitectStatus, ContextAccess, ConversationDiagnostics, ConversationMessage, GroupStatus, MessageRecipient, OwnerDecisionKind, Project, PromptRevision, ProjectFormValues, RepairConfirmation, RoleAssignment, SpecRevision, SpecRevisionSummary, Task, TaskArchitectStatus, TaskAuthoring, TaskFormValues, ProjectWorker } from '../../core/models';
 import type { ScrollRegions } from '../scroll';
 
 export type LoadStatus = 'loading' | 'ready' | 'failed';
@@ -346,6 +346,8 @@ export type TaskAuthoringControls = {
   onSavePrompt: (body: string, summary: string) => Promise<string | null>;
   /** Approves the exact saved head Prompt revision (Owner only). Resolves to an error message or `null`. */
   onApprove: () => Promise<string | null>;
+  /** P056: records the Owner's decision on the Task's reported, reviewed Run (Core re-checks everything). Resolves to an error message or `null`. */
+  onDecide: (decision: OwnerDecisionKind, reason?: string) => Promise<string | null>;
 };
 
 /** What one Worker row is doing right now. Per agent: a request for one Worker never blocks or labels another. */

@@ -24,11 +24,13 @@ from . import rich_text
 from .models import (MANAGED_HOLDING_STATES, PROVENANCE_ARCHITECT, PROVENANCE_OWNER, RUN_REPORTED, RUN_UNKNOWN,
                      ExecutionPackage, ManagedRunState, Project, PromptApproval, PromptRevision, Task, TaskSpecRevision,
                      ProjectIdentityError, validate_project_identity)
+from .task_lifecycle import EDITABLE_STATUSES, DecisionRefused, activate_task, decision_view, latest_decision, record_decision
+from .models import DECISION_ACCEPT, DECISION_REWORK, TASK_COMPLETED, TASK_DRAFT
 from .workspace import READY, WorkspaceConflict, inspect_project, provision_task
 
 MAX_PROMPT_CHARS = 100_000
 MAX_SUMMARY_CHARS = 8_000
-EDITABLE_STATUS = "Draft"
+EDITABLE_STATUS = TASK_DRAFT  # status of a newly created Task; editability itself is ``EDITABLE_STATUSES`` (P056)
 
 
 class AuthoringError(Exception):
@@ -190,8 +192,8 @@ class TaskAuthoringService:
         task = session.get(Task, task_id)
         if task is None or task.project_id != project_id:
             raise AuthoringNotFound("Task not found")
-        if editable and task.status != EDITABLE_STATUS:
-            raise AuthoringConflict("not_editable", "The Task is no longer in the Draft stage")
+        if editable and task.status not in EDITABLE_STATUSES:
+            raise AuthoringConflict("not_editable", "The Task is Completed and closed for Spec/Prompt changes")
         return task
 
     @staticmethod
@@ -276,6 +278,9 @@ class TaskAuthoringService:
                 session.add(row)
                 task.title, task.description = title, rich_text.to_text(description)
                 task.acceptance_criteria = rich_text.to_text(criteria)
+                if isinstance(author, ArchitectAuthor):
+                    session.flush()
+                    activate_task(session, task_id)  # P056: an Agent Tool edit of an EXISTING Task is collaboration
                 session.commit()
                 return {"created": True, "spec": spec_view(row, head=True)}
             except OperationalError:
@@ -341,6 +346,9 @@ class TaskAuthoringService:
                                      source_spec_revision=source, body=body, summary=summary, digest=digest,
                                      actor_kind=kind, actor_id=actor_id, actor_assurance=assurance)
                 session.add(row)
+                if isinstance(author, ArchitectAuthor):
+                    session.flush()
+                    activate_task(session, task_id)  # P056: an Agent-authored Prompt revision is collaboration
                 session.commit()
                 return {"created": True, "prompt": prompt_view(row, state="unapproved", approval=None)}
             except OperationalError:
@@ -496,7 +504,7 @@ class TaskAuthoringService:
             state = self._state(head, spec_head, approval) if head else None
             prompt = prompt_view(head, state=state, approval=approval) if head else None
             task = session.get(Task, task_id)
-            editable = task.status == EDITABLE_STATUS
+            editable = task.status in EDITABLE_STATUSES
             run = self._run_summary(session, task_id)
             revisions = [r for r in session.scalars(select(PromptRevision).where(PromptRevision.task_id == task_id)
                                                     .order_by(PromptRevision.revision))]
@@ -505,12 +513,44 @@ class TaskAuthoringService:
                 appr = self._approval(session, row.id)
                 prompt_history.append({**prompt_view(row, state=self._state(row, spec_head, appr) if row is head else "superseded",
                                                      approval=appr, body=False), "current": row is head})
+            status = task.status
+        nxt = self._next(state, head, editable, run, status)
         return {
-            "task_id": f"T{task_id:04d}", "editable": editable,
+            "task_id": f"T{task_id:04d}", "task_status": status, "editable": editable,
             "spec": spec_view(spec_head, head=True), "prompt": prompt, "prompt_history": prompt_history,
-            "run": run,
-            "next": self._next(state, head, editable, run),
+            "run": run, "step": self._step(status, run, nxt),
+            "next": nxt,
         }
+
+    # -- P056 Owner Decision -------------------------------------------------------------------------------------------
+    def owner_decision(self, author: object, project_id: int, task_id: int, run_id: object, **args: object) -> dict:
+        """Owner-only: accept the reviewed result (Task -> Completed) or request rework (Task stays Active)."""
+        if isinstance(author, ArchitectAuthor) or not isinstance(run_id, str):
+            raise AuthoringDenied("Not authorized for this operation")
+        decision = authz.evaluate(self._policy, author, authz.TASK_OWNER_DECISION,
+                                  authz.ResourceScope(project_id=project_id, task_id=task_id, run_id=run_id))
+        if not decision.allowed:
+            raise AuthoringDenied("Not authorized for this operation")
+        with self._sessions() as session:
+            self._project(session, project_id)
+            try:
+                return record_decision(session, author, project_id, task_id, {**args, "run_id": run_id})
+            except DecisionRefused as exc:
+                error = AuthoringConflict(exc.code, str(exc))
+                error.http = exc.http
+                raise error from None
+
+    @staticmethod
+    def _step(status: str, run: dict, nxt: dict) -> str:
+        """Current work step (derived for display; never stored on the Task)."""
+        if status == TASK_COMPLETED:
+            return "completed"
+        decision = (run or {}).get("decision")
+        if decision and decision.get("decision") == DECISION_REWORK:
+            return "rework_needed"
+        return {"observe_run": "run_in_progress", "awaiting_review": "awaiting_architect_review",
+                "owner_decision": "awaiting_owner_decision", "review_changes_requested": "awaiting_owner_decision",
+                "review_incomplete": "review_incomplete"}.get(nxt["action"], "draft" if status == TASK_DRAFT else "preparation")
 
     @staticmethod
     def _run_summary(session: Session, task_id: int) -> dict:
@@ -528,12 +568,20 @@ class TaskAuthoringService:
                   "not_delivered": "Run не доставлен", "not_executed": "Run не начат"}
         from .run_review import review_state  # P055: recorded Architect Review only (never chat text)
         review = review_state(session, row.run_id, row.state)
+        decided = latest_decision(session, row.run_id)
         return {"authorized": True, "label": labels.get(row.state, row.state), "worker": row.agent_id,
                 "run_id": row.run_id, "state": row.state, "holding": row.state in MANAGED_HOLDING_STATES,
-                "outcome": row.outcome, "review": review}
+                "outcome": row.outcome, "review": review,
+                "decision": None if decided is None else decision_view(decided)}
 
     @staticmethod
-    def _next(state: str | None, head: PromptRevision | None, editable: bool, run: dict | None = None) -> dict:
+    def _next(state: str | None, head: PromptRevision | None, editable: bool, run: dict | None = None,
+              status: str = TASK_DRAFT) -> dict:
+        if status == TASK_COMPLETED:
+            return {"action": "completed", "label": "Задача принята Owner", "enabled": False, "next_actor": "—",
+                    "hint": "Owner принял результат. Это решение Owner, а не VERIFIED: Review Architect остаётся оценкой "
+                    "evidence Worker. Правка Spec/Prompt и новый Run для завершённой Task недоступны."}
+        decided = (run or {}).get("decision")
         if run and run.get("holding"):
             if run["state"] == RUN_UNKNOWN:
                 return {"action": "observe_run", "label": "Run: состояние неизвестно", "enabled": False,
@@ -541,20 +589,21 @@ class TaskAuthoringService:
                         "отправляет повторно. Проверьте терминал Worker; второй Run этой Task не запускается."}
             return {"action": "observe_run", "label": run["label"], "enabled": False, "next_actor": "Worker",
                     "hint": "Run уже запущен: второй Run этой Task не запускается. Прогресс — по импортированному Journal."}
-        if run and run.get("state") == RUN_REPORTED:
+        if run and run.get("state") == RUN_REPORTED and decided is None:
             review = run.get("review") or {}
             latest = review.get("latest") or {}
             state = review.get("state")
             if state == "review_passed":
-                return {"action": "owner_decision", "label": "Ожидает решения Owner", "enabled": False,
-                        "next_actor": "Owner", "hint": "Architect Review пройден: Architect оценил evidence Worker. Это не "
-                        "VERIFIED и не приёмка Task; Run Worker остаётся reported. Решение — за Owner."}
+                return {"action": "owner_decision", "label": "Ожидает решения Owner", "enabled": True,
+                        "next_actor": "Owner", "decisions": [DECISION_ACCEPT, DECISION_REWORK],
+                        "hint": "Worker завершил работу. Architect проверил результат и рекомендовал принять его. "
+                        "Это не VERIFIED и не приёмка Task — решение остаётся за Owner."}
             if state == "changes_requested":
                 count = len(latest.get("findings") or [])
                 return {"action": "review_changes_requested", "label": "Architect запросил изменения — нужно решение Owner",
-                        "enabled": False, "next_actor": "Owner",
-                        "hint": f"Блокирующих замечаний: {count}. Новый Run, правка Spec или делегирование не создаются "
-                        "автоматически."}
+                        "enabled": True, "next_actor": "Owner", "decisions": [DECISION_REWORK],
+                        "hint": f"Блокирующих замечаний: {count}. Принять результат при таком Review нельзя; Owner может "
+                        "вернуть Task на доработку. Новый Run, правка Spec или делегирование не создаются автоматически."}
             if state == "inconclusive":
                 actor = review.get("next_actor") or "Owner"
                 return {"action": "review_incomplete", "label": "Review incomplete / needs evidence", "enabled": False,
@@ -565,8 +614,12 @@ class TaskAuthoringService:
                     "next_actor": "Architect", "hint": "Отчёт Worker получен. Это заявление Worker: не VERIFIED и не "
                     "принято Owner. Review фиксируется только инструментом Architect rosc_review_submit."}
         if not editable:
-            return {"action": "none", "label": "Task не в стадии Draft", "enabled": False, "next_actor": "Owner",
-                    "hint": "Правка Spec и Prompt после стадии Draft недоступна."}
+            return {"action": "none", "label": "Task закрыта", "enabled": False, "next_actor": "Owner",
+                    "hint": "Правка Spec и Prompt для этой Task недоступна."}
+        if decided is not None and decided.get("decision") == DECISION_REWORK:
+            nxt = TaskAuthoringService._next(state, head, editable, None, status)
+            return {**nxt, "rework": {"reason": decided.get("reason"), "decided_at": decided.get("decided_at"),
+                                      "run_id": decided.get("run_id")}}
         if head is None:
             return {"action": "create_prompt", "label": "Создать Prompt Draft", "enabled": True, "next_actor": "Owner",
                     "hint": "Создание Draft не запускает Worker."}

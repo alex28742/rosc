@@ -1,5 +1,5 @@
 import { useCallback, useRef, useState } from 'react';
-import type { RunReview, SpecRevision } from '../../../core/models';
+import type { NextAction, OwnerDecisionKind, RunReview, SpecRevision } from '../../../core/models';
 import { describeTaskArchitect } from '../ui/architectView';
 import { WorkerRows } from '../ui/WorkerRows';
 import { MobilePaneSwitch } from '../ui/MobilePaneSwitch';
@@ -32,18 +32,81 @@ const VERDICT_TEXT: Record<RunReview['verdict'], string> = {
   inconclusive: 'Review incomplete / needs evidence',
 };
 
-/** P055: the recorded Architect Review (from the Architect's `rosc_review_submit` Tool only; a chat reply never sets it). */
+/** First paragraph of the review summary, bounded, for the collapsed card (the full text is behind «Подробнее»). */
+const SHORT_SUMMARY = 220;
+const shortSummary = (text: string) => {
+  const first = text.split(/\n\s*\n/)[0].replace(/\s+/g, ' ').trim();
+  return first.length > SHORT_SUMMARY ? `${first.slice(0, SHORT_SUMMARY).trimEnd()}…` : first;
+};
+
+/**
+ * P055/P056: the recorded Architect Review (from the Architect's `rosc_review_submit` Tool only; a chat reply never sets
+ * it). Compact and collapsed by default; «Подробнее» discloses the full text, blocking findings and evidence limitations.
+ */
 function RecordedReview({ review }: { review: RunReview }) {
+  const [open, setOpen] = useState(false);
   const author = review.architect.display_name ?? `агент ${review.architect.agent_id.slice(0, 8)}`;
-  return <div className="rosc-hint" data-testid="run-review" aria-live="polite">
-    <p><strong>{VERDICT_TEXT[review.verdict]}</strong> · {author} · v{review.version} · Report sha256 {review.report_sha256.slice(0, 12)}…
-      {review.recorded_at ? ` · ${formatTime(review.recorded_at)}` : ''}</p>
-    <p>{review.summary}</p>
-    {review.findings.length > 0 && <ul aria-label="Блокирующие замечания">{review.findings.map((item, i) => <li key={i}>{item}</li>)}</ul>}
-    {review.limitations.length > 0 && <ul aria-label="Ограничения evidence">{review.limitations.map((item, i) => <li key={i}>{item}</li>)}</ul>}
-    <p>Оценка Architect по evidence Worker: не VERIFIED, не приёмка Task и не разрешение на merge или новый Run.</p>
+  const detailsId = `rosc-review-details-${review.review_id}`;
+  const toggle = () => setOpen(value => !value);
+  return <div className={`rosc-task-review rosc-task-review--${review.verdict}`} data-testid="run-review" aria-live="polite">
+    <div className="rosc-task-review__head">
+      <span className="rosc-task-review__mark" aria-hidden="true">{review.verdict === 'review_passed' ? '✓' : '!'}</span>
+      <div className="rosc-task-review__title">
+        <strong>{VERDICT_TEXT[review.verdict]}</strong>
+        <span>{author} · v{review.version}{review.recorded_at ? ` · ${formatTime(review.recorded_at)}` : ''}</span>
+      </div>
+      <button type="button" className="rosc-task-review__chevron" aria-expanded={open} aria-controls={detailsId}
+        aria-label={open ? 'Свернуть Architect Review' : 'Развернуть Architect Review'} onClick={toggle}>{open ? '⌃' : '⌄'}</button>
+    </div>
+    {!open && <p className="rosc-task-review__summary" data-testid="run-review-short">{shortSummary(review.summary)}</p>}
+    <div id={detailsId} className="rosc-task-review__details" hidden={!open}>
+      <p className="rosc-task-review__full">{review.summary}</p>
+      {review.findings.length > 0 && <><h5>Блокирующие замечания</h5>
+        <ul aria-label="Блокирующие замечания">{review.findings.map((item, i) => <li key={i}>{item}</li>)}</ul></>}
+      {review.limitations.length > 0 && <><h5>Ограничения evidence</h5>
+        <ul aria-label="Ограничения evidence">{review.limitations.map((item, i) => <li key={i}>{item}</li>)}</ul></>}
+      <p className="rosc-hint">Report sha256 {review.report_sha256.slice(0, 12)}… · Оценка Architect по evidence Worker: не VERIFIED, не приёмка Task и не разрешение на merge или новый Run.</p>
+    </div>
+    <button type="button" className="rosc-task-link rosc-task-review__more" aria-expanded={open} aria-controls={detailsId}
+      onClick={toggle}>{open ? 'Свернуть ⌃' : 'Подробнее ⌄'}</button>
   </div>;
 }
+
+/** «Ожидает решения Owner»: the two real Owner actions, directly under the short explanation (Core decides availability). */
+function OwnerDecisionActions({ next, busy, onDecide }: { next: NextAction; busy: boolean; onDecide: (decision: OwnerDecisionKind, reason?: string) => Promise<string | null> }) {
+  const [reworkOpen, setReworkOpen] = useState(false);
+  const [reason, setReason] = useState('');
+  const [failure, setFailure] = useState('');
+  const allowed = next.decisions ?? [];
+  const decide = async (decision: OwnerDecisionKind) => {
+    setFailure('');
+    const error = await onDecide(decision, decision === 'request_rework' ? reason.trim() : undefined);
+    if (error) setFailure(error); else { setReworkOpen(false); setReason(''); }
+  };
+  return <>
+    <div className="rosc-task-actions__row rosc-task-decision" role="group" aria-label="Решение Owner">
+      {allowed.includes('accept') && <button type="button" className="rosc-btn rosc-btn--primary" disabled={busy || reworkOpen}
+        onClick={() => void decide('accept')}>Принять результат</button>}
+      {allowed.includes('request_rework') && <button type="button" className="rosc-btn" disabled={busy} aria-expanded={reworkOpen}
+        aria-controls="rosc-rework-form" onClick={() => { setReworkOpen(value => !value); setFailure(''); }}>Вернуть на доработку</button>}
+    </div>
+    {reworkOpen && <form id="rosc-rework-form" className="rosc-task-rework" aria-label="Вернуть на доработку"
+      onSubmit={event => { event.preventDefault(); if (reason.trim()) void decide('request_rework'); }}>
+      <label htmlFor="rosc-rework-reason">Что нужно доработать</label>
+      <textarea id="rosc-rework-reason" value={reason} maxLength={2000} rows={2} placeholder="Коротко: причина возврата"
+        onChange={event => setReason(event.target.value)} />
+      <div className="rosc-task-actions__row">
+        <button type="submit" className="rosc-btn rosc-btn--small rosc-btn--primary" disabled={busy || reason.trim() === ''}>Отправить на доработку</button>
+        <button type="button" className="rosc-btn rosc-btn--small" onClick={() => { setReworkOpen(false); setReason(''); }}>Отмена</button>
+      </div>
+    </form>}
+    {failure && <p className="rosc-task-agents__err" role="alert">{failure}</p>}
+  </>;
+}
+
+/** States whose heading is a status, not an action: no (disabled) button repeats it. */
+const STATUS_ONLY: ReadonlyArray<NextAction['action']> = ['observe_run', 'awaiting_review', 'owner_decision',
+  'review_changes_requested', 'review_incomplete', 'completed', 'none'];
 
 export function TaskView({ projectName, taskId, task, tasksStatus, feedback, inert, scroll, workspace, conversation, authoring, workers, run, textScale, onClose, onRetry }: TaskViewProps) {
   const scaleRef = useApplyTextScale(textScale.scale);
@@ -94,12 +157,15 @@ export function TaskView({ projectName, taskId, task, tasksStatus, feedback, ine
     if (typeof result === 'string') setSpecFailure(result); else setPast(result);
   };
   const shown = past ?? spec;
+  const taskStatus = data?.task_status ?? task?.status ?? '';
   const next = data?.next ?? null;
   const prompt = data?.prompt ?? null;
   const promptText = prompt ? `v${prompt.revision} · ${prompt.state === 'stale' ? 'устарел' : prompt.state === 'approved' ? 'утверждён' : 'не утверждён'}` : 'нет';
   const primaryEnabled = next !== null && next.enabled && !authoring.busy;
   const primaryTone = specDirty ? 'positive' : next === null ? 'neutral'
-    : next.action === 'update_prompt' ? 'warning' : next.enabled && (next.action === 'create_prompt' || next.action === 'review_prompt') ? 'positive' : 'neutral';
+    : next.action === 'update_prompt' || next.action === 'review_changes_requested' || next.rework ? 'warning'
+      : next.action === 'owner_decision' || next.action === 'completed' || (next.enabled && (next.action === 'create_prompt' || next.action === 'review_prompt')) ? 'positive' : 'neutral';
+  const decisionArea = !specDirty && next !== null && (next.decisions?.length ?? 0) > 0;
   const currentRun = run.run;
   const progress = currentRun?.progress ?? null;
   const planned = planProgress(currentRun);
@@ -114,14 +180,13 @@ export function TaskView({ projectName, taskId, task, tasksStatus, feedback, ine
       <p>{projectName} · чтение Task не запускает агента</p>
     </div>
     <div className="rosc-drawer__controls">
-      {task && <span className="rosc-tag rosc-tag--info">{task.status}</span>}
+      {task && <span className="rosc-tag rosc-tag--info">{taskStatus}</span>}
       <TextViewControl scopeLabel="Task Work Area" scale={textScale.scale} onChange={textScale.onChange} />
     </div>
   </>;
   const footer = <>
-    <span className="rosc-task-foot__note">Spec и Prompt Draft хранятся версиями · утверждение Prompt не запускает Run · отчёт Worker не означает VERIFIED/ACCEPTED; Review и приёмка — в следующих срезах</span>
+    <span className="rosc-task-foot__note">Spec и Prompt Draft хранятся версиями · отчёт Worker и Architect Review не означают VERIFIED · Task завершает только решение Owner</span>
     <span className="rosc-task-foot__actions">
-      <button type="button" className="rosc-btn rosc-btn--small" disabled title={LATER}>Принять задачу</button>
       <button type="button" className="rosc-btn rosc-btn--small" onClick={onClose}>К проекту</button>
     </span>
   </>;
@@ -145,7 +210,7 @@ export function TaskView({ projectName, taskId, task, tasksStatus, feedback, ine
             </div>
             <div className="rosc-task-heading__flags">
               <span className="rosc-chip">Проект: {projectName}</span>
-              <span className="rosc-tag rosc-tag--info">Task: {task.status}</span>
+              <span className="rosc-tag rosc-tag--info">Task: {taskStatus}</span>
             </div>
           </div>
           <section className={specCollapsed ? 'rosc-task-panel rosc-task-spec rosc-task-spec--collapsed' : 'rosc-task-panel rosc-task-spec'} aria-label="Спецификация задачи">
@@ -154,7 +219,7 @@ export function TaskView({ projectName, taskId, task, tasksStatus, feedback, ine
                 {shown && <span className="rosc-chip" data-testid="spec-version">Spec v{shown.revision}</span>}
                 {shown && <span className="rosc-chip">Автор: {shown.provenance === 'architect' ? 'Architect' : shown.provenance === 'legacy_import' ? 'импорт' : 'Owner'}</span>}
                 {data?.prompt?.state === 'stale' && <span className="rosc-tag rosc-tag--warning">Prompt устарел</span>}
-                <span className="rosc-chip">{data?.editable ? 'Редактируется до запуска Run' : 'Зафиксирована'}</span>
+                <span className="rosc-chip">{data?.editable ? 'Редактируется версиями' : 'Зафиксирована'}</span>
               </span>
             </div>
             {authoring.status === 'failed' && <p className="rosc-task-spec__error" role="alert">Не удалось загрузить Spec. {authoring.error} <button type="button" className="rosc-task-link" onClick={authoring.onReload}>Повторить</button></p>}
@@ -235,20 +300,26 @@ export function TaskView({ projectName, taskId, task, tasksStatus, feedback, ine
                 <div className={`rosc-task-primary rosc-task-primary--${primaryTone}`} aria-label="Основное действие">
                   <h4>{specDirty ? 'Сохраните Spec' : next?.label ?? 'Загрузка…'}</h4>
                   <p className="rosc-hint">{specDirty ? 'Есть несохранённые правки Spec. Сохраните их — каждая версия фиксируется отдельно.' : next?.hint ?? ''}</p>
-                  <div className="rosc-task-actions__row">
-                    {specDirty
-                      ? <button type="button" className="rosc-btn rosc-btn--primary" disabled={authoring.busy || title.trim() === ''} onClick={() => void saveSpec()}>Подготовить / Сохранить Spec</button>
-                      : launchArea ? null
-                        : <button type="button" className="rosc-btn rosc-btn--primary" disabled={!primaryEnabled || next?.action === 'observe_run' || next?.action === 'awaiting_review'
-                          || next?.action === 'owner_decision' || next?.action === 'review_changes_requested' || next?.action === 'review_incomplete'}
-                          title={next && !next.enabled ? next.hint : undefined} onClick={() => setDraftOpen(true)}>{next?.label ?? 'Загрузка…'}</button>}
-                  </div>
+                  {!specDirty && next?.rework && <p className="rosc-task-rework__note" data-testid="rework-note" role="status">
+                    <strong>Owner вернул на доработку</strong>{next.rework.decided_at ? ` · ${formatTime(next.rework.decided_at)}` : ''}: {next.rework.reason}</p>}
+                  {decisionArea && next
+                    ? <OwnerDecisionActions key={currentRun?.run_id ?? 'run'} next={next} busy={authoring.busy} onDecide={authoring.onDecide} />
+                    : <div className="rosc-task-actions__row">
+                      {specDirty
+                        ? <button type="button" className="rosc-btn rosc-btn--primary" disabled={authoring.busy || title.trim() === ''} onClick={() => void saveSpec()}>Подготовить / Сохранить Spec</button>
+                        : launchArea || (next !== null && STATUS_ONLY.includes(next.action)) ? null
+                          : <button type="button" className="rosc-btn rosc-btn--primary" disabled={!primaryEnabled}
+                            title={next && !next.enabled ? next.hint : undefined} onClick={() => setDraftOpen(true)}>{next?.label ?? 'Загрузка…'}</button>}
+                    </div>}
                   {launchArea && next && <RunLaunchAction next={next} workers={workers} run={run} busy={authoring.busy}
                     selected={runWorker} onSelect={setRunWorker} />}
-                  {report && <p className="rosc-hint" data-testid="run-report-ref">Report: {outcomeText(report.outcome)} · sha256 {report.sha256.slice(0, 12)}… · {currentRun?.review?.state === 'awaiting_architect_review' ? 'ожидает Architect Review (не VERIFIED, не принято Owner)' : 'заявление Worker'}
-                    {' '}<button type="button" className="rosc-task-link" onClick={() => setReportOpen(true)}>Открыть Report</button></p>}
-                  {currentRun?.review?.latest && <RecordedReview review={currentRun.review.latest} />}
                 </div>
+                {report && <div className="rosc-task-ref" data-testid="run-report-ref">
+                  <span className="rosc-task-ref__icon" aria-hidden="true">▤</span>
+                  <span className="rosc-task-ref__text"><strong>Report:</strong> {outcomeText(report.outcome)} · sha256 {report.sha256.slice(0, 12)}… · {currentRun?.review?.state === 'awaiting_architect_review' ? 'ожидает Architect Review (не VERIFIED, не принято Owner)' : 'заявление Worker'}</span>
+                  <button type="button" className="rosc-task-link" onClick={() => setReportOpen(true)}>Открыть Report <span aria-hidden="true">↗</span></button>
+                </div>}
+                {currentRun?.review?.latest && <RecordedReview key={currentRun.review.latest.review_id} review={currentRun.review.latest} />}
                 <div className="rosc-task-agents">
                   <div aria-label="Architect этой Task">
                     <div className="rosc-task-agents__head"><strong>Architect</strong>
@@ -269,7 +340,7 @@ export function TaskView({ projectName, taskId, task, tasksStatus, feedback, ine
                 <WorkerRows controls={workers} />
                 <dl className="rosc-task-facts">
                   <div><dt>Проект</dt><dd>{projectName}</dd></div>
-                  <div><dt>Task</dt><dd>{task.status}</dd></div>
+                  <div><dt>Task</dt><dd>{taskStatus}</dd></div>
                   <div><dt>Spec</dt><dd>{spec ? `v${spec.revision}${specDirty ? ' · есть несохранённые правки' : ''}` : '—'}</dd></div>
                   <div><dt>Prompt</dt><dd data-testid="draft-fact">{promptText}</dd></div>
                   <div><dt>Workspace</dt><dd>{task.workspace_state === 'ready' ? 'готов' : 'нужна сверка'}</dd></div>
@@ -288,7 +359,8 @@ export function TaskView({ projectName, taskId, task, tasksStatus, feedback, ine
                   </div>
                 </div>
               </div>
-              <div className="rosc-task-panel__foot"><span>Утверждение Draft не запускает Worker: Owner запускает Run одной командой после выбора доступного Worker.</span></div>
+              {!data?.run.authorized && taskStatus !== 'Completed'
+                && <div className="rosc-task-panel__foot"><span>Утверждение Draft не запускает Worker: Owner запускает Run одной командой после выбора доступного Worker.</span></div>}
             </section>
           </div>
         </div>

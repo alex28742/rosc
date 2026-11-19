@@ -42,6 +42,7 @@ from .authorization import (ARCHITECT_ACTIVATE, ARCHITECT_CONTEXT_READ,
                             CONVERSATION_DELIVERY_RECONCILE, CONVERSATION_MESSAGE_CREATE, ActorContext, AuthorizationPolicy, ResourceScope,
                             evaluate)
 from .project_context import ACCESS_MATRIX, ProjectContextBroker, project_label
+from .task_lifecycle import activate_task
 from .conversation import (SAFE_RETRY_CODES, ConversationConflict, ConversationDenied, ConversationNotFound, ConversationStoreError, InvalidConversationInput, UnsafeProjectIdentity, _architect_body, ensure_task_conversation, _utc_iso, delivery_state_view, recoverable_failure)
 from .models import (ASSIGNMENT_ACTIVE, ASSURANCE_ADAPTER_VERIFIED, CONVERSATION_KIND_PROJECT, CONVERSATION_KIND_TASK, DELIVERY_DELIVERED,
                      DELIVERY_FAILED, DELIVERY_PENDING, DELIVERY_UNKNOWN, PARTICIPANT_ARCHITECT, PARTICIPANT_OWNER,
@@ -1419,6 +1420,8 @@ class ArchitectService:
                     client_key=f"architect-reply:{message_id}", created_at=_now())
                 session.add(reply_row)
                 session.flush()
+                if conversation.kind == CONVERSATION_KIND_TASK:  # P056: the Architect's Task-scoped reply
+                    activate_task(session, conversation.task_id)
                 bridged = None
                 sender = session.get(ConversationParticipant, message.sender_participant_id)
                 if self.peer_bridge is not None and sender is not None and sender.kind == PARTICIPANT_OWNER:

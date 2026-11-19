@@ -91,6 +91,9 @@ TASK_SPEC_SAVE = "task.spec.save"
 PROMPT_DRAFT_READ = "task.prompt.read"
 PROMPT_DRAFT_SAVE = "task.prompt.save"
 PROMPT_APPROVE = "task.prompt.approve"
+# P056: the Owner's decision on a reported managed Run with a recorded Architect Review (accept -> Task Completed, or
+# request rework -> Task stays Active).  Owner-only; never granted to an Agent; starts no Run and changes no Review.
+TASK_OWNER_DECISION = "task.owner_decision"
 # P042A external Worker CLI session (Project + Worker). Status is a read-only observation and never starts a process;
 # activation is the one explicit Owner action that may create/reconnect a ROSC-owned tmux session. Neither is a Run.
 WORKER_SESSION_STATUS = "worker.session.status"
@@ -147,6 +150,7 @@ _SHAPES: dict[str, tuple[frozenset[str], frozenset[str]]] = {
     PROMPT_DRAFT_READ: (frozenset({"project_id", "task_id"}), frozenset()),
     PROMPT_DRAFT_SAVE: (frozenset({"project_id", "task_id"}), frozenset()),
     PROMPT_APPROVE: (frozenset({"project_id", "task_id"}), frozenset()),
+    TASK_OWNER_DECISION: (frozenset({"project_id", "task_id", "run_id"}), frozenset()),
     WORKER_SESSION_STATUS: (frozenset({"project_id", "agent_id"}), frozenset()),
     WORKER_SESSION_ACTIVATE: (frozenset({"project_id", "agent_id"}), frozenset()),
     CONVERSATION_GROUP_CONTROL: (frozenset({"project_id"}), frozenset({"task_id"})),

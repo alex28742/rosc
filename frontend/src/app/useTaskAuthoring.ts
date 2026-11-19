@@ -96,5 +96,15 @@ export function useTaskAuthoring(api: CoreApi, projectId: string | null, taskId:
       });
       return result.ok ? null : result.error;
     },
+    onDecide: async (decision, reason) => {
+      const result = await run((pid, tid, data) => {
+        const review = data.run.review?.latest;
+        if (!data.run.run_id || !review) return Promise.reject(new Error('Нет записанного Architect Review для решения.'));
+        // One key per Run + decision: a double click or retry replays instead of recording a second decision.
+        return api.submitOwnerDecision(pid, tid, data.run.run_id, { decision, review_id: review.review_id,
+          review_version: review.version, request_key: `owner-decision:${data.run.run_id}:${decision}`, reason: reason ?? null });
+      });
+      return result.ok ? null : result.error;
+    },
   };
 }

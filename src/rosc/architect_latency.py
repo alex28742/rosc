@@ -70,6 +70,9 @@ OUTCOMES = frozenset({
     # P040 authoring Tool error codes (task_authoring.AuthoringError.code)
     "forbidden", "invalid", "spec_conflict", "prompt_conflict", "source_not_current", "prompt_stale", "not_head",
     "not_editable", "digest_mismatch", "project_unavailable",
+    # P054B/P055 Architect Report/Evidence/Review Tool error codes (project_context ToolError)
+    "no_managed_run", "not_available", "report_integrity_failed", "report_unavailable", "run_ambiguous",
+    "task_mismatch",
     # runtime (RuntimeProblem) codes
     "connection_failed", "connection_lost", "empty_reply", "endpoint_identity_mismatch", "lookup_failed",
     "malformed_response", "model_unavailable", "no_reply", "process_exited", "process_identity_unproven",

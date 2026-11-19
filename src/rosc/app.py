@@ -100,6 +100,16 @@ class PromptApproveInput(BaseModel):
     digest: str = Field(min_length=64, max_length=64)
 
 
+class OwnerDecisionInput(BaseModel):
+    """P056 Owner Decision on a reported, reviewed managed Run.  ``review_id``/``review_version`` name the review the
+    Owner saw (a newer one is a stale conflict); ``request_key`` makes a retry or double click idempotent."""
+    decision: str = Field(max_length=32)
+    review_id: str = Field(max_length=36)
+    review_version: int
+    request_key: str = Field(min_length=8, max_length=128)
+    reason: str | None = Field(default=None, max_length=4000)
+
+
 class RunLaunchInput(BaseModel):
     """P054A explicit Owner Run start.  ``launch_key`` is the client's idempotency key: an exact retry returns the same
     Run and never dispatches twice."""
@@ -817,6 +827,14 @@ def create_app(db_path: Path | None = None, workspace_root: Path | None = None, 
                               digest=data.digest)
 
     # -- M2-C Owner-only Agent registry and scoped assignments (no agent-facing surface) ----------------------
+    @app.post("/api/projects/{project_id}/tasks/{task_id}/runs/{run_id}/decision")
+    def owner_decision(project_id: str, task_id: str, run_id: str, data: OwnerDecisionInput, response: Response) -> dict:
+        result = authoring_call(authoring.owner_decision, current_actor(), *task_ids(project_id, task_id), run_id,
+                                decision=data.decision, review_id=data.review_id, review_version=data.review_version,
+                                request_key=data.request_key, reason=data.reason)
+        response.status_code = 201 if result.get("recorded") else 200
+        return result
+
     @app.get("/api/agents")
     def list_agents() -> list[dict]:
         return registry_call(registry.list_agents, current_actor())
