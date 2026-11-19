@@ -17,6 +17,7 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field, field_validator
 from sqlalchemy import select
+from sqlalchemy.orm import undefer
 from sqlalchemy.exc import IntegrityError, OperationalError
 
 from . import authorization as authz
@@ -167,9 +168,19 @@ def project_view(project: Project, workspace_root: Path) -> dict:
     }
 
 
+def task_number(task: Task) -> int | None:
+    """P058 Project-local ordinal, or None on a database not yet upgraded to 0023 (the UI shows a neutral placeholder)."""
+    try:
+        return task.project_number
+    except OperationalError:
+        return None
+
+
 def task_view(task: Task, workspace_root: Path) -> dict:
     state, problem = workspace_status(task.workspace_state, inspect_task(workspace_root, task).problem)
-    return {"id": f"T{task.id:04d}", "project_id": f"P{task.project_id:04d}", "title": task.title,
+    return {"id": f"T{task.id:04d}", "project_id": f"P{task.project_id:04d}",
+            "project_number": task_number(task),  # P058: display ordinal "№N", never an identifier or route alias
+            "title": task.title,
             "description": task.description, "acceptance_criteria": task.acceptance_criteria,
             "status": task.status, "workspace_state": state, "workspace_problem": problem,
             "worker": "not_assigned", "created_at": utc_iso(task.created_at)}
@@ -719,7 +730,13 @@ def create_app(db_path: Path | None = None, workspace_root: Path | None = None, 
         with sessions() as session:
             if not session.get(Project, pid):
                 raise HTTPException(404, "Project not found")
-            return [task_view(t, workspace_root) for t in session.scalars(select(Task).where(Task.project_id == pid).order_by(Task.id))]
+            query = select(Task).where(Task.project_id == pid).order_by(Task.id)
+            try:
+                rows = session.scalars(query.options(undefer(Task.project_number))).all()
+            except OperationalError:  # P058: not yet upgraded to 0023 -- list without the local ordinal
+                session.rollback()
+                rows = session.scalars(query).all()
+            return [task_view(t, workspace_root) for t in rows]
 
     def authoring_call(call, *args, **kwargs):
         """Run one authoring service call; typed errors keep a machine-readable ``code`` the UI can branch on."""

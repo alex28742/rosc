@@ -15,7 +15,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 
-from sqlalchemy import func, select
+from sqlalchemy import func, select, update
 from sqlalchemy.exc import IntegrityError, OperationalError
 from sqlalchemy.orm import Session, sessionmaker
 
@@ -229,7 +229,12 @@ class TaskAuthoringService:
             project = self._project(session, project_id)
             if project.workspace_state != "ready" or inspect_project(self._workspace, project).problem != READY:
                 raise AuthoringConflict("project_unavailable", "Project Workspace requires reconciliation")
-            task = Task(project_id=project_id, title=title, description=rich_text.to_text(description),
+            # P058: allocate the next Project-local ordinal once, durably, in this same transaction (never recycled)
+            number = session.execute(
+                update(Project).where(Project.id == project_id)
+                .values(last_task_number=Project.last_task_number + 1).returning(Project.last_task_number)
+                .execution_options(synchronize_session=False)).scalar_one()
+            task = Task(project_id=project_id, project_number=number, title=title, description=rich_text.to_text(description),
                         acceptance_criteria=rich_text.to_text(criteria), status=EDITABLE_STATUS,
                         workspace_state="provisioning")
             session.add(task)

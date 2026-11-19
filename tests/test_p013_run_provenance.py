@@ -15,6 +15,7 @@ from rosc.authorization import ActorContext, AuthorizationDecision, LocalOwnerPo
 from rosc.db import make_session_factory
 from rosc.run_provenance import (InvalidRunInput, RunConflict, RunNotFound, RunProvenanceDenied, RunProvenanceService,
                                  UnsafeRunProjectIdentity)
+from test_p014_project_conversation import legacy_select
 
 OWNER = LocalOwnerProvider().actor()
 TASK = {"title": "T", "description": "D", "acceptance_criteria": "A"}
@@ -56,6 +57,11 @@ class ProvenanceCase(base.StageCase):
     def mkrun(self, key="k1", **kw) -> dict:
         kw.setdefault("source_kind", "manual-report")
         return self.svc.register_external_run(OWNER, 1, 1, source_key=key, **kw)
+
+    def legacy_rows(self, table: str) -> list[tuple]:
+        """Rows without the P058 (0023) additive columns, comparable across that migration boundary."""
+        with sqlite3.connect(self.data / "rosc.db") as connection:
+            return connection.execute(legacy_select(connection, table)).fetchall()
 
     def fetch(self, statement: str, *args) -> list[tuple]:
         with sqlite3.connect(self.data / "rosc.db") as connection:
@@ -520,7 +526,7 @@ class AuthorizationTests(ProvenanceCase):
 class MigrationTests(ProvenanceCase):
     def test_single_head_and_fresh_schema(self) -> None:
         from alembic.script import ScriptDirectory
-        self.assertEqual(ScriptDirectory.from_config(self.alembic).get_heads(), ["0022_task_lifecycle_owner_decision"])  # P055 added 0021; P056 added 0022
+        self.assertEqual(ScriptDirectory.from_config(self.alembic).get_heads(), ["0023_project_local_task_number"])  # P055 added 0021; P056 added 0022; P058 added 0023
         names = {r[0] for r in self.fetch("SELECT name FROM sqlite_master WHERE type='table'")}
         self.assertTrue(set(OWNED_TABLES) <= names)
         with sqlite3.connect(self.data / "rosc.db") as connection:
@@ -538,7 +544,7 @@ class MigrationTests(ProvenanceCase):
 
         def snapshot():
             files = {str(p.relative_to(workspace)): p.read_bytes() for p in sorted(workspace.rglob("*")) if p.is_file()}
-            rows = {t: self.fetch(f"SELECT rowid, * FROM {t} ORDER BY rowid") for t in LEGACY_TABLES}
+            rows = {t: self.legacy_rows(t) for t in LEGACY_TABLES}
             return files, rows
 
         before = snapshot()
@@ -552,11 +558,11 @@ class MigrationTests(ProvenanceCase):
 
     def test_downgrade_removes_only_p013_schema(self) -> None:
         self.mkrun()
-        before = {t: self.fetch(f"SELECT rowid, * FROM {t} ORDER BY rowid") for t in LEGACY_TABLES}
+        before = {t: self.legacy_rows(t) for t in LEGACY_TABLES}
         command.downgrade(self.alembic, "0003_agent_registry_assignments")
         names = {r[0] for r in self.fetch("SELECT name FROM sqlite_master")}
         self.assertFalse(names & set(OWNED_TABLES))
-        self.assertEqual({t: self.fetch(f"SELECT rowid, * FROM {t} ORDER BY rowid") for t in LEGACY_TABLES}, before)
+        self.assertEqual({t: self.legacy_rows(t) for t in LEGACY_TABLES}, before)
         command.upgrade(self.alembic, "head")
         self.assertEqual(self.fetch("SELECT count(*) FROM run_records"), [(0,)])
 

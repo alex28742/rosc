@@ -9,7 +9,7 @@ const formatTime = (iso: string) => {
   return Number.isNaN(date.getTime()) ? '' : date.toLocaleString('ru-RU', { day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' });
 };
 
-type Props = { taskId: string; authoring: TaskAuthoringControls; onClose: () => void };
+type Props = { taskLabel: string; authoring: TaskAuthoringControls; onClose: () => void };
 
 /**
  * Prompt Draft side drawer over the Task Work Area. "What changed" comes first, then the full text. Editing never
@@ -17,7 +17,7 @@ type Props = { taskId: string; authoring: TaskAuthoringControls; onClose: () => 
  * read-only from Core's stored copy and can never be edited or approved. Approval of an exact saved revision is a Core
  * operation and is not a Run authorization.
  */
-export function PromptDraftDrawer({ taskId, authoring, onClose }: Props) {
+export function PromptDraftDrawer({ taskLabel, authoring, onClose }: Props) {
   const data = authoring.data;
   const head = data?.prompt ?? null;
   const revisions = data?.prompt_history ?? [];
@@ -71,8 +71,8 @@ export function PromptDraftDrawer({ taskId, authoring, onClose }: Props) {
   const canApprove = !viewing && !authoring.busy && !dirty && head?.state === 'unapproved' && data?.editable === true;
   const title = viewing ? `Prompt v${past.revision} · просмотр` : head ? `Prompt Draft v${head.revision}` : 'Новый Prompt Draft';
   const meta = data
-    ? `Task ${taskId} · Spec v${data.spec.revision}${shown ? ` · автор: ${actorText(shown.actor.kind)} · основан на Spec v${shown.source_spec_revision}` : ' · Draft ещё не создан'}`
-    : taskId;
+    ? `${taskLabel} · Spec v${data.spec.revision}${shown ? ` · автор: ${actorText(shown.actor.kind)} · основан на Spec v${shown.source_spec_revision}` : ' · Draft ещё не создан'}`
+    : taskLabel;
   const shownState = viewing ? 'superseded' : head?.state;
 
   const openRevision = async (revision: number) => {

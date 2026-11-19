@@ -225,7 +225,7 @@ describe('P040 r02 UX pass', () => {
     render(<App api={api} />);
     await context();
     history.pushState(null, '', '/projects/P0001/tasks/T0002'); window.dispatchEvent(new PopStateEvent('popstate'));
-    await screen.findByText(/^T0002 ·/);
+    await screen.findByText(/^№2 ·/);
     const card = within(await (await context()).findByLabelText('Architect этой Task'));
     expect(await card.findByText('Не активен')).toBeTruthy();
     late.resolve(taskArchitectStatus({ task_id: 'T0001', state: 'active', can_activate: false }));

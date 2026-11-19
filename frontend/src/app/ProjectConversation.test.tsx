@@ -235,7 +235,7 @@ describe('Project Conversation isolation', () => {
     await screen.findByText('секрет P0001');
     fireEvent.change(within(panel()).getByLabelText('Сообщение в Project Conversation'), { target: { value: 'черновик P0001' } });
 
-    fireEvent.click(await screen.findByText('T0001 · Task T0001'));
+    fireEvent.click(await screen.findByText('№1 · Task T0001'));
     expect(await screen.findByLabelText('Task Work Area')).toBeTruthy();
     expect((within(panel()).getByLabelText('Сообщение в Project Conversation') as HTMLTextAreaElement).value).toBe('черновик P0001');
     fireEvent.click(screen.getByLabelText('Закрыть задачу'));
@@ -411,7 +411,7 @@ describe('Project Conversation send/reload safety (P014.1)', () => {
     await within(panel()).findByRole('alert');
     fireEvent.click(screen.getByLabelText('Свернуть Project Conversation'));
     fireEvent.click(screen.getByLabelText('Развернуть Project Conversation'));
-    fireEvent.click(await screen.findByText('T0001 · Task T0001'));
+    fireEvent.click(await screen.findByText('№1 · Task T0001'));
     await screen.findByLabelText('Task Work Area');
     expect(field().value).toBe('не отправлено');
     expect(within(panel()).getByRole('alert').textContent).toContain('HTTP 503');

@@ -122,7 +122,7 @@ class DatabaseTests(Base):
         conn.commit()
         conn.close()
         la.check_database(self.cfg)  # at head: no error
-        self.assertEqual(la.alembic_head(la.ROOT), "0022_task_lifecycle_owner_decision")  # pinned head (bump with each migration)
+        self.assertEqual(la.alembic_head(la.ROOT), "0023_project_local_task_number")  # pinned head (bump with each migration)
         self.assertEqual([p.name for p in self.cfg.data_dir.iterdir()], ["rosc.db"])
         self.assertNotEqual(before[0], b"")
 

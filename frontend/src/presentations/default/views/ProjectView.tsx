@@ -11,6 +11,7 @@ import { TaskItemMenu } from '../ui/TaskItemMenu';
 import { TextViewControl } from '../ui/TextViewControl';
 import { architectHeadline, architectTone } from '../ui/architectView';
 import { summarizeWorkers } from '../ui/workerView';
+import { taskNumberLabel } from '../ui/taskNumber';
 import { ChevronRightIcon } from '../ui/icons';
 import { MobilePaneSwitch } from '../ui/MobilePaneSwitch';
 import { useApplyTextScale } from '../ui/useApplyTextScale';
@@ -46,7 +47,7 @@ function TaskRows({ tasks, viewMode, onOpenTask }: { tasks: Task[]; viewMode: Ta
         }}>
         <TaskItemMenu taskId={task.id} taskTitle={task.title} onOpenTask={onOpenTask} />
         <span className="rosc-tag">{task.status}</span>
-        <strong className="rosc-task-title">{task.id} · {task.title}</strong>
+        <strong className="rosc-task-title">{taskNumberLabel(task)} · {task.title}</strong>
         <span className="rosc-task-sub">{secondaryLine(task)}</span>
       </div>)}
     </div>;
@@ -64,7 +65,7 @@ function TaskRows({ tasks, viewMode, onOpenTask }: { tasks: Task[]; viewMode: Ta
       }}>
       <TaskItemMenu taskId={task.id} taskTitle={task.title} onOpenTask={onOpenTask} />
       <span className="rosc-task-item__main">
-        <span className="rosc-task-title">{task.id} · {task.title}</span>
+        <span className="rosc-task-title">{taskNumberLabel(task)} · {task.title}</span>
         <span className="rosc-task-sub">{secondaryLine(task)}</span>
       </span>
       <span className="rosc-tag">{task.status}</span>
@@ -134,7 +135,7 @@ function ProjectWorkArea({ project, tasks, tasksStatus, feedback, scroll, worksp
     return tasks.filter(task => {
       if (statusFilter !== STATUS_ALL && task.status !== statusFilter) return false;
       if (!term) return true;
-      return [task.id, task.title, task.description].join(' ').toLocaleLowerCase('ru').includes(term);
+      return [taskNumberLabel(task), task.id, task.title, task.description].join(' ').toLocaleLowerCase('ru').includes(term);
     });
   }, [tasks, search, statusFilter]);
 

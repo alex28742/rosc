@@ -22,6 +22,7 @@ from rosc.architect_store import ArchitectDocumentService, AuthorizationDenied
 from rosc.authorization import (ActorContext, AuthorizationDecision, LocalOwnerPolicy, LocalOwnerProvider, ResourceScope,
                                 evaluate)
 from rosc.db import make_session_factory
+from test_p014_project_conversation import legacy_select
 
 OWNER = LocalOwnerProvider().actor()
 TASK = {"title": "T", "description": "D", "acceptance_criteria": "A"}
@@ -103,6 +104,11 @@ class RegistryCase(base.StageCase):
         with sqlite3.connect(self.data / "rosc.db") as connection:
             connection.execute("PRAGMA foreign_keys=ON")
             connection.execute(statement, args)
+
+    def legacy_rows(self, table: str) -> list[tuple]:
+        """Rows without the P058 (0023) additive columns, comparable across that migration boundary."""
+        with sqlite3.connect(self.data / "rosc.db") as connection:
+            return connection.execute(legacy_select(connection, table)).fetchall()
 
     def fetch(self, statement: str) -> list[tuple]:
         with sqlite3.connect(self.data / "rosc.db") as connection:
@@ -609,7 +615,7 @@ class MigrationTests(RegistryCase):
 
     def test_single_head_and_fresh_schema(self) -> None:
         from alembic.script import ScriptDirectory
-        self.assertEqual(ScriptDirectory.from_config(self.alembic).get_heads(), ["0022_task_lifecycle_owner_decision"])  # P055 added 0021; P056 added 0022
+        self.assertEqual(ScriptDirectory.from_config(self.alembic).get_heads(), ["0023_project_local_task_number"])  # P055 added 0021; P056 added 0022; P058 added 0023
         self.assertTrue({"agent_definitions", "agent_capabilities", "role_assignments", "assignment_capabilities"}
                         <= self.table_names())
 
@@ -621,13 +627,13 @@ class MigrationTests(RegistryCase):
         documents = ArchitectDocumentService(make_session_factory(self.data / "rosc.db"), self.data / "workspace",
                                              LocalOwnerPolicy())
         documents.write_document(OWNER, 1, "notes", "# kept bytes\n")
-        before_rows = {table: self.fetch(f"SELECT rowid, * FROM {table} ORDER BY rowid")
+        before_rows = {table: self.legacy_rows(table)
                        for table in ("projects", "project_root_bindings", "tasks")}
         before_files = self.workspace_bytes()
         command.upgrade(self.alembic, "head")
         self.assertEqual(self.table_names() & {"agent_definitions", "role_assignments"}, {"agent_definitions",
                                                                                          "role_assignments"})
-        self.assertEqual({table: self.fetch(f"SELECT rowid, * FROM {table} ORDER BY rowid")
+        self.assertEqual({table: self.legacy_rows(table)
                           for table in ("projects", "project_root_bindings", "tasks")}, before_rows)
         self.assertEqual(self.workspace_bytes(), before_files)
         self.assertEqual(self.client.get("/api/projects").json()[0]["workspace_state"], "ready")

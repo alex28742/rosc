@@ -13,6 +13,7 @@ import { TaskConversationPanel } from '../ui/TaskConversationPanel';
 import { WorkspaceActions } from '../ui/WorkspaceActions';
 import { RUN_STATE_TEXT, RunJournalDrawer, RunLaunchAction, RunReportDrawer, WorkingPlan, formatTime, outcomeText, planProgress } from '../ui/RunPanels';
 import { useApplyTextScale } from '../ui/useApplyTextScale';
+import { taskNumberLabel } from '../ui/taskNumber';
 
 const LATER = 'Будет доступно позже';
 
@@ -176,7 +177,7 @@ export function TaskView({ projectName, taskId, task, tasksStatus, feedback, ine
   const head = <>
     <div className="rosc-drawer__heading">
       <p className="rosc-drawer-eyebrow">TASK / WORK AREA</p>
-      <h2>{task ? `${task.id} · ${spec?.title ?? task.title}` : taskId}</h2>
+      <h2>{task ? `Task ${taskNumberLabel(task)} · ${spec?.title ?? task.title}` : 'Task'}</h2>
       <p>{projectName} · чтение Task не запускает агента</p>
     </div>
     <div className="rosc-drawer__controls">
@@ -206,7 +207,7 @@ export function TaskView({ projectName, taskId, task, tasksStatus, feedback, ine
           <div className="rosc-task-heading">
             <div>
               <h3>{spec?.title ?? task.title}</h3>
-              <p>Task {task.id} · {spec ? `Spec v${spec.revision}` : 'Spec'} · {data?.run.label ?? 'Run не запускался'} · Исполнитель: не назначен</p>
+              <p>Task {taskNumberLabel(task)} · {spec ? `Spec v${spec.revision}` : 'Spec'} · {data?.run.label ?? 'Run не запускался'} · Исполнитель: не назначен · тех. ID {task.id}</p>
             </div>
             <div className="rosc-task-heading__flags">
               <span className="rosc-chip">Проект: {projectName}</span>
@@ -367,7 +368,7 @@ export function TaskView({ projectName, taskId, task, tasksStatus, feedback, ine
         <TaskConversationPanel key={`${task.project_id}/${task.id}`} taskId={task.id} conversation={conversation}
           collapsed={chatCollapsed}
           onCollapsedChange={value => { setChatCollapsed(value); if (value) setMobilePane('work'); }} />
-        {draftOpen && <PromptDraftDrawer key={`${task.project_id}/${task.id}`} taskId={task.id} authoring={authoring} onClose={() => setDraftOpen(false)} />}
+        {draftOpen && <PromptDraftDrawer key={`${task.project_id}/${task.id}`} taskLabel={`Task ${taskNumberLabel(task)}`} authoring={authoring} onClose={() => setDraftOpen(false)} />}
         {journalOpen && <RunJournalDrawer run={run} onClose={() => setJournalOpen(false)} />}
         {reportOpen && <RunReportDrawer run={run} onClose={() => setReportOpen(false)} />}
       </div>}

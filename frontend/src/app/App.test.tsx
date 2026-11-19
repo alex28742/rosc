@@ -17,7 +17,7 @@ describe('navigation', () => {
     render(<App api={api} />);
     fireEvent.click(await screen.findByText('Project P0001'));
     expect(location.pathname).toBe('/projects/P0001');
-    fireEvent.click(await screen.findByText('T0001 · Task T0001'));
+    fireEvent.click(await screen.findByText('№1 · Task T0001'));
     expect(location.pathname).toBe('/projects/P0001/tasks/T0001');
     expect(await screen.findByLabelText('Task Work Area')).toBeTruthy();
     expect(screen.getByLabelText('Project Work Area')).toBeTruthy();

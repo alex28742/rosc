@@ -29,7 +29,17 @@ OWNED_TABLES = ("conversations", "conversation_participants", "conversation_mess
 LEGACY_TABLES = ("projects", "project_root_bindings", "tasks", "agent_definitions", "agent_capabilities",
                  "role_assignments", "assignment_capabilities", "run_records", "run_agent_links", "report_records",
                  "evidence_records")
-HEAD = "0022_task_lifecycle_owner_decision"  # P056 added 0022; P055 0021; P054B 0020; P054A added 0019; P053 added 0018; P052 r05 added 0017; P029 added 0009; P019 added 0008; P018 added 0007; P015 added 0006; P014 tables are created by 0005
+HEAD = "0023_project_local_task_number"  # P058 added 0023; P056 added 0022; P055 0021; P054B 0020; P054A added 0019; P053 added 0018; P052 r05 added 0017; P029 added 0009; P019 added 0008; P018 added 0007; P015 added 0006; P014 tables are created by 0005
+
+
+P058_ADDITIVE = {"projects": {"last_task_number"}, "tasks": {"project_number"}}  # 0023 additive columns
+
+
+def legacy_select(connection, table: str) -> str:
+    """``SELECT rowid, <columns>`` without the P058 (0023) additive columns, so rows compare across that boundary."""
+    names = [r[1] for r in connection.execute(f"PRAGMA table_info({table})")
+             if r[1] not in P058_ADDITIVE.get(table, ())]
+    return f"SELECT rowid, {', '.join(names)} FROM {table} ORDER BY rowid"
 
 
 class AgentProvider:
@@ -80,7 +90,7 @@ class ConversationCase(base.StageCase):
         workspace = self.data / "workspace"
         tree = {str(p.relative_to(workspace)): p.read_bytes() for p in sorted(workspace.rglob("*")) if p.is_file()}
         with sqlite3.connect(self.data / "rosc.db") as connection:
-            rows = {table: connection.execute(f"SELECT rowid, * FROM {table} ORDER BY rowid").fetchall()
+            rows = {table: connection.execute(legacy_select(connection, table)).fetchall()
                     for table in tables}
         return {"tree": tree, "rows": rows}
 
