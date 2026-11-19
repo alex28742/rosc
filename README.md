@@ -51,6 +51,40 @@ npm run dev
 
 Open the Vite URL on localhost. API requests are proxied to `127.0.0.1:8000`; set `ROSC_API_TARGET` (localhost hosts only) to use another backend port, e.g. `ROSC_API_TARGET=http://127.0.0.1:8010 npm run dev`. `frontend/package.json` declares `engines.node >= 24`; Vite 7 refuses to start its dev server on Node 18. Keep `.local-data/` and `.venv/` out of Git. To run backend checks: `python -m unittest discover -s tests -v`.
 
+### Safe offline SQLite upgrades (P057)
+
+With ROSC **stopped** (`make local-down`), use the upgrade wrapper instead of running
+`alembic upgrade head` directly:
+
+```bash
+make local-down
+make db-upgrade
+# review the printed backup path and final Alembic revision
+make local-up
+```
+
+`db-upgrade` resolves the existing `ROSC_DATA_DIR` or `<checkout>/data`, confirms that
+`local-app status` is `STOPPED`, checks for known dev listeners/open database handles,
+checks SQLite integrity and the Alembic revision, creates a validated SQLite backup under
+`<data-dir>/backups/`, upgrades to the single Alembic head, and verifies the result.
+If migration or verification fails, it attempts to restore that backup automatically
+and **returns a failure**; do not restart ROSC if restoration also fails.
+
+Explicit rollback restores **the entire prior database snapshot**, including Task data
+changed since backup (this is not an Alembic downgrade), so stop the app again first:
+
+```bash
+make local-down
+make db-restore ARGS="--backup data/backups/rosc-before-0021-<timestamp>.db --yes"
+```
+
+Use the exact path printed by `db-upgrade`; the example above is illustrative.
+For a nondefault data root, set `ROSC_DATA_DIR=/path/to/data` for both commands.
+After successful restore, running a **newer ROSC code revision with an older DB schema
+is unsafe**: use matching code/schema or apply the migration again before `make local-up`.
+The wrapper does not start/stop the server, manipulate Agent sessions, or change Git.
+Test the wrapper without live data using `make db-upgrade-check`.
+
 ### Local development launcher (`local-app`)
 
 A small Linux-only convenience CLI (`scripts/local_app.py`, Python standard library) starts the ROSC **developer web pair**: uvicorn on `127.0.0.1:8010` (with `--reload` limited to `src/`) **and** the Vite dev server on `127.0.0.1:5173` (`--strictPort`) proxying `/api` to the backend. It starts no Worker, agent or Run and is not a persistent service. macOS/Windows are unsupported (it relies on `/proc` and process groups). The manual commands above remain the fallback.
