@@ -19,6 +19,7 @@ code/test claim is true.  Nothing here sends a keystroke, starts a process or ca
 """
 from __future__ import annotations
 
+import errno
 import hashlib
 import json
 import os
@@ -665,6 +666,229 @@ class RunArtifactImporter:
                 "offset": offset, "content": chunk, "chars": len(text),
                 "next_offset": offset + len(chunk) if offset + len(chunk) < len(text) else None,
                 "note": "Worker-produced Run Report (digest verified on read). Unverified claims: review, do not trust."}
+
+
+# -- P055: read-only Architect Evidence access (no DB writes; Journal claims are compared, never trusted) ---------------
+MAX_EVIDENCE_FILE = 1_048_576   # Core read/hash bound per evidence file (the Worker tool keeps <= 64 KiB per log)
+MAX_EVIDENCE_SCAN = 2_000       # directory entries examined by one listing
+MAX_EVIDENCE_PAGE = 65_536
+DEFAULT_EVIDENCE_PAGE = 16_000
+_EVIDENCE_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
+
+
+class EvidenceUnavailable(Exception):
+    def __init__(self, code: str, message: str = "", **extra) -> None:
+        super().__init__(code)
+        self.code, self.message, self.extra = code, message or code.replace("_", " "), extra
+
+
+def _evidence_claims(session: Session, run_id: str) -> dict[str, list[dict]]:
+    """``evidence/<name>`` -> the imported ``test.recorded`` claims that reference it (Worker claims, not proof)."""
+    claims: dict[str, list[dict]] = {}
+    for event in session.scalars(select(ManagedRunJournalEvent).where(
+            ManagedRunJournalEvent.run_id == run_id, ManagedRunJournalEvent.type == "test.recorded")
+            .order_by(ManagedRunJournalEvent.seq)):
+        data = json.loads(event.data)
+        evidence = data.get("evidence")
+        if not isinstance(evidence, dict) or not isinstance(evidence.get("path"), str):
+            continue
+        claims.setdefault(evidence["path"], []).append({
+            "journal_seq": event.seq, "test_id": data.get("test_id"), "outcome": data.get("outcome"),
+            "exit_code": data.get("exit_code"), "command": str(data.get("command", ""))[:300],
+            "sha256": evidence.get("sha256"), "bytes": evidence.get("bytes"),
+            "truncated": evidence.get("truncated"), "original_bytes": evidence.get("original_bytes")})
+    return claims
+
+
+def _integrity(claims: list[dict], sha: str | None, size: int | None) -> str:
+    if not claims:
+        return "unreferenced"
+    if sha is None:
+        return "not_hashed"
+    ok = [c for c in claims if c.get("sha256") == sha and (c.get("bytes") in (None, size))]
+    return "matches_journal" if len(ok) == len(claims) else "mismatch_journal"
+
+
+def _open_real_dir(path: Path) -> int | None:
+    """An owned, non-symlink directory fd, ``None`` when absent; ``EvidenceUnavailable`` when unsafe."""
+    try:
+        info = os.lstat(path)
+    except FileNotFoundError:
+        return None
+    if stat.S_ISLNK(info.st_mode) or not stat.S_ISDIR(info.st_mode) or info.st_uid != os.getuid():
+        raise EvidenceUnavailable("unsafe_path", "The Run evidence location is a symlink or not a directory")
+    try:
+        return os.open(path, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC)
+    except OSError:
+        raise EvidenceUnavailable("unsafe_path", "The Run evidence location cannot be opened safely") from None
+
+
+def _read_evidence_file(dir_fd: int, name: str, limit: int) -> tuple[bytes, os.stat_result]:
+    """Bytes of one regular evidence file below ``dir_fd`` (no symlink, special file or change while reading)."""
+    for attempt in (0, 1):
+        try:
+            fd = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC, dir_fd=dir_fd)
+        except FileNotFoundError:
+            raise EvidenceUnavailable("not_found", "Evidence file not found") from None
+        except OSError as exc:
+            if exc.errno in (errno.ELOOP, errno.ENXIO):
+                raise EvidenceUnavailable("unsafe_path", "Evidence path is a symlink or special file") from None
+            raise EvidenceUnavailable("not_accessible", "Evidence file is not accessible") from None
+        try:
+            before = os.fstat(fd)
+            if not stat.S_ISREG(before.st_mode):
+                raise EvidenceUnavailable("not_regular_file", "Only regular evidence files can be read")
+            if before.st_size > limit:
+                raise EvidenceUnavailable("file_too_large", "Evidence file exceeds the read bound",
+                                          bytes=before.st_size, limit=limit)
+            data = os.read(fd, limit + 1)
+            while len(data) <= limit:
+                more = os.read(fd, limit + 1 - len(data))
+                if not more:
+                    break
+                data += more
+            after = os.fstat(fd)
+        finally:
+            os.close(fd)
+        if len(data) > limit:
+            raise EvidenceUnavailable("file_too_large", "Evidence file exceeds the read bound", limit=limit)
+        if (before.st_mtime_ns, before.st_size, before.st_ino) == (after.st_mtime_ns, after.st_size, after.st_ino) \
+                and len(data) == after.st_size:
+            return data, after
+        if attempt == 1:
+            break
+    raise EvidenceUnavailable("changed_during_read", "The evidence file kept changing while it was read")
+
+
+class RunEvidenceReader:
+    """Bounded, read-only listing/reading of ``<run dir>/evidence/`` of one managed Run, compared with the imported
+    Journal ``test.recorded`` claims.  It never writes (DB or files) and never claims independent verification."""
+
+    NOTE = ("Worker-authored evidence (files written by the Worker's own tool). A digest match only shows the file "
+            "is the one the Worker's Journal claims; it is not independent execution and not VERIFIED.")
+
+    def __init__(self, run_dir_for: Callable[[Session, ManagedRunState], Path]) -> None:
+        self._run_dir_for = run_dir_for
+
+    def _dirs(self, session: Session, row: ManagedRunState) -> tuple[int | None, int | None]:
+        try:
+            run_dir = self._run_dir_for(session, row)
+        except (WorkspaceConflict, OSError, ValueError):
+            raise EvidenceUnavailable("run_directory_unavailable", "The Run directory is not available") from None
+        run_fd = _open_real_dir(run_dir)
+        if run_fd is None:
+            return None, None
+        try:
+            try:
+                info = os.lstat("evidence", dir_fd=run_fd)
+            except FileNotFoundError:
+                return run_fd, None
+            if stat.S_ISLNK(info.st_mode) or not stat.S_ISDIR(info.st_mode) or info.st_uid != os.getuid():
+                raise EvidenceUnavailable("unsafe_path", "evidence/ is a symlink or not a directory")
+            try:
+                ev_fd = os.open("evidence", os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC, dir_fd=run_fd)
+            except OSError:
+                raise EvidenceUnavailable("unsafe_path", "evidence/ cannot be opened safely") from None
+            return run_fd, ev_fd
+        except BaseException:
+            os.close(run_fd)
+            raise
+
+    def list(self, session: Session, row: ManagedRunState, offset: int, limit: int) -> dict:
+        claims = _evidence_claims(session, row.run_id)
+        run_fd, ev_fd = self._dirs(session, row)
+        items: dict[str, dict] = {}
+        scanned, complete = 0, True
+        try:
+            if ev_fd is not None:
+                for name in sorted(os.listdir(ev_fd)):
+                    scanned += 1
+                    if scanned > MAX_EVIDENCE_SCAN:
+                        complete = False
+                        break
+                    path = f"evidence/{name}"
+                    entry: dict = {"path": path, "name": name}
+                    try:
+                        info = os.lstat(name, dir_fd=ev_fd)
+                    except FileNotFoundError:
+                        continue
+                    if stat.S_ISLNK(info.st_mode):
+                        entry.update(kind="symlink", status="refused_unsafe", sha256=None, bytes=None)
+                    elif not stat.S_ISREG(info.st_mode):
+                        entry.update(kind="directory" if stat.S_ISDIR(info.st_mode) else "special",
+                                     status="not_regular_file", sha256=None, bytes=None)
+                    elif not _EVIDENCE_NAME.match(name):
+                        entry.update(kind="file", status="unreadable_name", sha256=None, bytes=info.st_size)
+                    elif info.st_size > MAX_EVIDENCE_FILE:
+                        entry.update(kind="file", status="too_large_to_hash", sha256=None, bytes=info.st_size)
+                    else:
+                        try:
+                            data, after = _read_evidence_file(ev_fd, name, MAX_EVIDENCE_FILE)
+                            entry.update(kind="file", status="present", sha256=_sha(data), bytes=len(data),
+                                         hard_linked=after.st_nlink > 1)
+                        except EvidenceUnavailable as exc:
+                            entry.update(kind="file", status=exc.code, sha256=None, bytes=info.st_size)
+                    refs = claims.get(path, [])
+                    entry["journal_claims"] = refs
+                    entry["integrity"] = _integrity(refs, entry.get("sha256"), entry.get("bytes"))
+                    items[path] = entry
+        finally:
+            for fd in (ev_fd, run_fd):
+                if fd is not None:
+                    os.close(fd)
+        for path, refs in claims.items():  # claimed by the Journal but not present (moved/deleted/never written)
+            if path not in items and complete:
+                items[path] = {"path": path, "name": path.split("/")[-1], "kind": None, "status": "missing",
+                               "sha256": None, "bytes": None, "journal_claims": refs, "integrity": "missing"}
+        ordered = [items[k] for k in sorted(items)]
+        page = ordered[offset:offset + limit]
+        return {"run_id": row.run_id, "project_id": f"P{row.project_id:04d}", "task_id": f"T{row.task_id:04d}",
+                "run_state": row.state,
+                "evidence_directory": "absent" if ev_fd is None else "present",
+                "items": page, "total": len(ordered), "complete": complete,
+                "next_offset": offset + len(page) if offset + len(page) < len(ordered) else None,
+                "read_with": "rosc_evidence_read path=<path>", "note": self.NOTE}
+
+    def read(self, session: Session, row: ManagedRunState, path: object, offset: int, limit: int) -> dict:
+        if not isinstance(path, str) or "\x00" in path or "\\" in path or len(path) > 160:
+            raise EvidenceUnavailable("invalid_path", "path is a Run-relative evidence path such as evidence/T01.log")
+        parts = path.split("/")
+        if len(parts) != 2 or parts[0] != "evidence" or not _EVIDENCE_NAME.match(parts[1]) or parts[1] in (".", ".."):
+            raise EvidenceUnavailable("invalid_path", "path must be evidence/<file name> relative to the Run directory "
+                                      "(no host paths, '..' or sub-directories)")
+        claims = _evidence_claims(session, row.run_id).get(path, [])
+        run_fd, ev_fd = self._dirs(session, row)
+        try:
+            if ev_fd is None:
+                raise EvidenceUnavailable("not_found", "This Run has no evidence directory",
+                                          claimed_by_journal=bool(claims))
+            try:
+                data, after = _read_evidence_file(ev_fd, parts[1], MAX_EVIDENCE_FILE)
+            except EvidenceUnavailable as exc:
+                if exc.code == "not_found":
+                    exc.extra["claimed_by_journal"] = bool(claims)
+                raise
+        finally:
+            for fd in (ev_fd, run_fd):
+                if fd is not None:
+                    os.close(fd)
+        digest = _sha(data)
+        integrity = _integrity(claims, digest, len(data))
+        facts = {"run_id": row.run_id, "project_id": f"P{row.project_id:04d}", "task_id": f"T{row.task_id:04d}",
+                 "path": path, "sha256": digest, "bytes": len(data), "hard_linked": after.st_nlink > 1,
+                 "journal_claims": claims, "integrity": integrity}
+        if b"\x00" in data:
+            raise EvidenceUnavailable("not_text", "Binary evidence is not returned as text", **facts)
+        try:
+            text = data.decode("utf-8")
+        except UnicodeDecodeError:
+            raise EvidenceUnavailable("not_text", "Evidence is not valid UTF-8 text", **facts) from None
+        offset = max(0, min(offset, len(text)))
+        limit = max(1, min(limit, MAX_EVIDENCE_PAGE))
+        chunk = text[offset:offset + limit]
+        end = offset + len(chunk)
+        return {**facts, "offset": offset, "content": chunk, "returned_chars": len(chunk), "total_chars": len(text),
+                "next_offset": end if end < len(text) else None, "verified_by_rosc": False, "note": self.NOTE}
 
 
 def holding(state: str) -> bool:

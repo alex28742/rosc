@@ -1,4 +1,4 @@
-import { useEffect } from 'react';
+import { useEffect, useRef } from 'react';
 import { coreApi, type CoreApi } from '../core/api';
 import { useNavigation } from './navigation';
 import { resolvePresentation } from './presentation/registry';
@@ -40,6 +40,27 @@ export function App({ api = coreApi }: { api?: CoreApi }) {
   // P054B: the Task's managed Run (reads only; the one launch is an explicit button). A state change refreshes authoring.
   const taskRun = useTaskRun(api, route.kind === 'task' ? route.projectId : null,
     route.kind === 'task' ? route.taskId : null, taskAuthoring.onReload);
+  // P055 (QA-RUN-HANDOFF-UI-REFRESH): when THIS Task's Run read shows a handoff message the open Task Conversation does
+  // not have yet, re-read that conversation once per Run read (bounded: Run reads happen on open/focus/holding poll only).
+  const openTaskId = route.kind === 'task' ? route.taskId : null;
+  const runForTask = taskRun.run && taskRun.run.task_id === openTaskId ? taskRun.run : null;
+  const handoffId = runForTask?.progress?.handoff?.message_id ?? null;
+  const handoffKnown = handoffId === null || taskConversation.state.messages.some(m => m.message_id === handoffId);
+  const revalidateConversation = taskConversation.onRevalidate;
+  useEffect(() => {
+    if (handoffId && !handoffKnown && taskConversation.state.status === 'ready') revalidateConversation();
+  }, [handoffId, handoffKnown, runForTask?.checked_at, taskConversation.state.status, revalidateConversation]);
+  // P055 (QA-RUN-REVIEW-NEXT-STATE): a new message in the open Task Conversation (e.g. the Architect's reply after a
+  // Tool call such as rosc_review_submit) re-reads the Run once; a changed review then refreshes the next action.
+  const lastMessageId = taskConversation.state.messages.length
+    ? taskConversation.state.messages[taskConversation.state.messages.length - 1].message_id : null;
+  const seenMessage = useRef<{ task: string | null; id: string | null }>({ task: null, id: null });
+  const reloadRun = taskRun.onReload;
+  useEffect(() => {
+    const previous = seenMessage.current;
+    seenMessage.current = { task: openTaskId, id: lastMessageId };
+    if (previous.task === openTaskId && previous.id !== null && lastMessageId !== previous.id) reloadRun();
+  }, [openTaskId, lastMessageId, reloadRun]);
   // P047: Project-level Worker controls (read on open; only explicit buttons can start anything).
   const projectWorkers = useTaskWorkers(api, projectId, null);
   const taskLayerOpen = (route.kind === 'task' || route.kind === 'new-task') && project !== null;

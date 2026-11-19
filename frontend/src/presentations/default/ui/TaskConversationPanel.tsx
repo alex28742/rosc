@@ -4,7 +4,7 @@ import type { TaskConversationControls } from '../../../app/presentation/contrac
 import { architectReason, describeArchitect, describeTaskArchitect } from './architectView';
 import { findMatches, renderBody } from './chatSearch';
 import { ARCHITECT_CHIP, GroupActivityRow, GroupBar, GroupCatchupDialog, MessageAddress, RecipientChips, ReleaseOffers,
-  chipTargets, effectiveSelection, nameOf, routeSelection, senderName, typedAddressees, typedProblem as describeTyped } from './GroupConversation';
+  chipTargets, effectiveSelection, nameOf, routeSelection, runHandoffNote, senderName, typedAddressees, typedProblem as describeTyped } from './GroupConversation';
 
 /** Delivery wording is about the stored Owner message, never proof that the Architect answered. */
 const DELIVERY_TEXT: Record<string, string> = {
@@ -197,6 +197,7 @@ export function TaskConversationPanel({ taskId, conversation, collapsed, onColla
         const addressed = message.recipient === 'architect';
         const grouped = Boolean(message.group);
         const name = senderName(message, group.info);
+        const handoffNote = fromWorker ? runHandoffNote(group.info, message.message_id) : null;
         return <article key={message.message_id}
           className={fromArchitect ? 'rosc-chat-message rosc-chat-message--architect'
             : fromWorker ? 'rosc-chat-message rosc-chat-message--worker' : 'rosc-chat-message rosc-chat-message--owner'}
@@ -211,6 +212,7 @@ export function TaskConversationPanel({ taskId, conversation, collapsed, onColla
             </div>
             <p className="rosc-chat-body">{renderBody(message.body,
               matches.filter(match => match.messageId === message.message_id), currentId)}</p>
+            {handoffNote && <p className="rosc-chat-delivery" data-testid="run-handoff-note">{handoffNote}</p>}
             {!fromArchitect && !fromWorker && !grouped && (!delivery || delivery.state === 'not_sent') && <p className="rosc-chat-delivery">
               {addressed ? 'Сохранено · не отправлено Architect' : 'Сохранено'}
               {addressed && <button type="button" className="rosc-btn rosc-btn--small" disabled={!live}

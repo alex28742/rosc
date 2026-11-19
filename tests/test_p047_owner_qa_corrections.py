@@ -604,14 +604,14 @@ class WorkerIdentityTests(SessionCase):
         self.assertIn("does not have to match the directory basename", identity)
         self.assertIn("never run git init", identity)
         state = self.status()["bootstrap"]
+        # P055: an explicit identity-only acknowledgement is available (no files exist to read)
         self.assertEqual((state["identity"], state["reason"], state["can_bootstrap"]),
-                         ("provided_at_launch", "no_sources", False))
+                         ("provided_at_launch", "no_sources", True))
         for _ in range(3):  # UI reopen / polling / explicit check / re-activation of the verified session
             self.status()
             self.client.get("/api/projects/P0001/workers")
             self.activate()
-            self.client.post(self.url("session/bootstrap"))
-        self.assertEqual(self.tmux.sent, [])  # nothing typed into the TUI, no duplicated bootstrap
+        self.assertEqual(self.tmux.sent, [])  # nothing typed into the TUI without the explicit Owner action
         self.assertEqual(len(self.tmux.new_calls), 1)
 
     def test_pre_p047_session_gets_one_explicit_identity_only_introduction(self) -> None:

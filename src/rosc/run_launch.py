@@ -54,7 +54,8 @@ from .models import (ASSIGNMENT_ACTIVE, ATTRIBUTION_CLAIMED, LINK_UNLINKED, MANA
                      RUN_RUNNING, RUN_SUBMITTED, RUN_UNKNOWN, AgentDefinition, ExecutionPackage, ManagedRunEvent,
                      ManagedRunState, Project, ProjectIdentityError, PromptApproval, PromptRevision, RoleAssignment,
                      RunRecord, Task, TaskSpecRevision, WorkerSession, validate_project_identity)
-from .run_artifacts import ReportUnavailable, RunArtifactImporter
+from .run_artifacts import EvidenceUnavailable, ReportUnavailable, RunArtifactImporter, RunEvidenceReader
+from .run_review import review_state
 from .task_authoring import AuthoringError, TaskAuthoringService, prompt_digest, spec_digest
 from .worker_session import B_CONFIRMED, STATE_ACTIVE, STATE_NOT_ASSIGNED, SessionError, WorkerSessionService
 from .workspace import (READY, WorkspaceConflict, check_run_parents, create_run_directory, inspect_project, inspect_task,
@@ -338,6 +339,8 @@ class RunLaunchService:
             from .worker_conversation import WorkerConversationCore  # the P052 attribution/envelope layer
             handoff = WorkerConversationCore(session_factory, policy).post_run_handoff
         self.artifacts = RunArtifactImporter(session_factory, self._artifact_root, handoff=handoff)
+        # P055: read-only Architect Evidence access over the same validated Run directory (never writes anything).
+        self.evidence = RunEvidenceReader(self.artifacts._run_dir)  # noqa: SLF001 - same validated root resolution
 
     # -- guards ---------------------------------------------------------------------------------------------------------
     def _authorize(self, actor: object, action: str, **scope) -> None:
@@ -811,6 +814,17 @@ class RunLaunchService:
             raise ReportUnavailable("not_found")
         return self.artifacts.read_report(session, row, offset, limit)
 
+    def evidence_for_tool(self, session: Session, project_id: int, run_id: str, task_id: int | None, *,
+                          path: object = None, offset: int = 0, limit: int = 16000) -> dict:
+        """P055 seam for the Architect ``rosc_evidence_list``/``rosc_evidence_read`` Tools (caller verified by the broker).
+        The Run is named by its canonical id only; ``path`` is Run-relative (``evidence/<name>``), never a host path."""
+        row = session.get(ManagedRunState, run_id)
+        if row is None or row.project_id != project_id or (task_id is not None and row.task_id != task_id):
+            raise EvidenceUnavailable("not_found", "No such managed Run in the current Project")
+        if path is None:
+            return self.evidence.list(session, row, offset, limit)
+        return self.evidence.read(session, row, path, offset, limit)
+
     def _note(self, run_id: str, reason: str) -> None:
         with self._sessions() as session:
             try:
@@ -1124,6 +1138,7 @@ class RunLaunchService:
             snap = row_snapshot(run_id, self._sessions, session=session)
             derived, reason, evidence = self._evaluate(session, snap)
             progress = self.artifacts.progress(session, row)
+            review = review_state(session, run_id, derived)
             if snap["exec_intent_at"] is not None:
                 evidence = {**evidence, "exec_submitted": self._exec_submitted(snap)}
             history = [] if not events else [
@@ -1157,9 +1172,8 @@ class RunLaunchService:
                                                "progress": progress["progress"]},
             "progress": progress,
             "report": progress["report"] if progress else None,
-            "review": {"state": "awaiting_architect_review" if derived == RUN_REPORTED else "not_ready",
-                       "next_actor": "Architect" if derived == RUN_REPORTED else None,
-                       "note": "A reported Run is a Worker claim: not VERIFIED, not Owner ACCEPTED"},
+            # P055: derived ONLY from a recorded ``rosc_review_submit`` (never from chat text); the Run stays reported.
+            "review": review,
             "checked_at": _iso(_now()),
         }
         if events:

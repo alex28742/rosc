@@ -175,8 +175,12 @@ export type GroupStatus = {
   failed: GroupTurn[];
   members: GroupMember[];
   catchup: GroupCatchup | null;
+  /** P055: managed Run handoff service messages of this room (durable receipts) with their recorded review state. */
+  run_handoffs?: GroupRunHandoff[];
   driver: { running: boolean; last: { state: string; reason?: string; agent_id?: string | null; error_code?: string | null; at: string } | null };
 };
+export type GroupRunHandoff = { message_id: string; ordinal: number; run_id: string; addressed_to: string;
+  review_state: RunReviewState['state']; next_actor: string | null };
 export type GroupMessageInput = { client_key: string; body: string; to: string[] };
 
 /** Verified Project Architect runtime state. `ready` is reported by Core only after a fresh liveness probe. */
@@ -372,7 +376,8 @@ export type PromptRevision = {
   state: PromptState; actor: AuthoringActor; created_at: string; approval: PromptApprovalRecord | null; current?: boolean;
 };
 export type NextAction = {
-  action: 'none' | 'create_prompt' | 'review_prompt' | 'update_prompt' | 'authorize_run' | 'observe_run' | 'awaiting_review';
+  action: 'none' | 'create_prompt' | 'review_prompt' | 'update_prompt' | 'authorize_run' | 'observe_run' | 'awaiting_review'
+    | 'owner_decision' | 'review_changes_requested' | 'review_incomplete';
   label: string; enabled: boolean; next_actor: string; hint: string; secondary?: string;
 };
 export type TaskAuthoring = {
@@ -412,7 +417,19 @@ export type RunView = {
   created_at: string | null; acknowledged_at: string | null; checked_at: string | null;
   execution?: { intent_at: string | null; submitted_at: string | null; reported_at: string | null; outcome: RunOutcome | null };
   work_started: boolean; progress?: RunProgress | null; report: RunReportRef | null;
-  review?: { state: 'awaiting_architect_review' | 'not_ready'; next_actor: string | null; note: string };
+  review?: RunReviewState;
+};
+/** P055: a recorded Architect Review (only from the Architect's `rosc_review_submit` Tool; never from chat text). */
+export type RunReviewVerdict = 'review_passed' | 'changes_requested' | 'inconclusive';
+export type RunReview = {
+  review_id: string; run_id: string; task_id: string; version: number; supersedes_review_id: string | null;
+  verdict: RunReviewVerdict; summary: string; findings: string[]; limitations: string[];
+  continue_by: 'architect' | 'owner' | null; report_path: string; report_sha256: string;
+  architect: { agent_id: string; display_name: string | null }; recorded_at: string | null; source: string;
+};
+export type RunReviewState = {
+  state: 'awaiting_architect_review' | 'not_ready' | RunReviewVerdict; next_actor: string | null;
+  latest?: RunReview | null; note: string;
 };
 export type RunJournalEvent = { seq: number; event_id: string; type: string; step_id: string | null; plan_revision: number | null; at: string; data: Record<string, unknown>; imported_at: string | null };
 export type RunJournalPage = { run_id: string; events: RunJournalEvent[]; next_after: number | null; note: string };

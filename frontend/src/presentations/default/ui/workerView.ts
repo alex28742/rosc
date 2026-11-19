@@ -59,7 +59,8 @@ export function describeBootstrap(session: WorkerSession): BootstrapView {
     case 'stale': return { line: 'Файлы проекта изменились после подготовки: контекст нужно подготовить заново.', tone: 'warn', button: 'Подготовить контекст' };
     default:
       if (b.reason === 'identity_missing') return { line: 'Эта CLI-сессия запущена до P047 и не получила проверенные данные проекта ROSC (имя, ID, корень; Git не обязателен). Представьте проект один раз — без чтения файлов и изменений.', tone: 'warn', button: b.can_bootstrap ? 'Представить проект' : null };
-      if (b.reason === 'no_sources') return { line: 'В проекте не найден entry point (AGENTS.md, CLAUDE.md или docs entrypoint): читать нечего.', tone: 'neutral', button: null };
+      // P055: an empty new Project needs no documentation, only the Worker's native acknowledgement of the ROSC identity.
+      if (b.reason === 'no_sources') return { line: 'В проекте нет entry point (AGENTS.md, CLAUDE.md или docs entrypoint) — создавать их не нужно. Для формального Run Worker должен один раз подтвердить данные проекта ROSC (имя, ID, корень), без чтения файлов и изменений.', tone: 'warn', button: b.can_bootstrap ? 'Подтвердить данные проекта' : null };
       return { line: 'Контекст проекта не подготовлен. Отдельный набор правил Worker в ROSC не определён.', tone: 'neutral', button: b.can_bootstrap ? 'Подготовить контекст' : null };
   }
 }

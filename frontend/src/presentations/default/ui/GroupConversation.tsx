@@ -397,6 +397,19 @@ export function MessageAddress({ message, info, refPrefix }: { message: Conversa
   </>;
 }
 
+/** P055: the managed Run handoff is a SERVICE message (durable receipt): no discussion, no model call for it. */
+const HANDOFF_TEXT: Record<string, string> = {
+  awaiting_architect_review: 'Отчёт Worker получен — ожидает Architect Review',
+  review_passed: 'Отчёт Worker · Architect Review пройден (не VERIFIED, не принято Owner) — решение за Owner',
+  changes_requested: 'Отчёт Worker · Architect запросил изменения — нужно решение Owner',
+  inconclusive: 'Отчёт Worker · Review incomplete / needs evidence',
+};
+export function runHandoffNote(info: GroupStatus | null, messageId: string): string | null {
+  const handoff = info?.run_handoffs?.find(item => item.message_id === messageId);
+  if (!handoff) return null;
+  return `${HANDOFF_TEXT[handoff.review_state] ?? 'Отчёт Worker'} · служебное сообщение: обсуждение не открывалось, модель не вызывалась.`;
+}
+
 /** Display name for a message sender: the registered Agent name for Worker replies. */
 export function senderName(message: ConversationMessage, info: GroupStatus | null): string {
   if (message.sender.kind === 'worker') return message.sender.agent_display_name ?? nameOf(info, message.sender.agent_id);

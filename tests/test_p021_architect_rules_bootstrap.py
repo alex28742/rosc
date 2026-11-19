@@ -47,6 +47,8 @@ REFERENCE = ["autonomy", "research", "review", "communication", "run-checkpoints
 MANIFEST = "agents/architect/ruleset.yaml"
 P039_READ_TOOLS = ("task_list", "task_read", "task_create", "task_spec_read", "task_spec_save", "prompt_draft_read", "prompt_draft_save", "run_list", "run_read")
 P054B_READ_TOOLS = ("report_read",)  # P054B: one more read-only Tool (registered managed Run Report)
+# P055: two read-only Evidence Tools + the explicit Architect Review record (Owner-approved; no approval gate)
+P055_TOOLS = ("evidence_list", "evidence_read", "review_submit")
 PRE_P021_TOOLS = ("briefing", "global_list", "global_read", "docs_list", "docs_search", "docs_read", "docs_create",
                   "docs_update", "docs_delete", "docs_restore", "source_list", "source_read", "source_search", "source_git")
 
@@ -449,7 +451,7 @@ class ServiceRulesTests(p19.ContextCase):
         self.activate()
 
     def test_no_new_tool_and_unchanged_docs_privileges(self) -> None:
-        self.assertEqual(TOOL_NAMES, PRE_P021_TOOLS + P039_READ_TOOLS + P054B_READ_TOOLS)  # only read-only Tools appended
+        self.assertEqual(TOOL_NAMES, PRE_P021_TOOLS + P039_READ_TOOLS + P054B_READ_TOOLS + P055_TOOLS)  # only read-only Tools appended
         self.assertFalse([n for n in TOOL_NAMES if re.search(r"init|pipeline|handoff|approv|worker|rules", n)])
         session_id = self.activate()
         # generic docs_create/docs_update keep working exactly as before (no reserved-role dispatch exists in P021)
@@ -619,7 +621,7 @@ class PinnedGlobalReadTests(p19.ContextCase):
         listed = self.direct(session_id, "global_list")["result"]
         self.assertEqual([e["path"] for e in listed["entries"]], self.listed_definitions())
         self.assertNotIn("pinned_sha256", json.dumps(listed))  # listing is discovery, never endorsement
-        self.assertEqual(TOOL_NAMES, PRE_P021_TOOLS + P039_READ_TOOLS + P054B_READ_TOOLS)  # only read-only Tools appended
+        self.assertEqual(TOOL_NAMES, PRE_P021_TOOLS + P039_READ_TOOLS + P054B_READ_TOOLS + P055_TOOLS)  # only read-only Tools appended
         from rosc.project_context import ProjectContextBroker
         unbound = ProjectContextBroker(self.sessions, self.data / "workspace", self.lib)
         self.assertIsNone(unbound._rules_lookup)  # an ArchitectService without a loader never claims approved rules

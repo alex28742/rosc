@@ -657,7 +657,10 @@ export function useWorkspaceController({ route, routeKey, go }: Navigation, api:
     setChat(prev => prev.projectId !== id ? prev
       : { ...prev, conversationId: message.conversation_id, messages: mergeMessages(prev.messages, [message]) });
   }, []);
-  const group = useGroupConversation(api, projectId, null, reloadGroupMessages, mergeGroupMessage);
+  // P055: the PC composer's roster is revalidated when the verified Project Architect status changes.
+  const architectKey = architect.projectId === projectId && architect.info
+    ? `${architect.info.state}:${architect.info.agent?.agent_id ?? ''}:${architect.info.session?.session_id ?? ''}` : null;
+  const group = useGroupConversation(api, projectId, null, reloadGroupMessages, mergeGroupMessage, architectKey);
 
   // Effect order matters: the first one starts a new message epoch before the loaders capture it.
   useEffect(() => { epoch.current++; setError(''); setNotice(''); }, [routeKey]);

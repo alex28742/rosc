@@ -456,7 +456,8 @@ def create_app(db_path: Path | None = None, workspace_root: Path | None = None, 
         private_paths=(db_path.parent, *repo_private_paths()))
     context_broker = ProjectContextBroker(sessions, workspace_root, library_root,
                                         private_roots=(db_path.parent, db_path, *repo_private_paths()),
-                                        authoring=authoring, run_reports=run_launch.report_for_tool)
+                                        authoring=authoring, run_reports=run_launch.report_for_tool,
+                                        run_evidence=run_launch.evidence_for_tool)
     # P024: opt-in latency diagnostics (ROSC_ARCHITECT_LATENCY_TRACE); unset means DISABLED and zero output.  ``latency_trace``
     # is a Python-level test seam like the runtime; no request can enable or configure it.
     trace = latency_trace if latency_trace is not None else LatencyTrace.from_environment(db_path.parent)

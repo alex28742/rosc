@@ -23,7 +23,7 @@ const taskConversation = () => ({
   architect: { status: 'ready' as const, info: null },
   taskArchitect: { status: 'ready' as const, info: taskArchitectStatus(), busy: false },
   onActivateTaskArchitect: vi.fn(async () => null), onRefreshArchitect: vi.fn(),
-  onReload: vi.fn(), onLoadOlder: vi.fn(), onSend: vi.fn(async () => null), onSendToArchitect: vi.fn(async () => null),
+  onReload: vi.fn(), onRevalidate: vi.fn(), onLoadOlder: vi.fn(), onSend: vi.fn(async () => null), onSendToArchitect: vi.fn(async () => null),
   onReconcile: vi.fn(async () => null), onRetryDelivery: vi.fn(async () => null),
 });
 
