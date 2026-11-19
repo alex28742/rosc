@@ -84,7 +84,7 @@ class FreshRegistrationTests(IdentityCase):
 
     def test_single_migration_head(self) -> None:
         from alembic.script import ScriptDirectory
-        self.assertEqual(ScriptDirectory.from_config(self.alembic).get_heads(), ["0020_observable_worker_execution"])
+        self.assertEqual(ScriptDirectory.from_config(self.alembic).get_heads(), ["0022_task_lifecycle_owner_decision"])  # P055 added 0021; P056 added 0022
 
     def test_read_model_adds_identity_and_keeps_legacy_root_path(self) -> None:
         root = self.new_root()
@@ -114,8 +114,11 @@ class FreshRegistrationTests(IdentityCase):
         # P054B deliberately adds exactly these two read-only views of the imported Worker artifacts.
         p054b = {"/api/projects/{project_id}/runs/{run_id}/journal", "/api/projects/{project_id}/runs/{run_id}/report"}
         self.assertLessEqual(p054b, paths)
+        # P056 deliberately adds exactly this Owner-only decision route (records a decision; starts no Run or Worker).
+        p056 = {"/api/projects/{project_id}/tasks/{task_id}/runs/{run_id}/decision"}
+        self.assertLessEqual(p056, paths)
         for forbidden in ("binding", "rebind", "unlink", "archive", "run", "worker", "session", "runtime"):
-            self.assertFalse([path for path in paths - p042a - p054a - p054b if forbidden in path],
+            self.assertFalse([path for path in paths - p042a - p054a - p054b - p056 if forbidden in path],
                              (forbidden, sorted(paths)))
         self.assertIn("/api/projects/{project_id}/tasks", paths)
         self.assertIn("/api/agents", paths)

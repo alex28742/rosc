@@ -609,7 +609,7 @@ class MigrationTests(RegistryCase):
 
     def test_single_head_and_fresh_schema(self) -> None:
         from alembic.script import ScriptDirectory
-        self.assertEqual(ScriptDirectory.from_config(self.alembic).get_heads(), ["0020_observable_worker_execution"])
+        self.assertEqual(ScriptDirectory.from_config(self.alembic).get_heads(), ["0022_task_lifecycle_owner_decision"])  # P055 added 0021; P056 added 0022
         self.assertTrue({"agent_definitions", "agent_capabilities", "role_assignments", "assignment_capabilities"}
                         <= self.table_names())
 
