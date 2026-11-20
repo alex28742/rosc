@@ -1380,11 +1380,20 @@ EVENT_RUN_REPORTED = "run_reported"
 EVENT_REVIEW_SUBMITTED = "review_submitted"
 EVENT_TASK_ACCEPTED = "task_accepted"
 EVENT_TASK_REWORK = "task_rework_requested"
-PROJECT_EVENT_KINDS = (EVENT_RUN_REPORTED, EVENT_REVIEW_SUBMITTED, EVENT_TASK_ACCEPTED, EVENT_TASK_REWORK)
+# P060 (migration 0025): a Worker message published to the current Project Architect in a PC/TC room.  Its obligation
+# is a CHAT assessment (``rosc_message_ack``), never closable by the maintenance ACK and vice versa.
+EVENT_WORKER_MESSAGE = "worker_message"
+PROJECT_EVENT_KINDS = (EVENT_RUN_REPORTED, EVENT_REVIEW_SUBMITTED, EVENT_TASK_ACCEPTED, EVENT_TASK_REWORK,
+                       EVENT_WORKER_MESSAGE)
 EVENT_SOURCE_REPORT = "managed_run_report"
 EVENT_SOURCE_REVIEW = "managed_run_review"
 EVENT_SOURCE_DECISION = "task_owner_decision"
-PROJECT_EVENT_SOURCES = (EVENT_SOURCE_REPORT, EVENT_SOURCE_REVIEW, EVENT_SOURCE_DECISION)
+EVENT_SOURCE_MESSAGE = "conversation_message"
+PROJECT_EVENT_SOURCES = (EVENT_SOURCE_REPORT, EVENT_SOURCE_REVIEW, EVENT_SOURCE_DECISION, EVENT_SOURCE_MESSAGE)
+# P060: the sender's optional, advisory expectation (independent of next=continue|finish; grants nothing).
+EXPECT_INFORMATIONAL, EXPECT_REPLY, EXPECT_DECISION = "informational", "reply_requested", "decision_requested"
+EXPECT_UNSPECIFIED = "unspecified"
+MESSAGE_EXPECTATIONS = (EXPECT_INFORMATIONAL, EXPECT_REPLY, EXPECT_DECISION, EXPECT_UNSPECIFIED)
 OBLIGATION_PENDING, OBLIGATION_PROCESSING = "pending", "processing"
 OBLIGATION_COMPLETED, OBLIGATION_FAILED = "completed", "failed"
 OBLIGATION_STATES = (OBLIGATION_PENDING, OBLIGATION_PROCESSING, OBLIGATION_COMPLETED, OBLIGATION_FAILED)
@@ -1465,6 +1474,8 @@ class ArchitectMaintenanceWake(Base):
     detail: Mapped[str | None] = mapped_column(String(48), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
     settled_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    # P060: the PC/TC room whose native Architect session received a chat-assessment wake (NULL = P059 Project turn).
+    conversation_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
 
 
 class PipelineResource(Base):

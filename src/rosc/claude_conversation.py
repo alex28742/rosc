@@ -322,7 +322,10 @@ BREVITY = ("Write a brief, plain, task-focused chat message (about {guide} chara
 
 CONTROL_GUIDE = ("End your reply with exactly one last line: <rosc-control next=\"finish\"/> when you need nothing more "
                  "from the other Agent (ROSC then calls nobody), or <rosc-control next=\"continue\"/> when they should "
-                 "answer you. ROSC removes this line from the visible message; it never grants extra replies.")
+                 "answer you. When you address the Architect you may add expect=\"informational\", "
+                 "expect=\"reply_requested\" or expect=\"decision_requested\" to that same line (e.g. <rosc-control "
+                 "next=\"finish\" expect=\"informational\"/>) to say what you expect; it is advisory. ROSC removes this "
+                 "line from the visible message; it never grants extra replies.")
 
 
 _ROUND_OPENED = {

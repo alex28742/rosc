@@ -225,6 +225,7 @@ def group_metadata(session: Session, message_ids: list[str]) -> dict[str, dict]:
         parties.setdefault(party.message_id, {"to": [], "audience": []})[party.role].append(party.party_ref)
     # P052 r04: the continuation intent of an Agent turn's reply (``finish`` = explicit final answer), metadata only.
     intents: dict[str, str] = {}
+    expects: dict[str, str] = {}
     turn_ids = [e.turn_id for e in envelopes.values() if e.turn_id]
     if turn_ids:
         for turn_id, captured in session.execute(select(GroupTurn.turn_id, GroupTurn.captured_to).where(
@@ -234,6 +235,14 @@ def group_metadata(session: Session, message_ids: list[str]) -> dict[str, dict]:
             except ValueError:
                 value = None
             intents[turn_id] = value.get("next", "continue") if isinstance(value, dict) else "continue"
+            if isinstance(value, dict) and value.get("expect"):
+                expects[turn_id] = value["expect"]
+    # P060: the Core assessment state of Worker messages addressed to the Architect (absent = no obligation exists).
+    from .architect_maintenance import assessments_for  # local: keeps this read helper free of import cycles
+    try:
+        assessments = assessments_for(session, list(envelopes))
+    except OperationalError:
+        assessments = {}
     parents = [e.reply_to_message_id for e in envelopes.values() if e.reply_to_message_id]
     ordinals = {m.message_id: m.ordinal for m in session.scalars(select(ConversationMessage).where(
         ConversationMessage.message_id.in_(parents)))} if parents else {}
@@ -244,6 +253,9 @@ def group_metadata(session: Session, message_ids: list[str]) -> dict[str, dict]:
         "reply_to_ordinal": ordinals.get(envelope.reply_to_message_id) if envelope.reply_to_message_id else None,
         "round_id": envelope.round_id, "turn_id": envelope.turn_id, "sender_agent_id": envelope.sender_agent_id,
         "next": intents.get(envelope.turn_id) if envelope.turn_id else None,
+        "expectation": (assessments[message_id]["expectation"] if message_id in assessments
+                        else expects.get(envelope.turn_id) if envelope.turn_id else None),
+        "assessment": assessments.get(message_id),
     } for message_id, envelope in envelopes.items()}
 
 

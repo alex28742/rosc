@@ -34,11 +34,15 @@ from sqlalchemy import Integer, cast, func, select
 from sqlalchemy.orm import Session
 
 from .architect_store import ArchitectDocumentStore, DocumentNotFound, RevisionConflict
-from .models import (EVENT_REVIEW_SUBMITTED, EVENT_RUN_REPORTED, EVENT_SOURCE_DECISION, EVENT_SOURCE_REPORT,
-                     EVENT_SOURCE_REVIEW, EVENT_TASK_ACCEPTED, EVENT_TASK_REWORK, OBLIGATION_COMPLETED,
-                     OBLIGATION_FAILED, OBLIGATION_PENDING, OBLIGATION_PROCESSING, PIPELINE_ITEM_KINDS,
-                     PIPELINE_ITEM_STATUSES, ArchitectMaintenanceWake, ArchitectObligation, PipelineChange,
-                     PipelineItem, PipelineProposal, PipelineResource, ProjectEvent)
+from .models import (ASSIGNMENT_ACTIVE, CONVERSATION_KIND_TASK, EVENT_REVIEW_SUBMITTED, EVENT_RUN_REPORTED,
+                     EVENT_SOURCE_DECISION, EVENT_SOURCE_MESSAGE, EVENT_SOURCE_REPORT, EVENT_SOURCE_REVIEW,
+                     EVENT_TASK_ACCEPTED, EVENT_TASK_REWORK, EVENT_WORKER_MESSAGE, EXPECT_DECISION,
+                     EXPECT_INFORMATIONAL, EXPECT_REPLY, EXPECT_UNSPECIFIED, MESSAGE_EXPECTATIONS,
+                     OBLIGATION_COMPLETED, OBLIGATION_FAILED, OBLIGATION_PENDING, OBLIGATION_PROCESSING,
+                     PIPELINE_ITEM_KINDS, PIPELINE_ITEM_STATUSES, ROLE_ARCHITECT, ROUND_OPEN, TURN_ACCEPTED,
+                     TURN_REPLY_CAPTURED, TURN_SUBMITTED, ArchitectMaintenanceWake, ArchitectObligation, Conversation,
+                     ConversationMessage, ConversationParticipant, GroupRound, GroupTurn, MessageEnvelope,
+                     PipelineChange, PipelineItem, PipelineProposal, PipelineResource, ProjectEvent, RoleAssignment)
 
 log = logging.getLogger(__name__)
 
@@ -195,7 +199,8 @@ def emit_decision(session: Session, decision) -> None:
 
 
 # -- views ------------------------------------------------------------------------------------------------------------
-_READ_WITH = {EVENT_RUN_REPORTED: "rosc_run_read / rosc_report_read run_id",
+_READ_WITH = {EVENT_WORKER_MESSAGE: "rosc_message_ack (chat assessment; the message is in its PC/TC room)",
+              EVENT_RUN_REPORTED: "rosc_run_read / rosc_report_read run_id",
               EVENT_REVIEW_SUBMITTED: "rosc_run_read run_id (latest review)",
               EVENT_TASK_ACCEPTED: "rosc_task_read task_id",
               EVENT_TASK_REWORK: "rosc_task_read task_id"}
@@ -271,16 +276,21 @@ def latest_wake(session: Session, project_id: int) -> ArchitectMaintenanceWake |
                            .order_by(ArchitectMaintenanceWake.created_at.desc()).limit(1)).first()
 
 
-def wake_candidates(session: Session, project_id: int, session_id: str, *, owner_retry: bool) -> list[ArchitectObligation]:
+def wake_candidates(session: Session, project_id: int, session_id: str, *, owner_retry: bool,
+                    chat: bool = False) -> list[ArchitectObligation]:
     """Obligations a new wake of ``session_id`` may offer.
 
     Automatic (ready/event): only when some open obligation was never offered to THIS session -- a new session sees
     the backlog once, a later event wakes once more (re-listing older unacknowledged work in the same bounded turn),
     and a reply without ``ack`` never loops.  ``processing`` (an offered, unresolved turn) is never re-offered.  Owner
     retry: every pending/failed obligation."""
-    rows = list(session.scalars(select(ArchitectObligation).where(
+    rows = list(session.scalars(select(ArchitectObligation).join(
+        ProjectEvent, ProjectEvent.event_id == ArchitectObligation.event_id).where(
         ArchitectObligation.project_id == project_id,
+        (ProjectEvent.kind == EVENT_WORKER_MESSAGE) if chat else (ProjectEvent.kind != EVENT_WORKER_MESSAGE),
         ArchitectObligation.state.in_((OBLIGATION_PENDING, OBLIGATION_FAILED))).order_by(ArchitectObligation.event_seq)))
+    if chat:
+        rows = chat_ready(session, rows)
     if owner_retry:
         return rows
     offered = {w.wake_id: w.session_id for w in session.scalars(select(ArchitectMaintenanceWake).where(
@@ -351,6 +361,10 @@ def acknowledge(session: Session, store: ArchitectDocumentStore, *, project_id: 
         raise MaintenanceError("not_found", "No such obligation in the current Project")
     events = {e.event_id: e for e in session.scalars(select(ProjectEvent).where(
         ProjectEvent.event_id.in_([r.event_id for r in rows])))}
+    if any(e.kind == EVENT_WORKER_MESSAGE for e in events.values()):
+        session.rollback()  # P060: a chat assessment is recorded only by rosc_message_ack
+        raise MaintenanceError("wrong_obligation_type", "A Worker message obligation is assessed with "
+                               "rosc_message_ack, not rosc_maintenance_ack")
     # Shared evidence must post-date EVERY covered event: freshness is judged against the LATEST one in the batch.
     latest = max(_aware(events[r.event_id].created_at) for r in rows)
     batch_events = {r.event_id for r in rows}
@@ -433,6 +447,293 @@ def acknowledge(session: Session, store: ArchitectDocumentStore, *, project_id: 
     session.commit()
     return {"recorded": True, "replayed": False, "completed": [r.obligation_id for r in rows],
             "outcome": stored, "processed_cursor": processed_cursor(session, project_id)}
+
+
+# -- P060: guaranteed Architect assessment of Worker messages addressed to the Architect ---------------------------------
+# ``published Worker message (typed to = current Architect) -> worker_message event + chat obligation (same transaction)
+# -> the Architect's ordinary group turn OR, once the round has stopped, one bounded wake in the SAME PC/TC native
+# session -> rosc_message_ack (no_reply_needed | replied | escalated) -> Core checks scope, type and allowed outcome``.
+# Delivery, a cursor or a plain provider reply never completes it.  The expectation is advisory and grants nothing.
+MESSAGE_OUTCOMES = ("no_reply_needed", "replied", "escalated")
+ESCALATION_REASONS = ("no_reply_permission", "owner_decision_required", "out_of_scope", "other")
+MAX_RATIONALE = 1000
+MAX_WAKE_BODY = 1500
+_ALLOWED = {EXPECT_INFORMATIONAL: set(MESSAGE_OUTCOMES), EXPECT_UNSPECIFIED: set(MESSAGE_OUTCOMES),
+            EXPECT_REPLY: {"replied", "escalated"}, EXPECT_DECISION: {"replied", "escalated"}}
+_MESSAGE_SCHEMA: dict[int, bool] = {}
+
+
+def message_schema_ready(session: Session) -> bool:
+    """Whether migration 0025 is applied (the room column on wakes is its marker; checked once per engine)."""
+    key = id(session.get_bind())
+    known = _MESSAGE_SCHEMA.get(key)
+    if known is None:
+        known = schema_ready(session) and any(
+            row[1] == "conversation_id" for row in session.connection().exec_driver_sql(
+                "PRAGMA table_info(architect_maintenance_wakes)"))
+        _MESSAGE_SCHEMA[key] = known
+    return known
+
+
+def current_architect(session: Session, project_id: int) -> str | None:
+    row = session.scalars(select(RoleAssignment).where(
+        RoleAssignment.project_id == project_id, RoleAssignment.role == ROLE_ARCHITECT,
+        RoleAssignment.state == ASSIGNMENT_ACTIVE)).first()
+    return row.agent_id if row is not None else None
+
+
+def emit_worker_message(session: Session, *, room: Conversation, message: ConversationMessage, sender_agent_id: str,
+                        to_refs: list[str], intent: str, expectation: str | None) -> ProjectEvent | None:
+    """Caller's publish transaction: ONE event + chat obligation when a Worker message's trusted typed ``to`` names
+    the current Project Architect (a ``@name`` in the body is not the authority; ``to`` is)."""
+    if not message_schema_ready(session):
+        return None
+    architect = current_architect(session, room.project_id)
+    if architect is None or architect not in to_refs or architect == sender_agent_id:
+        return None
+    expectation = expectation if expectation in MESSAGE_EXPECTATIONS else EXPECT_UNSPECIFIED
+    return emit(session, project_id=room.project_id, kind=EVENT_WORKER_MESSAGE, source_kind=EVENT_SOURCE_MESSAGE,
+                source_id=message.message_id, task_id=room.task_id,
+                facts={"conversation_id": room.conversation_id, "room": room.kind, "ordinal": message.ordinal,
+                       "sender_agent_id": sender_agent_id, "architect_agent_id": architect,
+                       "expectation": expectation, "next": intent},
+                when=message.created_at)
+
+
+def _facts(event: ProjectEvent) -> dict:
+    return json.loads(event.facts or "{}")
+
+
+def _pending_reply(row: ArchitectObligation) -> dict | None:
+    """A ``replied`` ACK recorded DURING the Architect's own group turn waits for that turn's publication."""
+    if row.state == OBLIGATION_COMPLETED or not row.outcome:
+        return None
+    value = json.loads(row.outcome)
+    return value if isinstance(value, dict) and value.get("pending_reply_turn_id") else None
+
+
+def _holding_architect_turn(session: Session, conversation_id: str, agent_id: str, through: int) -> GroupTurn | None:
+    return session.scalars(select(GroupTurn).where(
+        GroupTurn.conversation_id == conversation_id, GroupTurn.agent_id == agent_id,
+        GroupTurn.state.in_((TURN_SUBMITTED, TURN_ACCEPTED, TURN_REPLY_CAPTURED)),
+        GroupTurn.input_through_ordinal >= through)).first()
+
+
+def chat_ready(session: Session, rows: list[ArchitectObligation]) -> list[ArchitectObligation]:
+    """Chat obligations a separate wake may offer now: never while the room's round is still running (the Architect
+    may still get its ordinary group turn there, which can ACK first) and never over a ``replied`` ACK whose own turn
+    is still in flight."""
+    ready = []
+    events = {e.event_id: e for e in session.scalars(select(ProjectEvent).where(
+        ProjectEvent.event_id.in_([r.event_id for r in rows])))} if rows else {}
+    for row in rows:
+        facts = _facts(events[row.event_id])
+        room = facts.get("conversation_id")
+        running = session.scalars(select(GroupRound).where(GroupRound.conversation_id == room,
+                                                           GroupRound.state == ROUND_OPEN)).first()
+        if running is not None:
+            continue
+        pending = _pending_reply(row)
+        if pending is not None:
+            turn = session.get(GroupTurn, pending["pending_reply_turn_id"])
+            if turn is not None and turn.state in (TURN_SUBMITTED, TURN_ACCEPTED, TURN_REPLY_CAPTURED):
+                continue
+        ready.append(row)
+    return ready
+
+
+def room_of(session: Session, row: ArchitectObligation) -> str | None:
+    event = session.get(ProjectEvent, row.event_id)
+    return _facts(event).get("conversation_id") if event is not None else None
+
+
+def open_room_obligations(session: Session, conversation_id: str, through: int) -> list[tuple[ArchitectObligation, dict]]:
+    """Open chat obligations of one room whose message is within an input snapshot (for the group-turn note)."""
+    if not message_schema_ready(session):
+        return []
+    out = []
+    for row, event in session.execute(select(ArchitectObligation, ProjectEvent).join(
+            ProjectEvent, ProjectEvent.event_id == ArchitectObligation.event_id).where(
+            ProjectEvent.kind == EVENT_WORKER_MESSAGE,
+            ArchitectObligation.state != OBLIGATION_COMPLETED).order_by(ArchitectObligation.event_seq)):
+        facts = _facts(event)
+        if facts.get("conversation_id") == conversation_id and int(facts.get("ordinal") or 0) <= through \
+                and _pending_reply(row) is None:
+            out.append((row, facts))
+    return out
+
+
+def group_turn_note(items: list[tuple[ArchitectObligation, dict]], names: dict[str, str]) -> str:
+    lines = [f"- #{f.get('ordinal')} from @{names.get(f.get('sender_agent_id'), 'Worker')}: expectation="
+             f"{f.get('expectation')}, next={f.get('next')}, obligation_id={o.obligation_id}" for o, f in items]
+    return ("\n\nROSC ASSESSMENT (trusted Core note): these Worker messages addressed to you await your assessment:\n"
+            + "\n".join(lines) + "\nAfter deciding, record each with rosc_message_ack: outcome=replied (this reply is "
+            "bound when ROSC publishes it), no_reply_needed (only when nothing was requested) or escalated with "
+            "escalation_reason. The expectation grants no extra replies, Runs or approvals.")
+
+
+def message_wake_text(room_label: str, items: list[ArchitectObligation], events: dict[str, ProjectEvent],
+                      bodies: dict[str, str], names: dict[str, str]) -> str:
+    lines = []
+    for row in items:
+        event = events[row.event_id]
+        facts = _facts(event)
+        body = bodies.get(event.source_id, "")
+        excerpt = body[:MAX_WAKE_BODY] + (" [...]" if len(body) > MAX_WAKE_BODY else "")
+        lines.append(f"- message #{facts.get('ordinal')} (message_id={event.source_id}) from "
+                     f"@{names.get(facts.get('sender_agent_id'), 'Worker')}: expectation={facts.get('expectation')}, "
+                     f"next={facts.get('next')}, obligation_id={row.obligation_id}\n"
+                     f"  untrusted body: {json.dumps(excerpt, ensure_ascii=False)}")
+    return ("[ROSC message assessment] Core housekeeping turn in " + room_label + ", not an Owner request and not a "
+            "group turn. A Worker addressed you and the discussion stopped before you assessed it:\n"
+            + "\n".join(lines) + "\n"
+            "Assess each message and record it with rosc_message_ack (obligation_id, outcome, rationale). "
+            "informational/unspecified: no_reply_needed is fine when nothing is asked. reply_requested or "
+            "decision_requested: nothing you write in THIS turn reaches the room; outcome=replied needs reply_message_id "
+            "of your already published reply after it, otherwise record escalated with escalation_reason="
+            "no_reply_permission (or owner_decision_required for a decision beyond the approved scope); the Owner "
+            "decides on a new discussion. Do not start Runs, approve anything or edit Prompts. Reply with one short "
+            "line when done.")
+
+
+def acknowledge_message(session: Session, *, project_id: int, agent_id: str, session_id: str, args: dict) -> dict:
+    """Record the Architect's assessment of ONE Worker message obligation (idempotent; completion is never replaced)."""
+    oid = args.get("obligation_id")
+    if not isinstance(oid, str) or not _UUID.match(oid):
+        raise MaintenanceError("invalid_argument", "obligation_id must name one obligation")
+    outcome = args.get("outcome")
+    if outcome not in MESSAGE_OUTCOMES:
+        raise MaintenanceError("invalid_argument", "outcome must be one of " + ", ".join(MESSAGE_OUTCOMES))
+    rationale = _text(args.get("rationale"), "rationale", MAX_RATIONALE, minimum=MIN_REASON)
+    reason = args.get("escalation_reason")
+    reply_id = args.get("reply_message_id")
+    if outcome == "escalated":
+        if reason not in ESCALATION_REASONS:
+            raise MaintenanceError("invalid_argument", "escalated needs escalation_reason: " + ", ".join(ESCALATION_REASONS))
+    elif reason is not None:
+        raise MaintenanceError("invalid_argument", "escalation_reason belongs to outcome=escalated")
+    if reply_id is not None and (outcome != "replied" or not isinstance(reply_id, str) or not _UUID.match(reply_id)):
+        raise MaintenanceError("invalid_argument", "reply_message_id names your published reply (outcome=replied)")
+
+    session.connection().exec_driver_sql("BEGIN IMMEDIATE")
+    row = session.get(ArchitectObligation, oid)
+    event = session.get(ProjectEvent, row.event_id) if row is not None else None
+    if row is None or event is None or row.project_id != project_id:
+        session.rollback()
+        raise MaintenanceError("not_found", "No such obligation in the current Project")
+    if event.kind != EVENT_WORKER_MESSAGE:
+        session.rollback()
+        raise MaintenanceError("wrong_obligation_type", "This is a maintenance obligation; use rosc_maintenance_ack")
+    facts = _facts(event)
+    if facts.get("architect_agent_id") != agent_id or current_architect(session, project_id) != agent_id:
+        session.rollback()
+        raise MaintenanceError("not_addressee", "Only the Project Architect the message was addressed to assesses it")
+    expectation = facts.get("expectation") or EXPECT_UNSPECIFIED
+    if outcome not in _ALLOWED.get(expectation, set(MESSAGE_OUTCOMES)):
+        session.rollback()
+        raise MaintenanceError("outcome_not_allowed", f"expectation={expectation} needs replied or escalated "
+                               "(escalation_reason=no_reply_permission when no permitted reply exists)")
+    record: dict = {"kind": "message_assessment", "message_id": event.source_id, "outcome": outcome,
+                    "rationale": rationale, "expectation": expectation}
+    pending_turn: str | None = None
+    if outcome == "escalated":
+        record.update(escalation_reason=reason, next_actor="Owner")
+    elif outcome == "replied":
+        source = session.get(ConversationMessage, event.source_id)
+        if reply_id is not None:
+            reply = session.get(ConversationMessage, reply_id)
+            envelope = session.get(MessageEnvelope, reply_id) if reply is not None else None
+            sender = session.get(ConversationParticipant, reply.sender_participant_id) if reply is not None else None
+            by_architect = (envelope is not None and envelope.sender_agent_id == agent_id) or (
+                sender is not None and sender.agent_id == agent_id and sender.kind == ROLE_ARCHITECT)
+            if (reply is None or source is None or reply.conversation_id != source.conversation_id
+                    or reply.ordinal <= source.ordinal or not by_architect):
+                session.rollback()
+                raise MaintenanceError("reply_not_found", "reply_message_id must be YOUR published reply after that "
+                                       "message in the same room")
+            record.update(reply_message_id=reply_id, reply_ordinal=reply.ordinal)
+        else:
+            turn = _holding_architect_turn(session, facts.get("conversation_id"), agent_id, int(facts.get("ordinal") or 0))
+            if turn is None:
+                session.rollback()
+                raise MaintenanceError("reply_not_found", "No published or in-flight reply of yours answers that "
+                                       "message; outcome=replied needs reply_message_id (else escalate)")
+            pending_turn = turn.turn_id
+    digest = _outcome_digest({k: record[k] for k in sorted(record) if k not in ("reply_message_id", "reply_ordinal")})
+    if row.state == OBLIGATION_COMPLETED or _pending_reply(row) is not None:
+        prior = json.loads(row.outcome)
+        same = _outcome_digest({k: prior.get(k) for k in sorted(record) if k not in ("reply_message_id",
+                                                                                     "reply_ordinal")}) == digest
+        session.rollback()
+        if same:
+            return {"recorded": False, "replayed": True, "obligation_id": oid, "state": row.state,
+                    "outcome": prior}
+        raise MaintenanceError("already_completed", "This obligation already has a different assessment; it is "
+                               "never replaced")
+    now = _now()
+    by = {"agent_id": agent_id, "session_id": session_id}
+    if pending_turn is not None:
+        row.outcome = json.dumps({**record, "pending_reply_turn_id": pending_turn, "by": by,
+                                  "recorded_at": _iso(now)}, ensure_ascii=False)
+        row.last_error, row.updated_at = None, now
+        session.commit()
+        return {"recorded": True, "replayed": False, "obligation_id": oid, "state": "awaiting_reply_publication",
+                "note": "Bound to your current reply; completed when ROSC publishes it."}
+    stored = {**record, "by": by, "verified_at": _iso(now)}
+    row.state, row.outcome, row.last_error = OBLIGATION_COMPLETED, json.dumps(stored, ensure_ascii=False), None
+    row.completed_agent_id, row.completed_session_id, row.completed_at, row.updated_at = agent_id, session_id, now, now
+    session.commit()
+    return {"recorded": True, "replayed": False, "obligation_id": oid, "state": OBLIGATION_COMPLETED,
+            "outcome": stored}
+
+
+def bind_published_reply(session: Session, turn: GroupTurn, message: ConversationMessage) -> None:
+    """Caller's publish transaction: complete every ``replied`` ACK that waited for THIS Architect turn's message."""
+    if not message_schema_ready(session):
+        return
+    now = _now()
+    for row in session.scalars(select(ArchitectObligation).where(
+            ArchitectObligation.project_id == session.get(Conversation, turn.conversation_id).project_id,
+            ArchitectObligation.state != OBLIGATION_COMPLETED, ArchitectObligation.outcome.is_not(None))):
+        pending = _pending_reply(row)
+        if pending is None or pending.get("pending_reply_turn_id") != turn.turn_id:
+            continue
+        stored = {k: v for k, v in pending.items() if k not in ("pending_reply_turn_id", "recorded_at")}
+        stored.update(reply_message_id=message.message_id, reply_ordinal=message.ordinal, verified_at=_iso(now))
+        row.state, row.outcome, row.last_error = OBLIGATION_COMPLETED, json.dumps(stored, ensure_ascii=False), None
+        row.completed_agent_id = (stored.get("by") or {}).get("agent_id")
+        row.completed_session_id = (stored.get("by") or {}).get("session_id")
+        row.completed_at, row.updated_at = now, now
+
+
+def assessments_for(session: Session, message_ids: list[str]) -> dict[str, dict]:
+    """Owner read model per message id: Core facts only (no event = no assessment shown, never a false 'assessed')."""
+    if not message_ids or not message_schema_ready(session):
+        return {}
+    out: dict[str, dict] = {}
+    rows = session.execute(select(ProjectEvent, ArchitectObligation).join(
+        ArchitectObligation, ArchitectObligation.event_id == ProjectEvent.event_id).where(
+        ProjectEvent.source_kind == EVENT_SOURCE_MESSAGE, ProjectEvent.source_id.in_(message_ids))).all()
+    for event, row in rows:
+        facts = _facts(event)
+        outcome = json.loads(row.outcome) if row.outcome else {}
+        if row.state == OBLIGATION_COMPLETED:
+            state = "owner_action" if outcome.get("outcome") == "escalated" else "assessed"
+        elif row.state == OBLIGATION_PROCESSING or _pending_reply(row) is not None:
+            state = "assessing"
+        elif row.state == OBLIGATION_FAILED:
+            state = "error"
+        else:
+            state = "awaiting"
+        out[event.source_id] = {
+            "state": state, "obligation_id": row.obligation_id, "expectation": facts.get("expectation"),
+            "outcome": outcome.get("outcome") if row.state == OBLIGATION_COMPLETED else None,
+            "escalation_reason": outcome.get("escalation_reason") if row.state == OBLIGATION_COMPLETED else None,
+            "next_actor": outcome.get("next_actor") if row.state == OBLIGATION_COMPLETED else (
+                None if state != "error" else "Owner"),
+            "reply_message_id": outcome.get("reply_message_id"), "reply_ordinal": outcome.get("reply_ordinal"),
+            "error": row.last_error, "offer_count": row.offer_count, "completed_at": _iso(row.completed_at)}
+    return out
 
 
 # -- P0-B: Handoff section document -------------------------------------------------------------------------------------

@@ -29,7 +29,7 @@ OWNED_TABLES = ("conversations", "conversation_participants", "conversation_mess
 LEGACY_TABLES = ("projects", "project_root_bindings", "tasks", "agent_definitions", "agent_capabilities",
                  "role_assignments", "assignment_capabilities", "run_records", "run_agent_links", "report_records",
                  "evidence_records")
-HEAD = "0024_architect_context_maintenance"  # P059 added 0024; P058 added 0023; P056 added 0022; P055 0021; P054B 0020; P054A added 0019; P053 added 0018; P052 r05 added 0017; P029 added 0009; P019 added 0008; P018 added 0007; P015 added 0006; P014 tables are created by 0005
+HEAD = "0025_worker_message_assessment"  # P060 added 0025; P059 added 0024; P058 added 0023; P056 added 0022; P055 0021; P054B 0020; P054A added 0019; P053 added 0018; P052 r05 added 0017; P029 added 0009; P019 added 0008; P018 added 0007; P015 added 0006; P014 tables are created by 0005
 
 
 P058_ADDITIVE = {"projects": {"last_task_number"}, "tasks": {"project_number"}}  # 0023 additive columns

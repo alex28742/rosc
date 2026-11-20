@@ -157,7 +157,8 @@ TOOLS: list[dict] = [
                             ["run_id", "verdict", "summary", "report_sha256"])},
     # P059: maintenance obligations (Core events awaiting YOUR assessment), typed Handoff and the Core-owned Pipeline
     {"name": "maintenance_pending", "description": "List the open maintenance obligations of the current Project: one "
-     "per consequential Core event (run_reported, review_submitted, task_accepted, task_rework_requested) with exact "
+     "per consequential Core event (run_reported, review_submitted, task_accepted, task_rework_requested; "
+     "worker_message ones are assessed with rosc_message_ack) with exact "
      "source refs, oldest first, paged by cursor. Also shows Handoff/Pipeline revisions. Reading completes nothing.",
      "inputSchema": _schema({"limit": {"type": "integer", "minimum": 1}, "cursor": {"type": "integer", "minimum": 0},
                              "include_completed": {"type": "boolean"}})},
@@ -174,6 +175,21 @@ TOOLS: list[dict] = [
                              "adr_doc_id": {"type": "string"}, "adr_revision": {"type": "integer", "minimum": 1},
                              "adr_not_needed_reason": {"type": "string"}},
                             ["obligation_ids", "assessment"])},
+    # P060: assessment of a Worker message addressed to you (a separate obligation type from maintenance)
+    {"name": "message_ack", "description": "Record YOUR assessment of one Worker message addressed to you (its "
+     "obligation_id comes from the ROSC assessment note or rosc_maintenance_pending, kind worker_message). outcome: "
+     "no_reply_needed (only when nothing was requested), replied (reply_message_id of your published reply after it; "
+     "omit it during your own group turn and ROSC binds the reply it publishes) or escalated with escalation_reason "
+     "(no_reply_permission, owner_decision_required, out_of_scope, other) for the Owner. reply_requested / "
+     "decision_requested allow only replied or escalated. It grants no reply, Run or approval; a repeat is idempotent "
+     "and a recorded assessment is never replaced.",
+     "inputSchema": _schema({"obligation_id": {"type": "string"},
+                             "outcome": {"type": "string", "enum": ["no_reply_needed", "replied", "escalated"]},
+                             "rationale": {"type": "string"}, "reply_message_id": {"type": "string"},
+                             "escalation_reason": {"type": "string", "enum": ["no_reply_permission",
+                                                                              "owner_decision_required",
+                                                                              "out_of_scope", "other"]}},
+                            ["obligation_id", "outcome", "rationale"])},
     {"name": "handoff_get_snapshot", "description": "Compact snapshot of the Project's working Handoff (revision, "
      "sections with sizes, current focus / next action / blockers / pending Owner decisions). since_revision marks "
      "the sections changed after that revision. exists=false when no Handoff was initialized.",

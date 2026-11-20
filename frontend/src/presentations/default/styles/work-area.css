@@ -3855,6 +3855,13 @@
   font-weight: 500;
 }
 
+/* P060: Core assessment of a Worker -> Architect message (state comes only from Core). */
+.rosc-chat-assessment--awaiting,
+.rosc-chat-assessment--assessing { color: var(--rosc-muted); }
+.rosc-chat-assessment--assessed { color: var(--rosc-green); }
+.rosc-chat-assessment--owner_action { color: var(--rosc-amber); font-weight: 600; }
+.rosc-chat-assessment--error { color: var(--rosc-red); font-weight: 600; }
+
 .rosc-chat-ref {
   min-height: 20px;
   padding: 0 4px;

@@ -61,6 +61,7 @@ from .conversation import (ConversationConflict, ConversationDenied, Conversatio
                            InvalidConversationInput, UnsafeProjectIdentity, _architect_body, _body, _client_key)
 from .conversation_trace import ConversationTrace
 from .mentions import find_mentions
+from . import architect_maintenance as maintenance
 from .task_lifecycle import activate_for_conversation
 from .models import (ASSIGNMENT_ACTIVE, CONVERSATION_KIND_PROJECT, CONVERSATION_KIND_TASK, GAP_OWNER_SKIP,
                      GAP_RELEASED_PERIOD, LANE_ACTIVE, LANE_INVALIDATED, MEMBER_ACTIVE, MEMBER_PASSIVE,
@@ -113,6 +114,10 @@ CONTROL_EXPLICIT, CONTROL_ABSENT, CONTROL_INVALID = "explicit", "absent", "inval
 _CONTROL_LINE = re.compile(r"^\s*<\s*rosc-control\b(?P<attrs>[^<>]*?)/?\s*>\s*$", re.IGNORECASE)
 _CONTROL_NEXT = re.compile(r'^\s*next\s*=\s*"(?P<next>continue|finish)"\s*$', re.IGNORECASE)
 _CONTROL_PREFIX = re.compile(r"^\s*<\s*/?\s*rosc-control\b", re.IGNORECASE)
+# P060: an optional advisory ``expect="informational|reply_requested|decision_requested"`` in the SAME control line.
+# It is independent of ``next`` (never changes continuation) and grants nothing.
+_CONTROL_ATTR = re.compile(r'\s*([a-z_]+)\s*=\s*"([^"]*)"', re.IGNORECASE)
+EXPECTATIONS = ("informational", "reply_requested", "decision_requested")
 
 
 class ReplyControl(NamedTuple):
@@ -121,23 +126,50 @@ class ReplyControl(NamedTuple):
     source: str  # explicit | absent | invalid
 
 
+def _control_attrs(attrs: str) -> dict[str, str] | None:
+    """``next="..." [expect="..."]`` in any order, each at most once; anything else is malformed (None)."""
+    found: dict[str, str] = {}
+    position = 0
+    for match in _CONTROL_ATTR.finditer(attrs):
+        if attrs[position:match.start()].strip():
+            return None
+        key = match.group(1).lower()
+        if key in found or key not in ("next", "expect"):
+            return None
+        found[key] = match.group(2).strip().lower()
+        position = match.end()
+    if attrs[position:].strip():
+        return None
+    return found
+
+
 def parse_reply_control(text: str) -> ReplyControl:
     """Split the trailing ROSC control line off a provider reply (see the constants above).  Only the last non-empty
     line is considered, so a control-like line quoted earlier in a message is ordinary content."""
+    return _parse_control(text)[0]
+
+
+def parse_reply_expectation(text: str) -> str | None:
+    """P060: the advisory ``expect`` of a valid trailing control line (None = unspecified, absent or malformed)."""
+    return _parse_control(text)[1]
+
+
+def _parse_control(text: str) -> tuple[ReplyControl, str | None]:
     if not isinstance(text, str):
-        return ReplyControl(text, INTENT_CONTINUE, CONTROL_ABSENT)  # type: ignore[arg-type]
+        return ReplyControl(text, INTENT_CONTINUE, CONTROL_ABSENT), None  # type: ignore[arg-type]
     lines = text.rstrip().split("\n")
     last = lines[-1] if lines else ""
     if not _CONTROL_PREFIX.match(last):
-        return ReplyControl(text, INTENT_CONTINUE, CONTROL_ABSENT)
+        return ReplyControl(text, INTENT_CONTINUE, CONTROL_ABSENT), None
     body = "\n".join(lines[:-1]).rstrip()
     match = _CONTROL_LINE.match(last)
-    nxt = _CONTROL_NEXT.match(match.group("attrs")) if match else None
+    attrs = _control_attrs(match.group("attrs")) if match else None
     if not body.strip():
-        return ReplyControl(text, INTENT_FINISH, CONTROL_INVALID)  # nothing visible would remain: keep the text
-    if nxt is None:
-        return ReplyControl(body, INTENT_FINISH, CONTROL_INVALID)
-    return ReplyControl(body, nxt.group("next").lower(), CONTROL_EXPLICIT)
+        return ReplyControl(text, INTENT_FINISH, CONTROL_INVALID), None  # nothing visible would remain: keep the text
+    if (attrs is None or attrs.get("next") not in (INTENT_CONTINUE, INTENT_FINISH)
+            or attrs.get("expect", EXPECTATIONS[0]) not in EXPECTATIONS):
+        return ReplyControl(body, INTENT_FINISH, CONTROL_INVALID), None
+    return ReplyControl(body, attrs["next"], CONTROL_EXPLICIT), attrs.get("expect")
 
 
 def _now() -> datetime:
@@ -1135,6 +1167,14 @@ class WorkerConversationCore:
             return value, INTENT_CONTINUE, CONTROL_ABSENT
         return list(value.get("to") or []), value.get("next") or INTENT_CONTINUE, value.get("source") or CONTROL_ABSENT
 
+    @staticmethod
+    def _captured_expect(turn: GroupTurn | None) -> str | None:
+        """P060: the sender's advisory expectation of a captured reply (None = unspecified / legacy)."""
+        if turn is None or not turn.captured_to:
+            return None
+        value = json.loads(turn.captured_to)
+        return value.get("expect") if isinstance(value, dict) else None
+
     def message_intent(self, session: Session, message_id: str, turn_id: str | None = None) -> str:
         """Continuation intent of a published Agent message (a bridged legacy Architect reply has no turn: continue)."""
         if turn_id is None:
@@ -1990,7 +2030,7 @@ class WorkerConversationCore:
         adapter ``to``, else the resolved ``@names`` of the text (a redirect), else the REQUESTER (the trigger's sender;
         the Owner for an Owner-authorized request).  The Owner's constant presence never implies ``to=Owner``.
         ``intent`` = continue | finish, from the adapter or the reply's trailing control line (removed from the body)."""
-        control = parse_reply_control(_architect_body(text))
+        control, expect = _parse_control(_architect_body(text))
         body = _architect_body(control.body)
         next_intent, source = control.intent, control.source
         if intent is not None:
@@ -2019,7 +2059,10 @@ class WorkerConversationCore:
                     parent_id = None  # a trigger the frozen input did not contain is never claimed as answered
             refs, to_source = self._reply_targets(session, turn, to, body, trigger=parent_id, with_source=True)
             turn.captured_reply = body
-            turn.captured_to = json.dumps({"to": refs, "next": next_intent, "source": source})
+            captured = {"to": refs, "next": next_intent, "source": source}
+            if expect is not None:
+                captured["expect"] = expect  # P060: advisory metadata, never part of the visible body
+            turn.captured_to = json.dumps(captured)
             turn.captured_reply_to, turn.state, turn.updated_at = parent_id, TURN_REPLY_CAPTURED, _now()
             self._note(session, "reply_captured", turn.conversation_id, turn_id=turn.turn_id, round_id=turn.round_id,
                        agent_id=turn.agent_id, to=refs, to_source=to_source, reply_to_id=parent_id,
@@ -2152,6 +2195,15 @@ class WorkerConversationCore:
             self._write_parties(session, message.message_id, turn.conversation_id, refs)
             turn.state, turn.reply_message_id, turn.updated_at = TURN_PUBLISHED, message.message_id, _now()
             session.flush()
+            # P060: in this SAME transaction -- a Worker message to the current Architect creates its assessment
+            # obligation (once per message); an Architect reply completes a ``replied`` ACK bound to this turn.
+            room = session.get(Conversation, turn.conversation_id)
+            if member.role == ROLE_WORKER:  # type: ignore[union-attr]
+                maintenance.emit_worker_message(session, room=room, message=message, sender_agent_id=turn.agent_id,
+                                                to_refs=refs, intent=intent,
+                                                expectation=self._captured_expect(turn))
+            elif member.role == ROLE_ARCHITECT:  # type: ignore[union-attr]
+                maintenance.bind_published_reply(session, turn, message)
             activate_for_conversation(session, turn.conversation_id)  # P056: an Agent reply published in a Task room
             if self.trace.enabled:
                 rnd = session.get(GroupRound, turn.round_id)

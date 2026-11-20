@@ -79,6 +79,25 @@ export type MessageGroup = {
   sender_agent_id: string | null;
   /** P052 r04: continuation intent of an Agent turn's reply (`finish` = explicit final answer); null for other messages. */
   next?: 'continue' | 'finish' | null;
+  /** P060: the sender's advisory expectation (independent of `next`; grants nothing). */
+  expectation?: MessageExpectation | null;
+  /** P060: Core assessment of a Worker message addressed to the Architect; null/absent = no obligation exists. */
+  assessment?: MessageAssessment | null;
+};
+
+export type MessageExpectation = 'informational' | 'reply_requested' | 'decision_requested' | 'unspecified';
+export type MessageAssessment = {
+  state: 'awaiting' | 'assessing' | 'assessed' | 'owner_action' | 'error';
+  obligation_id: string;
+  expectation: MessageExpectation | null;
+  outcome: 'no_reply_needed' | 'replied' | 'escalated' | null;
+  escalation_reason: string | null;
+  next_actor: string | null;
+  reply_message_id: string | null;
+  reply_ordinal: number | null;
+  error: string | null;
+  offer_count: number;
+  completed_at: string | null;
 };
 
 /** Delivery of one Owner message to the Project Architect (P015). `not_sent` means it was only stored in ROSC. */

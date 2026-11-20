@@ -1,6 +1,6 @@
 import { useEffect, useId, useRef, useState, type ReactNode } from 'react';
 import type { GroupControls } from '../../../app/presentation/contracts';
-import type { ConversationMessage, GroupStatus, GroupTurn } from '../../../core/models';
+import type { ConversationMessage, GroupStatus, GroupTurn, MessageAssessment } from '../../../core/models';
 import { findMentions } from './mentions';
 
 /**
@@ -389,12 +389,46 @@ export function MessageAddress({ message, info, refPrefix }: { message: Conversa
     {label && <span className="rosc-chat-to">→ {label}</span>}
     {message.group?.reply_to_ordinal ? <span className="rosc-chat-to">↩ #{message.group.reply_to_ordinal}</span> : null}
     {message.group?.next === 'finish' ? <span className="rosc-chat-to" title="Агент завершил обсуждение">✓ финальный ответ</span> : null}
+    {expectationText(message) ? <span className="rosc-chat-to" title="Ожидание отправителя (не даёт новых разрешений)">{expectationText(message)}</span> : null}
+    {message.group?.assessment ? <span className={`rosc-chat-to rosc-chat-assessment rosc-chat-assessment--${message.group.assessment.state}`}
+      role="status" data-obligation={message.group.assessment.obligation_id}
+      title={`Оценка Architect (факт Core) · сообщение #${message.ordinal}`}>{assessmentText(message.group.assessment)}</span> : null}
     <button type="button" className="rosc-chat-ref" aria-label={`Скопировать ссылку на сообщение ${message.ordinal}`}
       title={`Скопировать ссылку ${reference}`}
       onClick={async () => {
         try { await navigator.clipboard?.writeText(reference); setCopied(true); setTimeout(() => setCopied(false), 1500); } catch { setCopied(false); }
       }}>{copied ? 'скопировано' : `#${message.ordinal}`}</button>
   </>;
+}
+
+/** P060: the sender's advisory expectation, shown only when the sender stated one or an assessment exists. */
+const EXPECTATION_TEXT: Record<string, string> = {
+  informational: 'ожидание: к сведению', reply_requested: 'ожидание: нужен ответ',
+  decision_requested: 'ожидание: нужно решение', unspecified: 'ожидание: не указано',
+};
+export function expectationText(message: ConversationMessage): string | null {
+  const value = message.group?.expectation;
+  if (!value || (value === 'unspecified' && !message.group?.assessment)) return null;
+  return EXPECTATION_TEXT[value] ?? null;
+}
+
+const ESCALATION_TEXT: Record<string, string> = {
+  no_reply_permission: 'нет разрешённого ответа', owner_decision_required: 'нужно решение Owner',
+  out_of_scope: 'вне утверждённого scope', other: 'другая причина',
+};
+/** P060: Core assessment state of a Worker -> Architect message (never derived from message text). */
+export function assessmentText(a: MessageAssessment): string {
+  switch (a.state) {
+    case 'awaiting': return 'Architect: ожидает оценки';
+    case 'assessing': return 'Architect: оценивается';
+    case 'assessed':
+      return a.outcome === 'replied'
+        ? `Architect: оценено · ответ${a.reply_ordinal ? ` #${a.reply_ordinal}` : ''}`
+        : 'Architect: оценено · ответ не требуется';
+    case 'owner_action':
+      return `Нужно действие Owner: ${ESCALATION_TEXT[a.escalation_reason ?? ''] ?? a.escalation_reason ?? 'эскалация'} · next_actor=${a.next_actor ?? 'Owner'}`;
+    default: return `Ошибка оценки: ${a.error ?? 'неизвестно'} · next_actor=Owner`;
+  }
 }
 
 /** P055: the managed Run handoff is a SERVICE message (durable receipt): no discussion, no model call for it. */
