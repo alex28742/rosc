@@ -9,6 +9,7 @@ from __future__ import annotations
 import json
 import sqlite3
 import uuid
+from datetime import datetime, timedelta, timezone
 from unittest.mock import patch
 
 from alembic import command
@@ -318,6 +319,146 @@ class PipelineTests(CoreCase):
         self.assertEqual(LifecycleCase.decide(self, rid, review).status_code, 201)  # Owner accepts the Task
         self.assertEqual([i["status"] for i in self.call("pipeline_list_items", {})["items"]], ["backlog"])
         self.assertEqual(self.call("pipeline_get_current", {})["revision"], 1)
+
+
+# -- r02 FIX A: evidence must post-date EVERY acknowledged event (deterministic, hours apart) ---------------------------
+class EvidenceFreshnessTests(CoreCase):
+    T0 = datetime(2026, 1, 1, 10, 0, tzinfo=timezone.utc)
+
+    def setUp(self) -> None:
+        super().setUp()
+        self.now = self.T0
+        for target in ("rosc.architect_store._now", "rosc.architect_maintenance._now"):
+            fake = (lambda: self.now.strftime("%Y-%m-%dT%H:%M:%S.%fZ")) if "store" in target else (lambda: self.now)
+            patcher = patch(target, fake)
+            patcher.start()
+            self.addCleanup(patcher.stop)
+
+    def at(self, hours: int) -> None:
+        self.now = self.T0 + timedelta(hours=hours)
+
+    def event(self, hours: int, project: int = 1) -> tuple[str, str]:
+        with self.sessions() as session:
+            event = maintenance.emit(session, project_id=project, kind="run_reported", source_kind="managed_run_report",
+                                     source_id=str(uuid.uuid4()), task_id=None, run_id=str(uuid.uuid4()),
+                                     digest="c" * 64, facts={"outcome": "completed"},
+                                     when=(self.T0 + timedelta(hours=hours)).replace(tzinfo=None))  # naive, as SQLite
+            session.commit()
+            event_id = event.event_id
+        oid = self.rows(f"select obligation_id from architect_obligations where event_id='{event_id}'")[0][0]
+        return event_id, oid
+
+    def states(self) -> list[tuple]:
+        return self.rows("select state, last_error from architect_obligations order by event_seq")
+
+    def refused(self, ids, **args) -> str:  # type: ignore[override]
+        with self.assertRaises(ToolError) as caught:
+            self.ack(ids, **args)
+        return caught.exception.code
+
+    def test_handoff_written_between_two_events_cannot_close_both(self) -> None:
+        _e1, o1 = self.event(1)
+        self.at(2)
+        self.call("handoff_init", {})
+        between = self.call("handoff_update_checkpoint", {"expected_revision": 1, "sections": {"notes": "after #1"}})
+        _e2, o2 = self.event(3)
+        self.assertEqual(self.refused([o1, o2], handoff_revision=between["revision"]), "handoff_revision_stale")
+        self.assertEqual(self.states(), [("failed", "handoff_revision_stale")] * 2)  # no sibling completed
+        self.at(4)
+        after = self.call("handoff_update_checkpoint", {"expected_revision": 2, "sections": {"notes": "after #2"}})
+        done = self.ack([o1, o2], handoff_revision=after["revision"])
+        self.assertEqual((done["recorded"], done["processed_cursor"]), (True, 2))
+        self.assertTrue(self.ack([o1, o2], handoff_revision=after["revision"])["replayed"])
+        self.assertEqual(self.states(), [("completed", None)] * 2)
+
+    def test_old_or_unrelated_proposal_is_refused_and_a_linked_one_discharges_exactly_its_events(self) -> None:
+        e1, o1 = self.event(1)
+        self.at(2)
+        old = self.call("pipeline_propose_change", {"base_revision": 0, "rationale": "Plan after event one.",
+                                                    "ops": [{"op": "add_item", "kind": "phase", "title": "A"}],
+                                                    "source_event_ids": [e1]})
+        e2, o2 = self.event(3)
+        self.assertEqual(self.refused([o1, o2], pipeline_proposal_id=old["proposal_id"]), "pipeline_proposal_stale")
+        self.at(4)
+        unrelated = self.call("pipeline_propose_change", {"base_revision": 0, "rationale": "General planning item.",
+                                                          "ops": [{"op": "add_item", "kind": "phase", "title": "B"}]})
+        self.assertEqual(self.refused([o2], pipeline_proposal_id=unrelated["proposal_id"]),
+                         "pipeline_proposal_unrelated")
+        partial = self.call("pipeline_propose_change", {"base_revision": 0, "rationale": "Covers event two only.",
+                                                        "ops": [{"op": "add_item", "kind": "phase", "title": "C"}],
+                                                        "source_event_ids": [e2]})
+        self.assertEqual(self.refused([o1, o2], pipeline_proposal_id=partial["proposal_id"]),
+                         "pipeline_proposal_unrelated")
+        linked = self.call("pipeline_propose_change", {"base_revision": 0, "rationale": "Covers both events.",
+                                                       "ops": [{"op": "add_item", "kind": "phase", "title": "D"}],
+                                                       "source_event_ids": [e1, e2]})
+        done = self.ack([o1, o2], pipeline_proposal_id=linked["proposal_id"])
+        self.assertEqual(done["outcome"]["pipeline"]["state_at_ack"], "proposed")
+        current = self.call("pipeline_get_current", {})
+        self.assertEqual((current["state"], len(current["open_proposals"])), ("uninitialized", 4))  # ACK accepts nothing
+
+    def test_pre_event_adr_revision_cannot_claim_post_event_documentation(self) -> None:
+        self.call("docs_create", {"doc_id": "adr-0007", "content": "# ADR 7\nStatus: accepted"})
+        _e1, o1 = self.event(2)
+        self.assertEqual(self.refused([o1], adr_doc_id="adr-0007", adr_revision=1), "adr_revision_stale")
+        self.at(3)
+        updated = self.call("docs_update", {"doc_id": "adr-0007", "content": "# ADR 7\nStatus: accepted\nRef #1",
+                                            "expected_revision": 1})
+        self.assertEqual(self.ack([o1], adr_doc_id="adr-0007", adr_revision=updated["revision"])["outcome"]["adr"]
+                         ["revision"], 2)
+
+    def test_no_change_still_works_and_scope_and_cursor_hold(self) -> None:
+        _e1, o1 = self.event(1)
+        _e2, o2 = self.event(2)
+        _ex, ox = self.event(2, project=2)
+        self.assertEqual(self.refused([o2, ox], no_change_needed="Mixed-Project batch must fail."), "not_found")
+        self.assertEqual(self.ack([o2], no_change_needed="Routine report, nothing changed.")["processed_cursor"], 0)
+        self.assertEqual(self.ack([o1], no_change_needed="Routine report, nothing changed.")["processed_cursor"], 2)
+
+
+# -- r02 FIX B: the accepted Pipeline hierarchy stays acyclic -----------------------------------------------------------
+class HierarchyTests(CoreCase):
+    propose = PipelineTests.propose
+    decide = PipelineTests.decide  # type: ignore[assignment]
+
+    def setUp(self) -> None:
+        super().setUp()
+        base = self.propose(0, [{"op": "add_item", "kind": "phase", "title": "A"},
+                                {"op": "add_item", "kind": "phase", "title": "B"},
+                                {"op": "add_item", "kind": "step", "title": "C", "parent_id": "PI-1"}])
+        self.assertEqual(self.decide(base["proposal_id"]).json()["revision"], 1)
+
+    def snapshot(self) -> tuple:
+        return (self.rows("select revision, last_item_number from pipeline_resources"),
+                self.rows("select item_id, parent_id, updated_revision from pipeline_items order by item_id"),
+                self.count("pipeline_changes"))
+
+    def assert_refused(self, ops: list[dict]) -> None:
+        before = self.snapshot()
+        proposal = self.propose(1, ops)
+        refused = self.decide(proposal["proposal_id"])
+        self.assertEqual((refused.status_code, refused.json()["detail"]["code"]), (409, "invalid_hierarchy"))
+        self.assertEqual(self.snapshot(), before)  # full rollback
+        self.assertEqual(self.rows(f"select state from pipeline_proposals where proposal_id='{proposal['proposal_id']}'"),
+                         [("proposed",)])
+        self.decide(proposal["proposal_id"], "reject")  # the Owner can still reject it normally
+
+    def test_mutual_cycle_of_two_existing_items_is_refused(self) -> None:
+        self.assert_refused([{"op": "update_item", "item_id": "PI-1", "parent_id": "PI-2"},
+                             {"op": "update_item", "item_id": "PI-2", "parent_id": "PI-1"}])
+
+    def test_moving_an_ancestor_below_its_descendant_is_refused(self) -> None:
+        self.assert_refused([{"op": "update_item", "item_id": "PI-1", "parent_id": "PI-3"}])
+        self.assert_refused([{"op": "add_item", "kind": "step", "title": "D", "ref": "d", "parent_id": "PI-3"},
+                             {"op": "update_item", "item_id": "PI-1", "parent_id": "d"}])  # no item number consumed
+
+    def test_valid_multi_operation_reparenting_is_applied(self) -> None:
+        proposal = self.propose(1, [{"op": "update_item", "item_id": "PI-3", "parent_id": "PI-2"},
+                                    {"op": "add_item", "kind": "step", "title": "E", "parent_id": "PI-3"},
+                                    {"op": "update_item", "item_id": "PI-2", "parent_id": "PI-1"}])
+        self.assertEqual(self.decide(proposal["proposal_id"]).json()["revision"], 2)
+        self.assertEqual(self.rows("select item_id, parent_id from pipeline_items order by item_id"),
+                         [("PI-1", None), ("PI-2", "PI-1"), ("PI-3", "PI-2"), ("PI-4", "PI-3")])
 
 
 # -- P0-E: Owner read model -------------------------------------------------------------------------------------------------

@@ -95,6 +95,11 @@ def _parse_iso(value: str) -> datetime:
     return parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)
 
 
+def _aware(value: datetime) -> datetime:
+    """SQLite returns naive UTC datetimes; compare everything as timezone-aware UTC."""
+    return value if value.tzinfo else value.replace(tzinfo=timezone.utc)
+
+
 def _int(value: object, name: str, *, low: int = 0, default: int | None = None) -> int:
     if value is None and default is not None:
         return default
@@ -346,8 +351,9 @@ def acknowledge(session: Session, store: ArchitectDocumentStore, *, project_id: 
         raise MaintenanceError("not_found", "No such obligation in the current Project")
     events = {e.event_id: e for e in session.scalars(select(ProjectEvent).where(
         ProjectEvent.event_id.in_([r.event_id for r in rows])))}
-    earliest = min(events[r.event_id].created_at for r in rows)
-    earliest = earliest if earliest.tzinfo else earliest.replace(tzinfo=timezone.utc)
+    # Shared evidence must post-date EVERY covered event: freshness is judged against the LATEST one in the batch.
+    latest = max(_aware(events[r.event_id].created_at) for r in rows)
+    batch_events = {r.event_id for r in rows}
 
     problem: tuple[str, str] | None = None
     try:
@@ -360,14 +366,22 @@ def acknowledge(session: Session, store: ArchitectDocumentStore, *, project_id: 
             except DocumentNotFound:
                 raise MaintenanceError("handoff_revision_missing", "That Handoff revision does not exist") from None
             entry = document.info.revisions[rev - 1]
-            if _parse_iso(entry.created_at) < earliest:
-                raise MaintenanceError("handoff_revision_stale", "That Handoff revision predates the event; record a "
-                                       "checkpoint after assessing it, or use no_change_needed")
+            if _parse_iso(entry.created_at) < latest:
+                raise MaintenanceError("handoff_revision_stale", "That Handoff revision predates an acknowledged "
+                                       "event; record a checkpoint after assessing all of them, or use "
+                                       "no_change_needed")
             outcome["handoff"] = {"doc_id": HANDOFF_DOC_ID, "revision": rev, "sha256": entry.sha256}
         if proposal_id is not None:
             proposal = session.get(PipelineProposal, proposal_id) if isinstance(proposal_id, str) else None
             if proposal is None or proposal.project_id != project_id:
                 raise MaintenanceError("pipeline_proposal_missing", "No such Pipeline proposal in the current Project")
+            if _aware(proposal.created_at) < latest:
+                raise MaintenanceError("pipeline_proposal_stale", "That proposal predates an acknowledged event")
+            linked = set(json.loads(proposal.source_event_ids or "[]"))
+            if not batch_events <= linked:
+                raise MaintenanceError("pipeline_proposal_unrelated", "That proposal does not list every acknowledged "
+                                       "event in its source_event_ids; propose with those event ids or use "
+                                       "pipeline_no_change_reason")
             outcome["pipeline"] = {"proposal_id": proposal.proposal_id, "base_revision": proposal.base_revision,
                                    "state_at_ack": proposal.state}
         elif pipeline_reason is not None:
@@ -380,6 +394,10 @@ def acknowledge(session: Session, store: ArchitectDocumentStore, *, project_id: 
                 document = store.read(project_id, adr_doc, rev)
             except DocumentNotFound:
                 raise MaintenanceError("adr_revision_missing", "That ADR document revision does not exist") from None
+            if _parse_iso(document.info.revisions[rev - 1].created_at) < latest:
+                raise MaintenanceError("adr_revision_stale", "That ADR revision predates an acknowledged event; it "
+                                       "cannot document an assessment of it (use adr_not_needed_reason if none is "
+                                       "warranted)")
             outcome["adr"] = {"doc_id": document.info.doc_id, "revision": rev,
                               "sha256": document.info.revisions[rev - 1].sha256}
         elif adr_reason is not None:
@@ -812,13 +830,35 @@ def decide(session: Session, *, project_id: int, proposal_id: str, decision: str
                                            op="update", before=json.dumps(before, ensure_ascii=False),
                                            after=json.dumps(_item_view(item), ensure_ascii=False),
                                            proposal_id=row.proposal_id, decided_by=actor_id, created_at=now))
+        _check_hierarchy(items)  # the RESULTING parent graph must stay a forest (no dangling parent, no cycle)
     except MaintenanceError:
-        session.rollback()
+        session.rollback()  # nothing applied: no item, change row, revision or item-number bump; still "proposed"
         raise
     row.state, row.decided_at, row.decided_by = "accepted", now, actor_id
     row.decision_reason, row.resulting_revision = reason, revision
     session.commit()
     return {"recorded": True, "replayed": False, "proposal": proposal_view(row), "revision": revision}
+
+
+def _check_hierarchy(items: dict[str, PipelineItem]) -> None:
+    """Every parent chain of the Project's items must end at a root: refuse self/indirect/longer cycles and parents
+    outside this Project's items (dangling or cross-Project)."""
+    settled: set[str] = set()
+    for start in items:
+        path: list[str] = []
+        seen: set[str] = set()
+        node: str | None = start
+        while node is not None and node not in settled:
+            if node in seen:
+                raise MaintenanceError("invalid_hierarchy", "The resulting Pipeline hierarchy would contain a cycle",
+                                       cycle=path[path.index(node):] + [node])
+            seen.add(node)
+            path.append(node)
+            item = items.get(node)
+            if item is None:
+                raise MaintenanceError("invalid_hierarchy", f"parent {node} does not exist in this Pipeline")
+            node = item.parent_id
+        settled.update(path)
 
 
 def list_proposals(session: Session, project_id: int, limit: int = MAX_BATCH) -> list[dict]:
