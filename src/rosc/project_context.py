@@ -295,9 +295,10 @@ class ProjectContextBroker:
         self._store = ArchitectDocumentStore(self._workspace)
         self._global_root = global_library_root
         self._pinned: dict[str, int] = {}  # ROSC session id -> Root Binding version captured at activation
-        # P060 r02: (ROSC session id, obligation id) whose Worker message rosc_message_read served to its end.  In-memory
-        # and bounded on purpose: after a restart the Architect simply reads again (fail-closed, no schema change).
-        self._message_reads: dict[tuple[str, str], None] = {}
+        # P060 r02: (ROSC session id, obligation id) -> end of the CONTIGUOUS prefix [0, end) of that Worker message
+        # rosc_message_read actually served in this session (a skipped page never extends it).  In-memory and bounded
+        # on purpose: after a restart the Architect simply reads again (fail-closed, no schema change).
+        self._message_reads: dict[tuple[str, str], tuple[int, int]] = {}  # -> (contiguous end, total chars)
         # Set only by the trusted ArchitectService (never by a Tool argument): session id -> pinned rules snapshot.
         self._rules_lookup: Callable[[str], RulesSnapshot | None] | None = None
 
@@ -758,7 +759,8 @@ class ProjectContextBroker:
         self._maintenance_ready(session)
         if not maintenance.message_schema_ready(session):
             raise ToolError("migration_required", "Worker message assessment needs database migration 0025")
-        read = (caller.session_id, args.get("obligation_id")) in self._message_reads
+        served, total = self._message_reads.get((caller.session_id, args.get("obligation_id")), (0, -1))
+        read = total >= 0 and served >= total
         result = self._maint(maintenance.acknowledge_message, session, project_id=caller.project_id,
                              agent_id=caller.agent_id, session_id=caller.session_id, args=args, read_complete=read)
         return {"kind": "message_ack", **result}
@@ -771,13 +773,17 @@ class ProjectContextBroker:
             raise ToolError("migration_required", "Worker message assessment needs database migration 0025")
         result = self._maint(maintenance.message_read, session, project_id=caller.project_id,
                              agent_id=caller.agent_id, args=args)
-        if result["complete"]:
-            key = (caller.session_id, result["obligation_id"])
-            self._message_reads.pop(key, None)
-            self._message_reads[key] = None
-            while len(self._message_reads) > 1024:
-                self._message_reads.pop(next(iter(self._message_reads)))
-        return {"kind": "message_read", **result}
+        key = (caller.session_id, result["obligation_id"])
+        served, _total = self._message_reads.pop(key, (0, result["total_chars"]))
+        if result["offset"] <= served:  # extends the prefix only when it starts inside what was already served
+            served = max(served, result["offset"] + len(result["text"]))
+        self._message_reads[key] = (served, result["total_chars"])
+        while len(self._message_reads) > 1024:
+            self._message_reads.pop(next(iter(self._message_reads)))
+        complete = served >= result["total_chars"]
+        return {"kind": "message_read", **result, "read_through": served, "complete": complete,
+                "note": result["note"] + (" Read in full: you may now assess it." if complete else
+                                          f" Not read in full yet: continue at offset {served}.")}
 
     def tool_handoff_get_snapshot(self, session: Session, caller: Caller, args: dict) -> dict:
         self._require(caller, CAP_DOC_READ)

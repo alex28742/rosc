@@ -191,9 +191,10 @@ TOOLS: list[dict] = [
                                                                               "out_of_scope", "other"]}},
                             ["obligation_id", "outcome", "rationale"])},
     {"name": "message_read", "description": "Read the full text of the Worker message behind ONE of your "
-     "worker_message obligations, as bounded pages (offset from 0; continue at next_offset until it is null). Use it "
-     "when the assessment note says the body was TRUNCATED: ROSC refuses rosc_message_ack for such a message until "
-     "you have read it to the end. Read-only; no other message or chat search.",
+     "worker_message obligations, as bounded pages: start at offset 0 and continue at each next_offset until it is "
+     "null (complete=true). Use it when the assessment note says the body was TRUNCATED: ROSC refuses "
+     "rosc_message_ack for such a message until every page was served to you in order (a skipped page does not "
+     "count). Read-only; no other message or chat search.",
      "inputSchema": _schema({"obligation_id": {"type": "string"}, "offset": {"type": "integer", "minimum": 0}},
                             ["obligation_id"])},
     {"name": "handoff_get_snapshot", "description": "Compact snapshot of the Project's working Handoff (revision, "

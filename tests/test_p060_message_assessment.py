@@ -269,14 +269,15 @@ class LongMessageReadTests(AssessmentCoreCase):
         with self.sessions() as session:
             page = maintenance.message_read(session, project_id=1, agent_id=self.arch,
                                             args={"obligation_id": oid, "offset": maintenance.MAX_WAKE_BODY})
-        self.assertTrue(page["complete"])
+        self.assertTrue(page["reaches_end"])  # a page fact only; the Tool layer decides "read in full"
         self.assertIsNone(page["next_offset"])
         self.assertTrue(page["text"].endswith("manual backup step."))
         self.assertEqual(page["total_chars"], len(body))
-        for code, kw in (("not_addressee", {"agent_id": self.A}), ("not_found", {"project_id": 2})):
+        for code, kw, extra in (("not_addressee", {"agent_id": self.A}, {}), ("not_found", {"project_id": 2}, {}),
+                                ("invalid_argument", {}, {"offset": len(body) + 100_000})):
             with self.sessions() as session, self.assertRaises(maintenance.MaintenanceError) as caught:
                 maintenance.message_read(session, **{"project_id": 1, "agent_id": self.arch, **kw},
-                                         args={"obligation_id": oid})
+                                         args={"obligation_id": oid, **extra})
             self.assertEqual(caught.exception.code, code)
         with self.sessions() as session:
             done = maintenance.acknowledge_message(session, project_id=1, agent_id=self.arch,
@@ -284,6 +285,40 @@ class LongMessageReadTests(AssessmentCoreCase):
                                                    args={"obligation_id": oid, "outcome": "no_reply_needed",
                                                          "rationale": "Read in full; backup step noted."})
         self.assertEqual(done["state"], "completed")
+        self.assertEqual(self.meta(view["reply_message_id"])["assessment"]["state"], "assessed")
+
+    # -- follow-up: the group-turn exemption needs the message INSIDE the current turn's delivered input window ----
+    LONG = "Progress detail. " * 140 + "IMPORTANT TAIL."  # > the wake excerpt, < the 3000-char continue limit
+
+    def test_fu_group_turn_that_never_received_the_message_does_not_bypass_the_read(self) -> None:
+        room, view = self.worker_says(self.LONG + control("continue", "informational"), grant_arch=True)
+        oid = self.obligation()
+        ordinal = self.fetch("SELECT ordinal FROM conversation_messages WHERE message_id = ?", view["reply_message_id"])[0][0]
+        claim = self.core.claim_next(room)
+        self.assertEqual(claim.agent_id, self.arch)
+        self.core.dispatch(claim.turn_id, self.transport)
+        self.core.complete(claim.turn_id, "Noted." + control("finish"))  # saw it, but did not ACK
+        self.assertEqual(self.core.claim_next(room).status, "awaiting_owner")
+        self.core.post_owner_turn(OWNER, 1, client_key=self.key(), body="Anything else?", to=[self.arch],
+                                  grant=[self.arch])
+        claim = self.core.claim_next(room)
+        self.assertEqual(claim.agent_id, self.arch)
+        self.core.dispatch(claim.turn_id, self.transport)
+        after, through = self.fetch("SELECT input_after_ordinal, input_through_ordinal FROM group_turns "
+                                    "WHERE turn_id = ?", claim.turn_id)[0]
+        self.assertGreaterEqual(after, ordinal)  # this turn's input starts after the message ...
+        self.assertGreaterEqual(through, ordinal)  # ... although its window end covers it (the old, loose check)
+        self.refused("message_not_read", oid, "no_reply_needed")
+        self.assertEqual(self.meta(view["reply_message_id"])["assessment"]["state"], "awaiting")
+
+    def test_fu_group_turn_that_carried_the_full_message_still_needs_no_extra_read(self) -> None:
+        room, view = self.worker_says(self.LONG + control("continue", "informational"), grant_arch=True)
+        oid = self.obligation()
+        claim = self.core.claim_next(room)
+        self.assertEqual(claim.agent_id, self.arch)
+        self.core.dispatch(claim.turn_id, self.transport)
+        self.assertEqual(self.ack(oid, "no_reply_needed")["state"], "completed")  # its own input held the full body
+        self.core.complete(claim.turn_id, "Noted." + control("finish"))
         self.assertEqual(self.meta(view["reply_message_id"])["assessment"]["state"], "assessed")
 
     def test_r02_short_message_needs_no_extra_read(self) -> None:
@@ -463,10 +498,42 @@ class R02WakeTests(MessageWakeCase):
         self.assertIn("rosc_message_read", prompt)
         self.assertNotIn("port 8123", prompt)
         self.assertEqual(self.assessment(message_id)["state"], "awaiting")  # refused: not counted as assessed
-        read = {"tool": "message_read", "args": {"obligation_id": oid, "offset": maintenance.MAX_WAKE_BODY}}
+        read = {"tool": "message_read", "args": {"obligation_id": oid, "offset": 0}}
         self.script(["Read and assessed."], [read, ack])
         self.client.post("/api/projects/P0001/architect/maintenance/wake")  # Owner retry
         self.architect.drain()
+        self.assertEqual(self.assessment(message_id)["state"], "assessed")
+
+
+class ReadRangeTests(MessageWakeCase):
+    """Follow-up: rosc_message_read (real MCP) unlocks the ACK only after a CONTIGUOUS read from offset 0."""
+
+    def test_fu_out_of_range_or_last_page_only_never_unlock_and_sequential_pages_do(self) -> None:
+        body = "Line of progress. " * 500 + "TAIL: keep port 8123."
+        self.assertGreater(len(body), 2 * maintenance.MESSAGE_PAGE)  # three pages
+        _room, message_id = self.worker_says(body + control("finish", "informational"), task_id=1)
+        oid = self.obligation()
+        ack = {"tool": "message_ack", "args": {"obligation_id": oid, "outcome": "no_reply_needed",
+                                               "rationale": "Informational report; nothing requested."}}
+
+        def read(offset: int) -> dict:
+            return {"tool": "message_read", "args": {"obligation_id": oid, "offset": offset}}
+
+        def retry() -> None:
+            self.client.post("/api/projects/P0001/architect/maintenance/wake")
+            self.architect.drain()
+
+        self.script(["Assessed."], [read(len(body) + 1_000_000), ack])  # far past the end: refused, nothing served
+        self.tick()
+        self.assertEqual(self.assessment(message_id)["state"], "awaiting")
+        self.script(["Assessed."], [read(2 * maintenance.MESSAGE_PAGE), ack])  # only the last page
+        retry()
+        self.assertEqual(self.assessment(message_id)["state"], "awaiting")
+        self.script(["Assessed."], [read(0), read(2 * maintenance.MESSAGE_PAGE), ack])  # page 2 skipped
+        retry()
+        self.assertEqual(self.assessment(message_id)["state"], "awaiting")
+        self.script(["Assessed."], [read(0), read(maintenance.MESSAGE_PAGE), read(2 * maintenance.MESSAGE_PAGE), ack])
+        retry()
         self.assertEqual(self.assessment(message_id)["state"], "assessed")
 
 
