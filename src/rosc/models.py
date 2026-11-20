@@ -1370,3 +1370,175 @@ class TaskOwnerDecision(Base):
     actor_id: Mapped[str] = mapped_column(String(64))
     actor_assurance: Mapped[str] = mapped_column(String(32))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+
+
+# P059 (migration 0024): event-driven Architect context maintenance.  ``ProjectEvent`` is an immutable Core fact written
+# in the SAME transaction as the authoritative row it points to (registered Run Report, decisive Architect Review, Owner
+# Task decision); at most one per source row.  ``ArchitectObligation`` is the distinct, mutable duty of the Project
+# Architect to assess one event; only Core commits its completion after checking the referenced persisted records.
+EVENT_RUN_REPORTED = "run_reported"
+EVENT_REVIEW_SUBMITTED = "review_submitted"
+EVENT_TASK_ACCEPTED = "task_accepted"
+EVENT_TASK_REWORK = "task_rework_requested"
+PROJECT_EVENT_KINDS = (EVENT_RUN_REPORTED, EVENT_REVIEW_SUBMITTED, EVENT_TASK_ACCEPTED, EVENT_TASK_REWORK)
+EVENT_SOURCE_REPORT = "managed_run_report"
+EVENT_SOURCE_REVIEW = "managed_run_review"
+EVENT_SOURCE_DECISION = "task_owner_decision"
+PROJECT_EVENT_SOURCES = (EVENT_SOURCE_REPORT, EVENT_SOURCE_REVIEW, EVENT_SOURCE_DECISION)
+OBLIGATION_PENDING, OBLIGATION_PROCESSING = "pending", "processing"
+OBLIGATION_COMPLETED, OBLIGATION_FAILED = "completed", "failed"
+OBLIGATION_STATES = (OBLIGATION_PENDING, OBLIGATION_PROCESSING, OBLIGATION_COMPLETED, OBLIGATION_FAILED)
+WAKE_TRIGGERS = ("ready", "event", "owner_retry")
+WAKE_SENT, WAKE_REPLIED, WAKE_AMBIGUOUS = "sent", "replied", "ambiguous"
+WAKE_FAILED, WAKE_NOT_RECEIVED = "failed", "not_received"
+WAKE_STATES = (WAKE_SENT, WAKE_REPLIED, WAKE_AMBIGUOUS, WAKE_FAILED, WAKE_NOT_RECEIVED)
+PIPELINE_ITEM_KINDS = ("phase", "milestone", "step")
+PIPELINE_ITEM_STATUSES = ("backlog", "running", "completed", "accepted", "cancelled")
+PROPOSAL_STATES = ("proposed", "accepted", "rejected", "stale")
+
+
+class ProjectEvent(Base):
+    """One immutable, Project-scoped consequential Core event (ids, digest and compact facts; never document content)."""
+
+    __tablename__ = "project_events"
+    __table_args__ = (CheckConstraint(_in_list("kind", PROJECT_EVENT_KINDS), name="ck_project_events_kind"),
+                      CheckConstraint(_in_list("source_kind", PROJECT_EVENT_SOURCES), name="ck_project_events_source"),
+                      CheckConstraint("seq >= 1", name="ck_project_events_seq"),
+                      CheckConstraint("length(facts) <= 2000", name="ck_project_events_facts"),
+                      UniqueConstraint("project_id", "seq", name="uq_project_events_seq"),
+                      UniqueConstraint("source_kind", "source_id", name="uq_project_events_source"))
+
+    event_id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    project_id: Mapped[int] = mapped_column(ForeignKey("projects.id", ondelete="RESTRICT"))
+    seq: Mapped[int] = mapped_column(Integer)
+    kind: Mapped[str] = mapped_column(String(32))
+    source_kind: Mapped[str] = mapped_column(String(32))
+    source_id: Mapped[str] = mapped_column(String(36))
+    task_id: Mapped[int | None] = mapped_column(ForeignKey("tasks.id", ondelete="RESTRICT"), nullable=True)
+    run_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
+    review_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
+    decision_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
+    digest: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    facts: Mapped[str] = mapped_column(Text, default="{}")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+
+
+class ArchitectObligation(Base):
+    """The Project Architect's duty to assess ONE event.  ``completed`` is terminal and only Core writes it."""
+
+    __tablename__ = "architect_obligations"
+    __table_args__ = (CheckConstraint(_in_list("state", OBLIGATION_STATES), name="ck_architect_obligations_state"),
+                      Index("ix_architect_obligations_project_state", "project_id", "state", "event_seq"))
+
+    obligation_id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    event_id: Mapped[str] = mapped_column(ForeignKey("project_events.event_id", ondelete="RESTRICT"), unique=True)
+    project_id: Mapped[int] = mapped_column(ForeignKey("projects.id", ondelete="RESTRICT"))
+    event_seq: Mapped[int] = mapped_column(Integer)
+    state: Mapped[str] = mapped_column(String(16), default=OBLIGATION_PENDING)
+    offered_wake_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
+    offer_count: Mapped[int] = mapped_column(Integer, default=0)
+    outcome: Mapped[str | None] = mapped_column(Text, nullable=True)
+    completed_agent_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
+    completed_session_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    last_error: Mapped[str | None] = mapped_column(String(48), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+
+
+class ArchitectMaintenanceWake(Base):
+    """One fenced, single-shot Core maintenance turn offered to the live Architect session (never blindly re-sent)."""
+
+    __tablename__ = "architect_maintenance_wakes"
+    __table_args__ = (CheckConstraint(_in_list("trigger", WAKE_TRIGGERS), name="ck_architect_wakes_trigger"),
+                      CheckConstraint(_in_list("state", WAKE_STATES), name="ck_architect_wakes_state"),
+                      UniqueConstraint("session_id", "attempt", name="uq_architect_wakes_attempt"),
+                      Index("ix_architect_wakes_project", "project_id", "created_at"))
+
+    wake_id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    project_id: Mapped[int] = mapped_column(ForeignKey("projects.id", ondelete="RESTRICT"))
+    session_id: Mapped[str] = mapped_column(ForeignKey("architect_sessions.session_id", ondelete="RESTRICT"))
+    attempt: Mapped[int] = mapped_column(Integer)
+    trigger: Mapped[str] = mapped_column(String(16))
+    obligation_ids: Mapped[str] = mapped_column(Text)
+    state: Mapped[str] = mapped_column(String(16))
+    detail: Mapped[str | None] = mapped_column(String(48), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    settled_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
+class PipelineResource(Base):
+    """Core-owned canonical ``pipeline/main`` of one Project.  No row = uninitialized (honest, valid)."""
+
+    __tablename__ = "pipeline_resources"
+    __table_args__ = (CheckConstraint("revision >= 1", name="ck_pipeline_resources_revision"),)
+
+    project_id: Mapped[int] = mapped_column(ForeignKey("projects.id", ondelete="RESTRICT"), primary_key=True)
+    revision: Mapped[int] = mapped_column(Integer)
+    last_item_number: Mapped[int] = mapped_column(Integer, default=0)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+
+
+class PipelineItem(Base):
+    """Current state of one Pipeline item; stable id ``PI-<n>`` independent of order.  History is in PipelineChange."""
+
+    __tablename__ = "pipeline_items"
+    __table_args__ = (CheckConstraint(_in_list("kind", PIPELINE_ITEM_KINDS), name="ck_pipeline_items_kind"),
+                      CheckConstraint(_in_list("status", PIPELINE_ITEM_STATUSES), name="ck_pipeline_items_status"),
+                      Index("ix_pipeline_items_status", "project_id", "status"))
+
+    project_id: Mapped[int] = mapped_column(ForeignKey("pipeline_resources.project_id", ondelete="RESTRICT"),
+                                            primary_key=True)
+    item_id: Mapped[str] = mapped_column(String(16), primary_key=True)
+    kind: Mapped[str] = mapped_column(String(16))
+    parent_id: Mapped[str | None] = mapped_column(String(16), nullable=True)
+    title: Mapped[str] = mapped_column(String(300))
+    status: Mapped[str] = mapped_column(String(16))
+    position: Mapped[int] = mapped_column(Integer)
+    created_revision: Mapped[int] = mapped_column(Integer)
+    updated_revision: Mapped[int] = mapped_column(Integer)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+
+
+class PipelineChange(Base):
+    """Immutable per-item change of one Pipeline revision (append-only history for ``changes_since``)."""
+
+    __tablename__ = "pipeline_changes"
+
+    project_id: Mapped[int] = mapped_column(ForeignKey("pipeline_resources.project_id", ondelete="RESTRICT"),
+                                            primary_key=True)
+    revision: Mapped[int] = mapped_column(Integer, primary_key=True)
+    seq: Mapped[int] = mapped_column(Integer, primary_key=True)
+    item_id: Mapped[str] = mapped_column(String(16))
+    op: Mapped[str] = mapped_column(String(16))
+    before: Mapped[str | None] = mapped_column(Text, nullable=True)
+    after: Mapped[str] = mapped_column(Text)
+    proposal_id: Mapped[str] = mapped_column(String(36))
+    decided_by: Mapped[str] = mapped_column(String(64))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+
+
+class PipelineProposal(Base):
+    """An Architect-proposed, revision-checked Pipeline change.  Only an Owner decision applies it."""
+
+    __tablename__ = "pipeline_proposals"
+    __table_args__ = (CheckConstraint(_in_list("state", PROPOSAL_STATES), name="ck_pipeline_proposals_state"),
+                      CheckConstraint("base_revision >= 0", name="ck_pipeline_proposals_base"),
+                      Index("ix_pipeline_proposals_project", "project_id", "created_at"))
+
+    proposal_id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    project_id: Mapped[int] = mapped_column(ForeignKey("projects.id", ondelete="RESTRICT"))
+    base_revision: Mapped[int] = mapped_column(Integer)
+    ops: Mapped[str] = mapped_column(Text)
+    rationale: Mapped[str] = mapped_column(Text)
+    source_event_ids: Mapped[str] = mapped_column(Text, default="[]")
+    state: Mapped[str] = mapped_column(String(16), default="proposed")
+    proposed_by_agent_id: Mapped[str] = mapped_column(String(36))
+    proposed_session_id: Mapped[str] = mapped_column(String(36))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    decided_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    decided_by: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    decision_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
+    resulting_revision: Mapped[int | None] = mapped_column(Integer, nullable=True)

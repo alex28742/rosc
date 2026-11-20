@@ -29,6 +29,7 @@ from .architect_runtime import ArchitectRuntime, OpenCodeRuntime
 from .architect_rules import ArchitectRulesLoader
 from .architect_service import ArchitectGroupTransport, ArchitectService, runtime_message_id
 from .architect_tools import ToolHost
+from . import architect_maintenance as maintenance
 from .project_context import ProjectContextBroker
 from .task_authoring import (AuthoringError, TaskAuthoringService)
 from .worker_session import WorkerSessionService
@@ -109,6 +110,12 @@ class OwnerDecisionInput(BaseModel):
     review_version: int
     request_key: str = Field(min_length=8, max_length=128)
     reason: str | None = Field(default=None, max_length=4000)
+
+
+class PipelineDecisionInput(BaseModel):
+    """P059 Owner decision on one Architect Pipeline proposal (accept applies it against its base revision)."""
+    decision: Literal["accept", "reject"]
+    reason: str | None = Field(default=None, max_length=2000)
 
 
 class RunLaunchInput(BaseModel):
@@ -521,6 +528,14 @@ def create_app(db_path: Path | None = None, workspace_root: Path | None = None, 
                 log.warning("Managed Run monitor skipped: database is not migrated or busy")
             except Exception as exc:  # the monitor must never take Core down
                 log.warning("Managed Run monitor pass failed: %s", type(exc).__name__)
+            try:
+                # P059: schedules at most one fenced maintenance wake per Project with never-offered obligations and a
+                # ready, familiarized Architect (the provider turn runs on the Architect pool, not on this thread).
+                architect.maintenance_tick()
+            except OperationalError:
+                log.warning("Architect maintenance pass skipped: database is not migrated or busy")
+            except Exception as exc:
+                log.warning("Architect maintenance pass failed: %s", type(exc).__name__)
             monitor_stop.wait(run_monitor_interval or 5.0)
 
     @asynccontextmanager
@@ -1042,6 +1057,58 @@ def create_app(db_path: Path | None = None, workspace_root: Path | None = None, 
     def architect_onboarding_complete(project_id: str) -> dict:
         """P053 «Завершить знакомство»: explicit Owner action; at most one short turn in the same native session."""
         return conversation_call(architect.complete_onboarding, current_actor(), numeric_id(project_id, "P"))
+
+    # -- P059: Architect maintenance queue and the Core-owned Pipeline (Owner read model + Owner-only decisions) -------
+    @app.get("/api/projects/{project_id}/architect/maintenance")
+    def architect_maintenance(project_id: str, cursor: int = 0, limit: int = 50) -> dict:
+        """Factual queue state (pending/processing/failed/completed), last handled, latest wake, blocker, next actor."""
+        return conversation_call(architect.maintenance_status, current_actor(), numeric_id(project_id, "P"),
+                                 cursor=cursor, limit=limit)
+
+    @app.post("/api/projects/{project_id}/architect/maintenance/wake")
+    def architect_maintenance_wake(project_id: str) -> dict:
+        """Explicit Owner retry: at most ONE bounded Core maintenance turn (never over an unresolved one)."""
+        return conversation_call(architect.maintenance_wake, current_actor(), numeric_id(project_id, "P"))
+
+    def pipeline_call(call, *args, **kwargs):
+        try:
+            return call(*args, **kwargs)
+        except maintenance.MaintenanceError as exc:
+            status = {"not_found": 404, "invalid_argument": 422}.get(exc.code, 409)
+            raise HTTPException(status, {"code": exc.code, "message": exc.message, **exc.extra}) from None
+
+    def pipeline_project(project_id: str, action: str) -> int:
+        pid = numeric_id(project_id, "P")
+        authorize(action, project_id=pid)
+        with sessions() as session:
+            if session.get(Project, pid) is None:
+                raise HTTPException(404, "Project not found")
+            if not maintenance.schema_ready(session):
+                raise HTTPException(503, "Database migration 0024 is required")
+        return pid
+
+    @app.get("/api/projects/{project_id}/pipeline")
+    def pipeline_get(project_id: str) -> dict:
+        pid = pipeline_project(project_id, authz.PIPELINE_READ)
+        with sessions() as session:
+            return {**maintenance.pipeline_current(session, pid),
+                    "proposals": maintenance.list_proposals(session, pid)}
+
+    @app.get("/api/projects/{project_id}/pipeline/items")
+    def pipeline_get_items(project_id: str, status: str | None = None, limit: int = 50,
+                           cursor: str | None = None) -> dict:
+        pid = pipeline_project(project_id, authz.PIPELINE_READ)
+        args = {"status": status.split(",") if status else None, "limit": limit, "cursor": cursor}
+        with sessions() as session:
+            return pipeline_call(maintenance.pipeline_items, session, pid, args)
+
+    @app.post("/api/projects/{project_id}/pipeline/proposals/{proposal_id}/decision")
+    def pipeline_decide(project_id: str, proposal_id: str, data: PipelineDecisionInput) -> dict:
+        """Owner-only: accept (applies against the proposal's base revision; stale is refused) or reject."""
+        pid = pipeline_project(project_id, authz.PIPELINE_DECIDE)
+        with sessions() as session:
+            return pipeline_call(maintenance.decide, session, project_id=pid, proposal_id=proposal_id,
+                                 decision=data.decision, reason=data.reason, actor_id=current_actor().actor_id)
 
     @app.get("/api/projects/{project_id}/architect/context-access")
     def architect_context_access(project_id: str) -> dict:

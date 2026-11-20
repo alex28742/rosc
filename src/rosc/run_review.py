@@ -23,6 +23,7 @@ from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError, OperationalError
 from sqlalchemy.orm import Session
 
+from . import architect_maintenance as maintenance
 from .models import (REVIEW_CHANGES_REQUESTED, REVIEW_INCONCLUSIVE, REVIEW_PASSED, REVIEW_VERDICTS, RUN_REPORTED,
                      AgentDefinition, ArchitectToolAudit, ManagedRunReport, ManagedRunReview, ManagedRunState)
 
@@ -199,6 +200,8 @@ def submit_review(session: Session, *, project_id: int, architect_session_id: st
             architect_agent_id=architect_agent_id, architect_assignment_id=architect_assignment_id,
             architect_session_id=architect_session_id, created_at=now)
         session.add(row)
+        session.flush()
+        maintenance.emit_review(session, row)  # P059: decisive verdicts only, same transaction, once per review row
         # audit of the recorded transition in the SAME transaction (ids only, never the review text)
         session.add(ArchitectToolAudit(session_id=architect_session_id, project_id=run.project_id,
                                        agent_id=architect_agent_id, tool="review_record",

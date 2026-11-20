@@ -612,7 +612,10 @@ class AuthorizationSlotTests(ArchitectStoreCase):
                       "/api/projects/{project_id}/tasks/{task_id}/architect/activate",
                       # P053: Owner onboarding check (no model call) and completion; neither reads a document.
                       "/api/projects/{project_id}/architect/onboarding/check",
-                      "/api/projects/{project_id}/architect/onboarding/complete"}
+                      "/api/projects/{project_id}/architect/onboarding/complete",
+                      # P059: Owner maintenance-queue read model and explicit wake; they read no document content.
+                      "/api/projects/{project_id}/architect/maintenance",
+                      "/api/projects/{project_id}/architect/maintenance/wake"}
         self.assertFalse([p for p in paths - activation if "architect" in p.lower() or "document" in p.lower()], paths)
 
     def test_requires_a_ready_project_workspace(self) -> None:

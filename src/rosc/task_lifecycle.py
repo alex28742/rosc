@@ -25,6 +25,7 @@ from sqlalchemy import select, update
 from sqlalchemy.exc import IntegrityError, OperationalError
 from sqlalchemy.orm import Session
 
+from . import architect_maintenance as maintenance
 from .models import (DECISION_ACCEPT, DECISION_REWORK, MAX_CLIENT_KEY, OWNER_DECISIONS, REVIEW_CHANGES_REQUESTED,
                      REVIEW_PASSED, RUN_REPORTED, TASK_ACTIVE, TASK_COMPLETED, TASK_DRAFT, Conversation,
                      ManagedRunReport, ManagedRunState, Task, TaskOwnerDecision)
@@ -154,6 +155,8 @@ def record_decision(session: Session, actor, project_id: int, task_id: int, args
             decision=decision, reason=reason, request_key=key, actor_kind=actor.actor_kind, actor_id=actor.actor_id,
             actor_assurance=actor.assurance, created_at=datetime.now(timezone.utc))
         session.add(row)
+        session.flush()
+        maintenance.emit_decision(session, row)  # P059: same transaction, once per decision row
         task.status = TASK_COMPLETED if decision == DECISION_ACCEPT else TASK_ACTIVE
         session.commit()
     except DecisionRefused:

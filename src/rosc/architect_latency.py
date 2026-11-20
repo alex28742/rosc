@@ -73,6 +73,8 @@ OUTCOMES = frozenset({
     # P054B/P055 Architect Report/Evidence/Review Tool error codes (project_context ToolError)
     "no_managed_run", "not_available", "report_integrity_failed", "report_unavailable", "run_ambiguous",
     "task_mismatch",
+    # P059 maintenance/Handoff/Pipeline Tool error codes (project_context ToolError)
+    "migration_required", "protected_document",
     # runtime (RuntimeProblem) codes
     "connection_failed", "connection_lost", "empty_reply", "endpoint_identity_mismatch", "lookup_failed",
     "malformed_response", "model_unavailable", "no_reply", "process_exited", "process_identity_unproven",

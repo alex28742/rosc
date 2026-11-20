@@ -34,6 +34,7 @@ from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError, OperationalError
 from sqlalchemy.orm import Session, sessionmaker
 
+from . import architect_maintenance as maintenance
 from .models import (MANAGED_HOLDING_STATES, RUN_EXEC_DISPATCHING, RUN_OUTCOMES, RUN_REPORTED, RUN_RUNNING, RUN_UNKNOWN,
                      ManagedRunEvent, ManagedRunHandoff, ManagedRunImport, ManagedRunJournalEvent,
                      ManagedRunPlanRevision, ManagedRunReport, ManagedRunState, Project, RunRecord)
@@ -569,6 +570,9 @@ class RunArtifactImporter:
                    {"outcome": terminal["outcome"], "report_sha256": fold.report["sha256"],
                     "journal_seq": fold.finished["seq"]}, outcome=terminal["outcome"], reported_at=now)
         session.flush()
+        report = session.get(ManagedRunReport, row.run_id)
+        if report is not None:  # P059: the Architect maintenance event, in the SAME transaction (once per Run)
+            maintenance.emit_run_reported(session, row, report, now)
         if self._handoff is not None and session.get(ManagedRunHandoff, row.run_id) is None:
             tests = terminal["tests"]
             text = (f"Worker-отчёт по Run {row.run_id} (Task T{row.task_id:04d}): outcome={terminal['outcome']}. "

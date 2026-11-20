@@ -190,7 +190,11 @@ class MultiStepLookupTests(AdapterCase):
                                            "docs_read", "docs_create", "docs_update", "docs_delete", "docs_restore",
                                            "source_list", "source_read", "source_search", "source_git",
                                            "task_list", "task_read", "task_create", "task_spec_read", "task_spec_save", "prompt_draft_read", "prompt_draft_save", "run_list", "run_read", "report_read",
-                                           "evidence_list", "evidence_read", "review_submit"})  # P055
+                                           "evidence_list", "evidence_read", "review_submit",  # P055
+                                           "maintenance_pending", "maintenance_ack", "handoff_get_snapshot",
+                                           "handoff_get_section", "handoff_init", "handoff_update_checkpoint",
+                                           "pipeline_get_current", "pipeline_list_items", "pipeline_changes_since",
+                                           "pipeline_propose_change"})  # P059
         self.assertEqual(TOOLS_PERMISSIONS, DENY_ALL + [{"action": "rosc_*", "resource": "*", "effect": "allow"}])
         self.assertNotIn("provider_error", SAFE_RETRY_CODES)
 

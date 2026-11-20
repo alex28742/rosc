@@ -63,7 +63,7 @@ class ActorAndPolicyTests(unittest.TestCase):
                                  "task.create", "task.reconcile", "task.repair", "architect_document.list",
                                  "architect_document.read", "architect_document.write", "architect_document.reconcile"})
         self.assertTrue(m2b_actions <= authz.IMPLEMENTED_ACTIONS)
-        self.assertEqual(len(authz.IMPLEMENTED_ACTIONS), 46)  # P056: +task.owner_decision; P043B: +group control, +settings read/update; P054A: +run.launch, +run.reconcile
+        self.assertEqual(len(authz.IMPLEMENTED_ACTIONS), 50)  # P059: +maintenance read/wake, +pipeline read/decide; P056: +task.owner_decision; P043B: +group control, +settings read/update; P054A: +run.launch, +run.reconcile
         policy = LocalOwnerPolicy()
         for action in sorted(authz.IMPLEMENTED_ACTIONS):
             self.assertTrue(evaluate(policy, OWNER, action, scope_for(action)).allowed, action)
