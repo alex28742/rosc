@@ -295,6 +295,9 @@ class ProjectContextBroker:
         self._store = ArchitectDocumentStore(self._workspace)
         self._global_root = global_library_root
         self._pinned: dict[str, int] = {}  # ROSC session id -> Root Binding version captured at activation
+        # P060 r02: (ROSC session id, obligation id) whose Worker message rosc_message_read served to its end.  In-memory
+        # and bounded on purpose: after a restart the Architect simply reads again (fail-closed, no schema change).
+        self._message_reads: dict[tuple[str, str], None] = {}
         # Set only by the trusted ArchitectService (never by a Tool argument): session id -> pinned rules snapshot.
         self._rules_lookup: Callable[[str], RulesSnapshot | None] | None = None
 
@@ -451,7 +454,8 @@ class ProjectContextBroker:
             "maintenance": "Consequential Core events (Run reported, decisive Review, Owner accept/rework) create "
                            "obligations for you: rosc_maintenance_pending lists them; assess, update the Handoff/"
                            "propose Pipeline changes/write an ADR only when warranted, then rosc_maintenance_ack. "
-                           "A Worker message addressed to you (worker_message) is assessed with rosc_message_ack.",
+                           "A Worker message addressed to you (worker_message) is assessed with rosc_message_ack "
+                           "(a truncated one is read in full with rosc_message_read first).",
             "run_review": "To review a reported Worker Run, investigate freely (rosc_run_list, rosc_report_read, "
                           "rosc_evidence_list/rosc_evidence_read, rosc_source_*), then record your verdict ONCE with "
                           "rosc_review_submit when you have finished. A chat reply alone does not record a review. "
@@ -754,9 +758,26 @@ class ProjectContextBroker:
         self._maintenance_ready(session)
         if not maintenance.message_schema_ready(session):
             raise ToolError("migration_required", "Worker message assessment needs database migration 0025")
+        read = (caller.session_id, args.get("obligation_id")) in self._message_reads
         result = self._maint(maintenance.acknowledge_message, session, project_id=caller.project_id,
-                             agent_id=caller.agent_id, session_id=caller.session_id, args=args)
+                             agent_id=caller.agent_id, session_id=caller.session_id, args=args, read_complete=read)
         return {"kind": "message_ack", **result}
+
+    def tool_message_read(self, session: Session, caller: Caller, args: dict) -> dict:
+        """P060 r02: bounded page of the Worker message behind one of the caller's chat obligations (nothing else)."""
+        self._require(caller, CAP_CONTEXT_READ)
+        self._maintenance_ready(session)
+        if not maintenance.message_schema_ready(session):
+            raise ToolError("migration_required", "Worker message assessment needs database migration 0025")
+        result = self._maint(maintenance.message_read, session, project_id=caller.project_id,
+                             agent_id=caller.agent_id, args=args)
+        if result["complete"]:
+            key = (caller.session_id, result["obligation_id"])
+            self._message_reads.pop(key, None)
+            self._message_reads[key] = None
+            while len(self._message_reads) > 1024:
+                self._message_reads.pop(next(iter(self._message_reads)))
+        return {"kind": "message_read", **result}
 
     def tool_handoff_get_snapshot(self, session: Session, caller: Caller, args: dict) -> dict:
         self._require(caller, CAP_DOC_READ)
@@ -1374,7 +1395,8 @@ ACCESS_MATRIX = [
      "operations": "create Task, read/save Spec revisions, read/save Prompt Draft revisions", "mode": "read_write_drafts_only"},
     {"resource": "this Project's maintenance obligations (Core events awaiting assessment, incl. Worker messages "
                  "addressed to you)",
-     "operations": "list, acknowledge with a Core-verified outcome (maintenance ACK / message ACK by type)",
+     "operations": "list, acknowledge with a Core-verified outcome (maintenance ACK / message ACK by type), "
+                   "read the Worker message behind your own chat obligation",
      "mode": "record_outcome_only"},
     {"resource": "this Project's working Handoff (ROSC-private document 'handoff')",
      "operations": "snapshot, section read, explicit init, section checkpoint (revision-checked); not via docs_*",

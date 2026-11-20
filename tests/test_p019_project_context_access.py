@@ -227,7 +227,7 @@ class TransportTests(ContextCase):
                                  "maintenance_pending", "maintenance_ack", "handoff_get_snapshot", "handoff_get_section", "handoff_init",
                                  "handoff_update_checkpoint", "pipeline_get_current", "pipeline_list_items",
                                  "pipeline_changes_since", "pipeline_propose_change",  # P059
-                                 "message_ack"})  # P060
+                                 "message_ack", "message_read"})  # P060 (r02: message_read)
         for tool in TOOLS:  # writes exist only for ROSC documents and name no target Project
             if tool["name"] in ("docs_create", "docs_update", "docs_delete", "docs_restore"):
                 self.assertNotIn("project", tool["inputSchema"]["properties"])

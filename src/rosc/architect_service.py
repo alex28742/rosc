@@ -1872,7 +1872,7 @@ class ArchitectService:
     def _message_wake_route(self, project_id: int, live: ArchitectSession, handle: RuntimeHandle,
                             automatic: bool) -> tuple[str, RuntimeHandle, bool] | None:
         """P060 (caller holds the turn lock): (room, handle of the room's native Architect session, needs Task
-        preface) for the earliest ready chat obligation, or None (nothing sent; the obligation stays visibly open)."""
+        preface) for the first ready chat obligation (automatic: a never-offered one first), or None (nothing sent; the obligation stays visibly open)."""
         with self._sessions() as session:
             rows = maintenance.wake_candidates(session, project_id, live.session_id, owner_retry=not automatic,
                                                chat=True)

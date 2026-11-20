@@ -59,11 +59,12 @@ class AssessmentCoreCase(CoreCase):
         self.sessions = make_session_factory(self.data / "rosc.db")
         self.session_id = str(uuid.uuid4())
 
-    def worker_says(self, text: str, *, task_id=None, to=None, grant_arch: bool = False) -> tuple[str, dict]:
+    def worker_says(self, text: str, *, task_id=None, to=None, grant_arch: bool = False,
+                    also: tuple = ()) -> tuple[str, dict]:
         """Owner -> Worker A (Architect addressed too, so it is a room member); A publishes ``text``."""
         grant = [self.A, self.arch] if grant_arch else [self.A]
         sent = self.core.post_owner_turn(OWNER, 1, client_key=self.key(), body="Please report.",
-                                         to=[self.A, self.arch], grant=grant, task_id=task_id)
+                                         to=[self.A, self.arch, *also], grant=grant, task_id=task_id)
         room = sent["message"]["conversation_id"]
         while True:
             claim = self.core.claim_next(room)
@@ -214,6 +215,81 @@ class PublicationAndAckTests(AssessmentCoreCase):
         result = self.ack(oid, "replied", reply_message_id=published["reply_message_id"])
         self.assertEqual(result["outcome"]["reply_message_id"], published["reply_message_id"])
 
+    # -- P060 r02 H3: a "replied" ACK must name a reply that answers THIS Worker message (canonical to / reply_to) ---
+    def test_r02_reply_addressed_only_to_another_worker_is_rejected(self) -> None:
+        room, view = self.worker_says("Port?" + control("continue", "reply_requested"), grant_arch=True,
+                                      also=(self.B,))
+        oid = self.obligation()
+        claim = self.core.claim_next(room)
+        self.assertEqual(claim.agent_id, self.arch)
+        self.core.dispatch(claim.turn_id, self.transport)
+        other = self.core.complete(claim.turn_id, "B, please rebase first." + control("finish"), to=[self.B])
+        self.refused("reply_not_addressed", oid, "replied", reply_message_id=other["reply_message_id"])
+        self.assertEqual(self.meta(view["reply_message_id"])["assessment"]["state"], "awaiting")  # still open
+
+    def test_r02_reply_to_the_same_workers_other_question_is_rejected_and_the_real_one_counts(self) -> None:
+        self.worker_says("First question: which port?" + control("finish", "reply_requested"))
+        first = self.obligation()
+        room, _view = self.worker_says("Second question: which DB?" + control("continue", "reply_requested"),
+                                       grant_arch=True)
+        second = self.obligation()
+        self.assertNotEqual(first, second)
+        claim = self.core.claim_next(room)
+        self.assertEqual(claim.agent_id, self.arch)
+        self.core.dispatch(claim.turn_id, self.transport)
+        answer = self.core.complete(claim.turn_id, "Use SQLite." + control("finish"))  # default: to the requester A
+        self.refused("reply_not_addressed", first, "replied", reply_message_id=answer["reply_message_id"])
+        result = self.ack(second, "replied", reply_message_id=answer["reply_message_id"])
+        self.assertEqual(result["outcome"]["reply_message_id"], answer["reply_message_id"])
+
+    def test_r02_group_turn_ack_is_voided_when_the_published_reply_answers_someone_else(self) -> None:
+        room, view = self.worker_says("Split the PR?" + control("continue", "reply_requested"), grant_arch=True,
+                                      also=(self.B,))
+        oid = self.obligation()
+        claim = self.core.claim_next(room)
+        self.core.dispatch(claim.turn_id, self.transport)
+        self.assertEqual(self.ack(oid, "replied")["state"], "awaiting_reply_publication")
+        self.core.complete(claim.turn_id, "B, wait for A." + control("finish"), to=[self.B])
+        self.assertEqual(self.core.claim_next(room).status, "awaiting_owner")
+        assessment = self.meta(view["reply_message_id"])["assessment"]
+        self.assertEqual((assessment["state"], assessment["outcome"]), ("awaiting", None))  # never a false PASS
+        self.assertIn("reply_not_addressed", assessment["error"])
+        self.assertEqual(len(self.ready()), 1)  # open again: a later wake assesses it
+
+
+class LongMessageReadTests(AssessmentCoreCase):
+    """P060 r02 H2: a body longer than the wake excerpt is assessable only after it was read to the end."""
+
+    def test_r02_tail_is_readable_and_the_ack_needs_the_whole_message(self) -> None:
+        body = "Status details. " * 200 + "IMPORTANT: the migration needs a manual backup step."
+        self.assertGreater(len(body), 3 * maintenance.MAX_WAKE_BODY // 2)
+        _room, view = self.worker_says(body + control("finish", "informational"))
+        oid = self.obligation()
+        self.refused("message_not_read", oid, "no_reply_needed")  # only the excerpt was shown
+        with self.sessions() as session:
+            page = maintenance.message_read(session, project_id=1, agent_id=self.arch,
+                                            args={"obligation_id": oid, "offset": maintenance.MAX_WAKE_BODY})
+        self.assertTrue(page["complete"])
+        self.assertIsNone(page["next_offset"])
+        self.assertTrue(page["text"].endswith("manual backup step."))
+        self.assertEqual(page["total_chars"], len(body))
+        for code, kw in (("not_addressee", {"agent_id": self.A}), ("not_found", {"project_id": 2})):
+            with self.sessions() as session, self.assertRaises(maintenance.MaintenanceError) as caught:
+                maintenance.message_read(session, **{"project_id": 1, "agent_id": self.arch, **kw},
+                                         args={"obligation_id": oid})
+            self.assertEqual(caught.exception.code, code)
+        with self.sessions() as session:
+            done = maintenance.acknowledge_message(session, project_id=1, agent_id=self.arch,
+                                                   session_id=self.session_id, read_complete=True,
+                                                   args={"obligation_id": oid, "outcome": "no_reply_needed",
+                                                         "rationale": "Read in full; backup step noted."})
+        self.assertEqual(done["state"], "completed")
+        self.assertEqual(self.meta(view["reply_message_id"])["assessment"]["state"], "assessed")
+
+    def test_r02_short_message_needs_no_extra_read(self) -> None:
+        self.worker_says("Done." + control("finish", "informational"))
+        self.assertEqual(self.ack(self.obligation(), "no_reply_needed")["state"], "completed")
+
 
 class MigrationTests(AssessmentCoreCase):
     def test_downgrade_is_refused_once_a_worker_message_event_exists_and_clean_round_trip_works(self) -> None:
@@ -339,6 +415,59 @@ class MessageWakeTests(MessageWakeCase):
         self.assertEqual(self.chat_wakes()[0][1], "replied")
         self.assertEqual(len(self.wakes()), 1)
         self.assertEqual(self.states(), ["pending"])
+
+
+class R02WakeTests(MessageWakeCase):
+    def test_r02_unacked_room_never_starves_a_new_room_and_never_loops(self) -> None:
+        """H1: room A offered but not ACKed; a new message in room B is really delivered (to B), with no repeat of A."""
+        room_a, message_a = self.worker_says("PC note." + control("finish", "informational"))
+        oid_a = self.obligation()
+        self.script(["I saw it."], [])  # reply without ACK
+        self.tick()
+        self.assertEqual([w[0] for w in self.chat_wakes()], [room_a])
+        room_b, message_b = self.worker_says("TC done." + control("finish", "informational"), task_id=1)
+        oid_b = self.obligation()
+        self.assertNotEqual(room_a, room_b)
+        ack_b = {"tool": "message_ack", "args": {"obligation_id": oid_b, "outcome": "no_reply_needed",
+                                                 "rationale": "Informational; nothing requested."}}
+        self.script(["Assessed."], [ack_b])
+        self.tick()
+        self.assertEqual([w[0] for w in self.chat_wakes()], [room_a, room_b])  # the new room is the one woken
+        prompt = (self.bin / "last_prompt.txt").read_text()
+        self.assertIn(oid_b, prompt)
+        self.assertNotIn(oid_a, prompt)
+        self.assertEqual(self.assessment(message_b)["state"], "assessed")
+        for _ in range(3):
+            self.tick()
+        self.assertEqual(len(self.chat_wakes()), 2)  # no automatic repeat of A, no turn for anyone
+        self.assertEqual(self.assessment(message_a)["state"], "awaiting")
+        ack_a = {"tool": "message_ack", "args": {"obligation_id": oid_a, "outcome": "no_reply_needed",
+                                                 "rationale": "Informational note; nothing requested."}}
+        self.script(["Assessed."], [ack_a])
+        self.client.post("/api/projects/P0001/architect/maintenance/wake")  # explicit Owner retry re-offers A
+        self.architect.drain()
+        self.assertEqual([w[0] for w in self.chat_wakes()], [room_a, room_b, room_a])
+        self.assertEqual(self.assessment(message_a)["state"], "assessed")
+
+    def test_r02_truncated_wake_refuses_an_unread_ack_and_a_full_read_then_ack_completes(self) -> None:
+        """H2: the tail of a long message is never assessed blind; rosc_message_read (real MCP) unlocks the ACK."""
+        body = "Progress line. " * 140 + "TAIL: port 8123 is required."
+        _room, message_id = self.worker_says(body + control("finish", "informational"), task_id=1)
+        oid = self.obligation()
+        ack = {"tool": "message_ack", "args": {"obligation_id": oid, "outcome": "no_reply_needed",
+                                               "rationale": "Informational report; nothing requested."}}
+        self.script(["Assessed."], [ack])  # ACK without reading the tail
+        self.tick()
+        prompt = (self.bin / "last_prompt.txt").read_text()
+        self.assertIn("TRUNCATED", prompt)
+        self.assertIn("rosc_message_read", prompt)
+        self.assertNotIn("port 8123", prompt)
+        self.assertEqual(self.assessment(message_id)["state"], "awaiting")  # refused: not counted as assessed
+        read = {"tool": "message_read", "args": {"obligation_id": oid, "offset": maintenance.MAX_WAKE_BODY}}
+        self.script(["Read and assessed."], [read, ack])
+        self.client.post("/api/projects/P0001/architect/maintenance/wake")  # Owner retry
+        self.architect.drain()
+        self.assertEqual(self.assessment(message_id)["state"], "assessed")
 
 
 class GroupTurnNoteTests(R04Case):

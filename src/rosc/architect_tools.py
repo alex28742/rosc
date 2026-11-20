@@ -190,6 +190,12 @@ TOOLS: list[dict] = [
                                                                               "owner_decision_required",
                                                                               "out_of_scope", "other"]}},
                             ["obligation_id", "outcome", "rationale"])},
+    {"name": "message_read", "description": "Read the full text of the Worker message behind ONE of your "
+     "worker_message obligations, as bounded pages (offset from 0; continue at next_offset until it is null). Use it "
+     "when the assessment note says the body was TRUNCATED: ROSC refuses rosc_message_ack for such a message until "
+     "you have read it to the end. Read-only; no other message or chat search.",
+     "inputSchema": _schema({"obligation_id": {"type": "string"}, "offset": {"type": "integer", "minimum": 0}},
+                            ["obligation_id"])},
     {"name": "handoff_get_snapshot", "description": "Compact snapshot of the Project's working Handoff (revision, "
      "sections with sizes, current focus / next action / blockers / pending Owner decisions). since_revision marks "
      "the sections changed after that revision. exists=false when no Handoff was initialized.",
