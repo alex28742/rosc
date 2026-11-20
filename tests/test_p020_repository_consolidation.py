@@ -268,7 +268,11 @@ class GlobalLibraryTests(p19.ContextCase):
                                  "docs_create", "docs_update", "docs_delete", "docs_restore", "source_list",
                                  "source_read", "source_search", "source_git", "task_list", "task_read", "task_create", "task_spec_read", "task_spec_save", "prompt_draft_read", "prompt_draft_save", "run_list", "run_read", "report_read",
                                  # P055 Architect Evidence Tools + recorded Review
-                                 "evidence_list", "evidence_read", "review_submit"})
+                                 "evidence_list", "evidence_read", "review_submit",
+                                 # P059 maintenance obligations, typed Handoff, Core Pipeline (proposals only)
+                                 "maintenance_pending", "maintenance_ack", "handoff_get_snapshot", "handoff_get_section", "handoff_init",
+                                 "handoff_update_checkpoint", "pipeline_get_current", "pipeline_list_items",
+                                 "pipeline_changes_since", "pipeline_propose_change"})
         listing = next(t for t in TOOLS if t["name"] == "global_list")
         self.assertFalse(listing["inputSchema"]["additionalProperties"])
         self.assertEqual(set(listing["inputSchema"]["properties"]), {"path", "offset", "limit"})

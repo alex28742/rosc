@@ -663,7 +663,10 @@ class HardeningTests(StageCase):
                                   # P054B observable Worker execution, P055 reviews, P056 Owner decisions (all empty)
                                   "managed_run_imports", "managed_run_journal_events", "managed_run_plan_revisions",
                                   "managed_run_reports", "managed_run_handoffs", "managed_run_reviews",
-                                  "task_owner_decisions"})
+                                  "task_owner_decisions",
+                                  # P059 Architect maintenance and the Core-owned Pipeline (all empty)
+                                  "project_events", "architect_obligations", "architect_maintenance_wakes",
+                                  "pipeline_resources", "pipeline_items", "pipeline_changes", "pipeline_proposals"})
 
 
 if __name__ == "__main__":

@@ -37,14 +37,18 @@ from .architect_rules import ArchitectRulesLoader, RulesError, RulesSnapshot
 from .architect_runtime import (ADAPTER_NAME, ArchitectRuntime, RuntimeAmbiguous, RuntimeHandle, RuntimeProblem,
                                 RuntimeStartUnresolved)
 from .architect_tools import TOOL_NAMES, ToolHost
-from .authorization import (ARCHITECT_ACTIVATE, ARCHITECT_CONTEXT_READ,
+from .authorization import (ARCHITECT_ACTIVATE, ARCHITECT_CONTEXT_READ, ARCHITECT_MAINTENANCE_READ,
+                            ARCHITECT_MAINTENANCE_WAKE,
                             ARCHITECT_DEACTIVATE, ARCHITECT_REPLY_COMMIT, ARCHITECT_STATUS,
                             CONVERSATION_DELIVERY_RECONCILE, CONVERSATION_MESSAGE_CREATE, ActorContext, AuthorizationPolicy, ResourceScope,
                             evaluate)
 from .project_context import ACCESS_MATRIX, ProjectContextBroker, project_label
+from . import architect_maintenance as maintenance
 from .task_lifecycle import activate_task
 from .conversation import (SAFE_RETRY_CODES, ConversationConflict, ConversationDenied, ConversationNotFound, ConversationStoreError, InvalidConversationInput, UnsafeProjectIdentity, _architect_body, ensure_task_conversation, _utc_iso, delivery_state_view, recoverable_failure)
-from .models import (ASSIGNMENT_ACTIVE, ASSURANCE_ADAPTER_VERIFIED, CONVERSATION_KIND_PROJECT, CONVERSATION_KIND_TASK, DELIVERY_DELIVERED,
+from .models import (OBLIGATION_FAILED, OBLIGATION_PENDING, OBLIGATION_PROCESSING, WAKE_AMBIGUOUS,
+                     WAKE_FAILED, WAKE_NOT_RECEIVED, WAKE_REPLIED, WAKE_SENT, ArchitectMaintenanceWake,
+                     ArchitectObligation, ConversationDispatchControl, ProjectEvent, ASSIGNMENT_ACTIVE, ASSURANCE_ADAPTER_VERIFIED, CONVERSATION_KIND_PROJECT, CONVERSATION_KIND_TASK, DELIVERY_DELIVERED,
                      DELIVERY_FAILED, DELIVERY_PENDING, DELIVERY_UNKNOWN, PARTICIPANT_ARCHITECT, PARTICIPANT_OWNER,
                      ONBOARDING_BLOCKED, ONBOARDING_INITIALIZING, ONBOARDING_LEGACY, ONBOARDING_READY, ONBOARDING_UNKNOWN,
                      ROLE_ARCHITECT, SESSION_ERROR, SESSION_READY, SESSION_STARTING, SESSION_STOPPED, AgentDefinition,
@@ -100,6 +104,14 @@ def onboarding_runtime_id(session_id: str, attempt: int) -> str:
     """Correlation id of onboarding attempt ``attempt`` of one ROSC session (attempt 1 keeps the P029 id)."""
     base = "msg_roscob" + session_id.replace("-", "")
     return base if attempt <= 1 else f"{base}n{attempt}"
+
+
+WAKE_LOOKUP_INTERVAL = 60.0  # P059: seconds between automatic provider lookups of one unresolved maintenance turn
+
+
+def maintenance_runtime_id(session_id: str, attempt: int) -> str:
+    """P059: correlation id of maintenance wake ``attempt`` of one ROSC session."""
+    return f"msg_roscmw{session_id.replace('-', '')}n{attempt}"
 
 
 def _norm_path(value: object) -> str:
@@ -755,6 +767,17 @@ class ArchitectService:
                 return
             row.onboarding_state, row.onboarding_detail = state, detail
             session.commit()
+            project_id = row.project_id
+        self._familiarized(project_id, state)
+
+    def _familiarized(self, project_id: int, state: str) -> None:
+        """P059: a session that just became familiarized gets ONE bounded maintenance offer (if anything is open).
+        Scheduled on the worker pool, so it waits for the turn lock the caller may still hold."""
+        if state == ONBOARDING_READY:
+            try:
+                self._schedule_maintenance(project_id, "ready")
+            except Exception:
+                log.warning("Architect maintenance offer could not be scheduled")
 
     def _settle_onboarding_window(self, session: Session, live: ArchitectSession) -> None:
         """Close an open onboarding evidence window before ANOTHER provider turn of this Project is sent (the caller
@@ -864,9 +887,13 @@ class ArchitectService:
                 row.onboarding_settled_at = _now()
             self._record_attempt(row, "reply", marker or "none")
             state, detail = self._judge(session, row, binding, marker)
-            if apply and row.onboarding_state == ONBOARDING_INITIALIZING:
+            applied = apply and row.onboarding_state == ONBOARDING_INITIALIZING
+            if applied:
                 row.onboarding_state, row.onboarding_detail = state, detail
             session.commit()
+            project_id = row.project_id
+        if applied:
+            self._familiarized(project_id, state)
         return state, detail
 
     def _resolve_previous(self, project_id: int, session_id: str, handle: RuntimeHandle) -> tuple[str, str | None] | None:
@@ -952,6 +979,7 @@ class ArchitectService:
                 state, detail = self._judge(session, row, binding, None if marker in (None, "none") else marker)
                 row.onboarding_state, row.onboarding_detail = state, detail
                 session.commit()
+                self._familiarized(project_id, state)
                 return "re_evaluated"
             if isinstance(info, dict) and info.get("outcome") == "not_received":
                 row.onboarding_state, row.onboarding_detail = ONBOARDING_BLOCKED, "not_received"
@@ -1607,6 +1635,10 @@ class ArchitectService:
             session.commit()
             ready = list(session.scalars(select(ArchitectSession.project_id).where(
                 ArchitectSession.state == SESSION_READY)))
+        try:
+            self._recover_maintenance()  # P059: an interrupted wake becomes ambiguous; nothing is re-sent
+        except OperationalError:
+            log.warning("Architect maintenance recovery skipped: database is not migrated")
         if not self._tools_expected():
             return
         for project_id in ready:
@@ -1620,6 +1652,239 @@ class ArchitectService:
                             self._restore_tools(live, project_id, force=True)
             except Exception:
                 log.warning("Architect tool reconnect skipped for a project")
+
+
+    # -- P059: bounded Core maintenance wake ---------------------------------------------------------------------------
+    # One fenced provider turn per wake, on the Project's ``turn`` lock (the same ordering as Owner and onboarding turns,
+    # no second queue).  Its attempt identity and the offered obligations are committed BEFORE the send; an ambiguous
+    # outcome is resolved only through the provider's own record by that correlation id, never re-sent blindly.  The
+    # reply is not published to any conversation and completes nothing: only rosc_maintenance_ack completes work.
+    def _maintenance_schema(self) -> bool:
+        known = getattr(self, "_p059_known", None)
+        if known is None:
+            with self._sessions() as session:
+                known = self._p059_known = maintenance.schema_ready(session)
+        return known
+
+    def _maintenance_blocker(self, session: Session, project_id: int) -> str | None:
+        """Why Core cannot offer obligations to the Architect right now (None = it can)."""
+        if not self._maintenance_schema():
+            return "migration_required"
+        if not self._tools_expected():
+            return "tools_not_supported"
+        pair = self._assignment(session, project_id)
+        if pair is None:
+            return "no_architect"
+        live = self._live(session, project_id)
+        if live is None or live.state != SESSION_READY:
+            return "architect_not_active"
+        if live.onboarding_state != ONBOARDING_READY:
+            return "architect_not_familiarized"
+        if not self._tools.active(live.session_id):  # type: ignore[union-attr]
+            return "tools_unavailable"
+        paused = session.scalars(select(ConversationDispatchControl).join(
+            Conversation, Conversation.conversation_id == ConversationDispatchControl.conversation_id).where(
+            Conversation.project_id == project_id,
+            (ConversationDispatchControl.paused.is_(True)) | (ConversationDispatchControl.emergency_brake.is_(True)))).first()
+        if paused is not None:
+            return "emergency_brake" if paused.emergency_brake else "paused"
+        wake = maintenance.latest_wake(session, project_id)
+        if wake is not None and wake.state in (WAKE_SENT, WAKE_AMBIGUOUS) and wake.settled_at is None:
+            return "wake_uncertain"
+        return None
+
+    def maintenance_tick(self) -> int:
+        """Schedule at most one automatic wake per Project that has never-offered obligations and an eligible session."""
+        if not self._maintenance_schema() or not self._tools_expected():
+            return 0
+        with self._sessions() as session:
+            projects = set(session.scalars(select(ArchitectObligation.project_id).where(
+                ArchitectObligation.state.in_((OBLIGATION_PENDING, OBLIGATION_FAILED, OBLIGATION_PROCESSING)))))
+        scheduled = 0
+        for project_id in sorted(projects):
+            if self._schedule_maintenance(project_id, "event"):
+                scheduled += 1
+        return scheduled
+
+    def _schedule_maintenance(self, project_id: int, trigger: str) -> bool:
+        with self._guard:
+            inflight = self.__dict__.setdefault("_maintenance_inflight", set())
+            if project_id in inflight:
+                return False
+            inflight.add(project_id)
+        try:
+            self._futures.append(self._pool.submit(self._maintenance_run, project_id, trigger))
+        except RuntimeError:  # pool shut down
+            with self._guard:
+                inflight.discard(project_id)
+            return False
+        return True
+
+    def _maintenance_run(self, project_id: int, trigger: str) -> None:
+        try:
+            self._maintenance_wake(project_id, trigger)
+        except Exception as exc:
+            log.warning("Architect maintenance wake failed unexpectedly: %s", type(exc).__name__)
+        finally:
+            with self._guard:
+                self.__dict__.setdefault("_maintenance_inflight", set()).discard(project_id)
+
+    def maintenance_wake(self, actor: ActorContext, project_id: object) -> dict:
+        """Owner retry: offer every open obligation once more in ONE bounded turn (never over an unresolved turn)."""
+        self._authorize(actor, ARCHITECT_MAINTENANCE_WAKE, project_id)
+        with self._sessions() as session:
+            pid = self._project(session, project_id).id  # type: ignore[arg-type]
+            blocker = self._maintenance_blocker(session, pid)
+        if blocker == "wake_uncertain":
+            blocker = None  # the wake first resolves the previous turn by lookup; it never re-sends over it
+        if blocker is not None:
+            return {"scheduled": False, "blocked_reason": blocker}
+        return {"scheduled": self._schedule_maintenance(pid, "owner_retry"), "blocked_reason": None}
+
+    def _resolve_wake(self, project_id: int, live: ArchitectSession, handle: RuntimeHandle | None) -> bool:
+        """Caller holds the turn lock.  Settle an unresolved previous wake.  True = a new send is safe."""
+        with self._sessions() as session:
+            wake = maintenance.latest_wake(session, project_id)
+            if wake is None or wake.settled_at is not None:
+                return True
+            wake_id, wake_session, attempt = wake.wake_id, wake.session_id, wake.attempt
+        if wake_session != live.session_id or handle is None:
+            # the turn belonged to an ended session: its Tools are revoked, so it can no longer complete anything
+            return self._settle_wake(wake_id, WAKE_AMBIGUOUS, "session_ended", release=True)
+        try:
+            found = self._runtime.lookup(handle, maintenance_runtime_id(wake_session, attempt))
+        except RuntimeProblem:
+            return False
+        if found.status == "reply":
+            return self._settle_wake(wake_id, WAKE_REPLIED, None, release=True)
+        if found.status == "absent":
+            return self._settle_wake(wake_id, WAKE_NOT_RECEIVED, None, release=True)
+        return False  # in progress or uncertain: stays visible; nothing is sent
+
+    def _settle_wake(self, wake_id: str, state: str, detail: str | None, *, release: bool) -> bool:
+        with self._sessions() as session:
+            wake = session.get(ArchitectMaintenanceWake, wake_id)
+            if wake is None:
+                return True
+            wake.state, wake.detail, wake.settled_at = state, detail, _now()
+            if release:  # unacknowledged offered work becomes pending again (completed rows are never touched)
+                for row in session.scalars(select(ArchitectObligation).where(
+                        ArchitectObligation.offered_wake_id == wake_id,
+                        ArchitectObligation.state == OBLIGATION_PROCESSING)):
+                    row.state, row.updated_at = OBLIGATION_PENDING, _now()
+            session.commit()
+        return True
+
+    def _maintenance_wake(self, project_id: int, trigger: str) -> None:
+        with self._sessions() as session:
+            if self._maintenance_blocker(session, project_id) not in (None, "wake_uncertain"):
+                return
+        automatic = trigger != "owner_retry"
+        with self._lock(project_id, "turn"):
+            with self._sessions() as session:
+                blocker = self._maintenance_blocker(session, project_id)
+                if blocker not in (None, "wake_uncertain"):
+                    return
+                live = self._live(session, project_id)
+                handle = self._handle(live)
+            if blocker == "wake_uncertain":
+                throttle = self.__dict__.setdefault("_wake_lookup_at", {})
+                if automatic and time.monotonic() - throttle.get(project_id, -1e9) < WAKE_LOOKUP_INTERVAL:
+                    return  # an automatic pass asks the provider about an unresolved turn at most once a minute
+                throttle[project_id] = time.monotonic()
+                if not self._resolve_wake(project_id, live, handle):
+                    return
+            with self._sessions() as session:
+                if not maintenance.wake_candidates(session, project_id, live.session_id, owner_retry=not automatic):
+                    return  # nothing to offer: no probe, no turn
+            if handle is None or not self._timed_probe(live, handle):
+                return
+            with self._sessions() as session:
+                live = session.get(ArchitectSession, live.session_id)
+                rows = maintenance.wake_candidates(session, project_id, live.session_id, owner_retry=not automatic)
+                if not rows:
+                    return
+                batch, more = rows[:maintenance.MAX_BATCH], max(0, len(rows) - maintenance.MAX_BATCH)
+                events = {e.event_id: e for e in session.scalars(select(ProjectEvent).where(
+                    ProjectEvent.event_id.in_([r.event_id for r in batch])))}
+                self._settle_onboarding_window(session, live)
+                attempt = (session.scalar(select(func.max(ArchitectMaintenanceWake.attempt)).where(
+                    ArchitectMaintenanceWake.session_id == live.session_id)) or 0) + 1
+                now = _now()
+                wake = ArchitectMaintenanceWake(
+                    wake_id=str(uuid.uuid4()), project_id=project_id, session_id=live.session_id, attempt=attempt,
+                    trigger=trigger, obligation_ids=json.dumps([r.obligation_id for r in batch]), state=WAKE_SENT,
+                    created_at=now)
+                session.add(wake)
+                for row in batch:
+                    row.state, row.offered_wake_id = OBLIGATION_PROCESSING, wake.wake_id
+                    row.offer_count, row.updated_at = row.offer_count + 1, now
+                text = maintenance.wake_text(project_id, batch, events, more)
+                session.commit()  # committed BEFORE the send: a received turn always has its lookup id
+                wake_id, runtime_id = wake.wake_id, maintenance_runtime_id(live.session_id, attempt)
+            try:
+                self._runtime.ask(handle, runtime_id, text, self._timeout)
+            except RuntimeAmbiguous as exc:
+                with self._sessions() as session:
+                    row = session.get(ArchitectMaintenanceWake, wake_id)
+                    row.state, row.detail = WAKE_AMBIGUOUS, exc.code[:48]
+                    session.commit()
+                return  # never re-sent; the next wake resolves it by lookup first
+            except RuntimeProblem as exc:
+                self._settle_wake(wake_id, WAKE_FAILED, exc.code[:48], release=True)
+                return
+            self._settle_wake(wake_id, WAKE_REPLIED, None, release=True)
+
+    def maintenance_status(self, actor: ActorContext, project_id: object, *, cursor: object = 0,
+                           limit: object = 50) -> dict:
+        """P059 Owner read model: factual queue state, last handled, latest wake, blocker and next actor."""
+        self._authorize(actor, ARCHITECT_MAINTENANCE_READ, project_id)
+        with self._sessions() as session:
+            pid = self._project(session, project_id).id  # type: ignore[arg-type]
+            if not self._maintenance_schema():
+                return {"project_id": project_label(pid), "available": False, "blocked_reason": "migration_required"}
+            after = cursor if isinstance(cursor, int) and not isinstance(cursor, bool) and cursor >= 0 else 0
+            size = limit if isinstance(limit, int) and not isinstance(limit, bool) and 1 <= limit <= 100 else 50
+            counts = maintenance.counts(session, pid)
+            items, more, next_cursor = maintenance.list_obligations(session, pid, after_seq=after, limit=size)
+            wake = maintenance.latest_wake(session, pid)
+            blocker = self._maintenance_blocker(session, pid)
+            open_count = counts["pending"] + counts["processing"] + counts["failed"]
+            wake_problem = wake is not None and wake.state in (WAKE_FAILED, WAKE_AMBIGUOUS, WAKE_SENT) and (
+                wake.state != WAKE_SENT or wake.settled_at is None)
+            if not open_count:
+                next_actor, blocker = None, None
+            elif blocker in ("no_architect", "architect_not_active", "architect_not_familiarized", "tools_unavailable",
+                             "paused", "emergency_brake", "migration_required", "tools_not_supported"):
+                next_actor = "Owner"
+            elif wake is not None and wake.state == WAKE_FAILED and counts["pending"] + counts["failed"]:
+                next_actor, blocker = "Owner", blocker or "wake_failed"
+            else:
+                next_actor = "Architect"
+            pipeline = maintenance.pipeline_current(session, pid)
+            handled = maintenance.last_handled(session, pid)
+            processed = maintenance.processed_cursor(session, pid)
+        handoff = maintenance.handoff_snapshot(self._context._store, pid) if self._context is not None else None  # type: ignore[union-attr]
+        return {"project_id": project_label(pid), "available": True, "counts": counts,
+                "attention": bool(open_count and (next_actor == "Owner" or wake_problem or counts["failed"])),
+                "blocked_reason": blocker if open_count else None, "next_actor": next_actor,
+                "last_handled": handled,
+                "latest_wake": maintenance.wake_view(wake), "obligations": items, "has_more": more,
+                "next_cursor": next_cursor, "processed_cursor": processed,
+                "handoff": None if handoff is None else {"exists": handoff["exists"], "revision": handoff.get("revision")},
+                "pipeline": {"state": pipeline["state"], "revision": pipeline["revision"],
+                             "open_proposals": len(pipeline["open_proposals"])},
+                "coverage": maintenance.COVERAGE_NOTE}
+
+    def _recover_maintenance(self) -> None:
+        """Startup: a wake still marked ``sent`` may or may not have reached the provider -> ``ambiguous``."""
+        if not self._maintenance_schema():
+            return
+        with self._sessions() as session:
+            for row in session.scalars(select(ArchitectMaintenanceWake).where(
+                    ArchitectMaintenanceWake.state == WAKE_SENT)):
+                row.state, row.detail = WAKE_AMBIGUOUS, "interrupted"
+            session.commit()
 
 
 # -- P047: narrow correlated Architect outbound bridge for group turns ---------------------------------------------------

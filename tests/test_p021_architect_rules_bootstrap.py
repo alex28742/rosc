@@ -49,6 +49,10 @@ P039_READ_TOOLS = ("task_list", "task_read", "task_create", "task_spec_read", "t
 P054B_READ_TOOLS = ("report_read",)  # P054B: one more read-only Tool (registered managed Run Report)
 # P055: two read-only Evidence Tools + the explicit Architect Review record (Owner-approved; no approval gate)
 P055_TOOLS = ("evidence_list", "evidence_read", "review_submit")
+# P059 (Owner-approved): maintenance obligations, the typed Handoff and the Core-owned Pipeline (proposals only)
+P059_TOOLS = ("maintenance_pending", "maintenance_ack", "handoff_get_snapshot", "handoff_get_section", "handoff_init",
+              "handoff_update_checkpoint", "pipeline_get_current", "pipeline_list_items", "pipeline_changes_since",
+              "pipeline_propose_change")
 PRE_P021_TOOLS = ("briefing", "global_list", "global_read", "docs_list", "docs_search", "docs_read", "docs_create",
                   "docs_update", "docs_delete", "docs_restore", "source_list", "source_read", "source_search", "source_git")
 
@@ -451,15 +455,20 @@ class ServiceRulesTests(p19.ContextCase):
         self.activate()
 
     def test_no_new_tool_and_unchanged_docs_privileges(self) -> None:
-        self.assertEqual(TOOL_NAMES, PRE_P021_TOOLS + P039_READ_TOOLS + P054B_READ_TOOLS + P055_TOOLS)  # only read-only Tools appended
-        self.assertFalse([n for n in TOOL_NAMES if re.search(r"init|pipeline|handoff|approv|worker|rules", n)])
+        self.assertEqual(TOOL_NAMES, PRE_P021_TOOLS + P039_READ_TOOLS + P054B_READ_TOOLS + P055_TOOLS + P059_TOOLS)
+        self.assertFalse([n for n in TOOL_NAMES if re.search(r"approv|accept|worker|rules|run_start|launch", n)])
+        self.assertFalse([n for n in TOOL_NAMES if re.search(r"init|pipeline|handoff", n) and n not in P059_TOOLS])
         session_id = self.activate()
-        # generic docs_create/docs_update keep working exactly as before (no reserved-role dispatch exists in P021)
-        for doc_id, path in (("handoff-x", "handoff.md"), ("pipe-x", "pipeline/main")):
+        # generic docs_create/docs_update keep working for ordinary documents
+        for doc_id, path in (("notes-x", "notes/x.md"), ("pipe-x", "pipeline/main")):
             created = self.direct(session_id, "docs_create", doc_id=doc_id, content="v1", logical_path=path)
             self.assertTrue(created["ok"], created)
             updated = self.direct(session_id, "docs_update", doc_id=doc_id, content="v2", expected_revision=1)
             self.assertTrue(updated["ok"], updated)
+        # P059: the working Handoff is a protected role; only the typed Handoff Tools write it
+        for kwargs in (dict(doc_id="handoff-x", logical_path="handoff.md"), dict(doc_id="handoff")):
+            refused = self.direct(session_id, "docs_create", content="v1", **kwargs)
+            self.assertEqual(refused["error"]["code"], "protected_document", refused)
         # the rules cannot be written through any Tool: the global library stays read-only and unchanged
         before = {p: sha(GLOBAL / p) for p in INSTALLED}
         for call in (("docs_create", dict(doc_id="../x", content="x", logical_path="global/agents/architect/rules/role.md")),
@@ -621,7 +630,7 @@ class PinnedGlobalReadTests(p19.ContextCase):
         listed = self.direct(session_id, "global_list")["result"]
         self.assertEqual([e["path"] for e in listed["entries"]], self.listed_definitions())
         self.assertNotIn("pinned_sha256", json.dumps(listed))  # listing is discovery, never endorsement
-        self.assertEqual(TOOL_NAMES, PRE_P021_TOOLS + P039_READ_TOOLS + P054B_READ_TOOLS + P055_TOOLS)  # only read-only Tools appended
+        self.assertEqual(TOOL_NAMES, PRE_P021_TOOLS + P039_READ_TOOLS + P054B_READ_TOOLS + P055_TOOLS + P059_TOOLS)
         from rosc.project_context import ProjectContextBroker
         unbound = ProjectContextBroker(self.sessions, self.data / "workspace", self.lib)
         self.assertIsNone(unbound._rules_lookup)  # an ArchitectService without a loader never claims approved rules

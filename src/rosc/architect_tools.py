@@ -155,6 +155,66 @@ TOOLS: list[dict] = [
                              "report_sha256": {"type": "string"},
                              "expected_version": {"type": "integer", "minimum": 0}},
                             ["run_id", "verdict", "summary", "report_sha256"])},
+    # P059: maintenance obligations (Core events awaiting YOUR assessment), typed Handoff and the Core-owned Pipeline
+    {"name": "maintenance_pending", "description": "List the open maintenance obligations of the current Project: one "
+     "per consequential Core event (run_reported, review_submitted, task_accepted, task_rework_requested) with exact "
+     "source refs, oldest first, paged by cursor. Also shows Handoff/Pipeline revisions. Reading completes nothing.",
+     "inputSchema": _schema({"limit": {"type": "integer", "minimum": 1}, "cursor": {"type": "integer", "minimum": 0},
+                             "include_completed": {"type": "boolean"}})},
+    {"name": "maintenance_ack", "description": "Record YOUR assessed outcome for one or more obligations, after "
+     "assessing them. Give what you actually recorded (handoff_revision from rosc_handoff_update_checkpoint, "
+     "pipeline_proposal_id, adr_doc_id + adr_revision) or no_change_needed with a reason; optionally "
+     "pipeline_no_change_reason / adr_not_needed_reason. Core verifies every referenced revision before completing; a "
+     "bare 'done' is refused and a failed check keeps the obligation open.",
+     "inputSchema": _schema({"obligation_ids": {"type": "array", "items": {"type": "string"}},
+                             "assessment": {"type": "string"}, "no_change_needed": {"type": "string"},
+                             "handoff_revision": {"type": "integer", "minimum": 1},
+                             "pipeline_proposal_id": {"type": "string"},
+                             "pipeline_no_change_reason": {"type": "string"},
+                             "adr_doc_id": {"type": "string"}, "adr_revision": {"type": "integer", "minimum": 1},
+                             "adr_not_needed_reason": {"type": "string"}},
+                            ["obligation_ids", "assessment"])},
+    {"name": "handoff_get_snapshot", "description": "Compact snapshot of the Project's working Handoff (revision, "
+     "sections with sizes, current focus / next action / blockers / pending Owner decisions). since_revision marks "
+     "the sections changed after that revision. exists=false when no Handoff was initialized.",
+     "inputSchema": _schema({"since_revision": {"type": "integer", "minimum": 1}})},
+    {"name": "handoff_get_section", "description": "Read one Handoff section (current or a given revision), paged.",
+     "inputSchema": _schema({"section": {"type": "string"}, "revision": {"type": "integer", "minimum": 1},
+                             "offset": {"type": "integer", "minimum": 0}, "max_chars": {"type": "integer", "minimum": 1}},
+                            ["section"])},
+    {"name": "handoff_init", "description": "Explicitly create the Project's working Handoff with its fixed sections "
+     "(only when none exists; never needed for reading or onboarding).",
+     "inputSchema": _schema({"current_focus": {"type": "string"}})},
+    {"name": "handoff_update_checkpoint", "description": "Update ONLY the named Handoff sections (others stay "
+     "byte-identical). expected_revision = the revision you read. sections maps keys (current_focus, next_action, "
+     "blockers, pending_owner_decisions, last_handled, references, notes) to text; keys in append_sections are "
+     "appended instead of replaced (keep history). source_event_ids names the events this checkpoint reflects.",
+     "inputSchema": _schema({"expected_revision": {"type": "integer", "minimum": 1},
+                             "sections": {"type": "object", "additionalProperties": {"type": "string"}},
+                             "append_sections": {"type": "array", "items": {"type": "string"}},
+                             "source_event_ids": {"type": "array", "items": {"type": "string"}}},
+                            ["expected_revision", "sections"])},
+    {"name": "pipeline_get_current", "description": "The Core-owned canonical Pipeline (pipeline/main) of the current "
+     "Project: state (uninitialized | active), revision, item counts by status and open proposals.",
+     "inputSchema": _schema({})},
+    {"name": "pipeline_list_items", "description": "List Pipeline items, optionally filtered by status (backlog, "
+     "running, completed, accepted, cancelled), parent_id and an updated_after/updated_before window; paged by limit "
+     "and next_cursor with has_more.",
+     "inputSchema": _schema({"status": {"type": "array", "items": {"type": "string"}}, "parent_id": {"type": "string"},
+                             "updated_after": {"type": "string"}, "updated_before": {"type": "string"},
+                             "limit": {"type": "integer", "minimum": 1}, "cursor": {"type": "string"}})},
+    {"name": "pipeline_changes_since", "description": "Applied Pipeline changes after since_revision (per item, with "
+     "before/after and the accepted proposal), paged by limit and next_cursor.",
+     "inputSchema": _schema({"since_revision": {"type": "integer", "minimum": 0},
+                             "limit": {"type": "integer", "minimum": 1}, "cursor": {"type": "string"}})},
+    {"name": "pipeline_propose_change", "description": "PROPOSE a Pipeline change against base_revision (0 when "
+     "uninitialized). ops: {op: add_item, kind: phase|milestone|step, title, parent_id?, ref?, status: backlog|running} "
+     "or {op: update_item, item_id, title?, status?, parent_id?}. Changes nothing until the Owner accepts it; you cannot "
+     "accept milestones or alter Owner-approved scope yourself.",
+     "inputSchema": _schema({"base_revision": {"type": "integer", "minimum": 0},
+                             "ops": {"type": "array", "items": {"type": "object"}}, "rationale": {"type": "string"},
+                             "source_event_ids": {"type": "array", "items": {"type": "string"}}},
+                            ["base_revision", "ops", "rationale"])},
 ]
 TOOL_NAMES = tuple(tool["name"] for tool in TOOLS)
 _DISPATCH_TOOL_ARGS = {tool["name"]: set(tool["inputSchema"]["properties"]) | {"project"} for tool in TOOLS}

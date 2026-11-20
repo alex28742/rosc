@@ -104,6 +104,12 @@ WORKER_SESSION_ACTIVATE = "worker.session.activate"
 CONVERSATION_GROUP_CONTROL = "conversation.group.control"
 ROSC_SETTINGS_READ = "rosc.settings.read"
 ROSC_SETTINGS_UPDATE = "rosc.settings.update"
+# P059: Owner view of the Project's Architect maintenance queue, the explicit Owner wake/retry of one bounded Core
+# maintenance turn, the read-only canonical Pipeline, and the Owner-only decision on an Architect Pipeline proposal.
+ARCHITECT_MAINTENANCE_READ = "architect.maintenance.read"
+ARCHITECT_MAINTENANCE_WAKE = "architect.maintenance.wake"
+PIPELINE_READ = "pipeline.read"
+PIPELINE_DECIDE = "pipeline.decide"
 
 # Resource shapes: which identifiers an action must carry and which it may carry.
 # (required fields, optional fields); every other field must be absent.
@@ -156,6 +162,10 @@ _SHAPES: dict[str, tuple[frozenset[str], frozenset[str]]] = {
     CONVERSATION_GROUP_CONTROL: (frozenset({"project_id"}), frozenset({"task_id"})),
     ROSC_SETTINGS_READ: (frozenset(), frozenset()),
     ROSC_SETTINGS_UPDATE: (frozenset(), frozenset()),
+    ARCHITECT_MAINTENANCE_READ: (frozenset({"project_id"}), frozenset()),
+    ARCHITECT_MAINTENANCE_WAKE: (frozenset({"project_id"}), frozenset()),
+    PIPELINE_READ: (frozenset({"project_id"}), frozenset()),
+    PIPELINE_DECIDE: (frozenset({"project_id"}), frozenset()),
 }
 IMPLEMENTED_ACTIONS = frozenset(_SHAPES)
 

@@ -223,7 +223,10 @@ class TransportTests(ContextCase):
         self.assertEqual(names, {"briefing", "global_list", "global_read", "docs_list", "docs_search", "docs_read",
                                  "docs_create", "docs_update", "docs_delete", "docs_restore", "source_list",
                                  "source_read", "source_search", "source_git", "task_list", "task_read", "task_create", "task_spec_read", "task_spec_save", "prompt_draft_read", "prompt_draft_save", "run_list", "run_read", "report_read",
-                                 "evidence_list", "evidence_read", "review_submit"})  # P055
+                                 "evidence_list", "evidence_read", "review_submit",  # P055
+                                 "maintenance_pending", "maintenance_ack", "handoff_get_snapshot", "handoff_get_section", "handoff_init",
+                                 "handoff_update_checkpoint", "pipeline_get_current", "pipeline_list_items",
+                                 "pipeline_changes_since", "pipeline_propose_change"})  # P059
         for tool in TOOLS:  # writes exist only for ROSC documents and name no target Project
             if tool["name"] in ("docs_create", "docs_update", "docs_delete", "docs_restore"):
                 self.assertNotIn("project", tool["inputSchema"]["properties"])
@@ -420,7 +423,7 @@ class NoConsentGateTests(ContextCase):
         self.assertIn("Owner-selected provider/model", view["provider"]["note"])
         self.assertEqual(view["source"], {"bound": True, "binding_version": 1, "docs_entrypoint": "README.md",
                                           "access": "read_only"})
-        self.assertEqual([m["mode"] for m in view["matrix"]], ["read_only", "read_write", "read_only", "read_only", "record_review_only", "read_write_drafts_only", "denied", "read_only", "denied"])  # P055: evidence + review rows
+        self.assertEqual([m["mode"] for m in view["matrix"]], ["read_only", "read_write", "read_only", "read_only", "record_review_only", "read_write_drafts_only", "record_outcome_only", "read_write_typed", "read_propose_only", "denied", "read_only", "denied"])  # P055: evidence + review rows; P059: maintenance/Handoff/Pipeline
         self.assertFalse(view["publication"]["automatic_sync"])
 
     def test_agents_have_no_authority_over_the_summary(self) -> None:
@@ -859,7 +862,7 @@ class BriefingAndContextTests(ContextCase):
         self.assertEqual(briefing["architect_documents"]["count"], 1)
         self.assertEqual(briefing["core_facts"]["task_count"], 0)
         self.assertNotIn("git", json.dumps(briefing["core_facts"]).lower().replace("git evidence", ""))
-        self.assertEqual(len(briefing["access_matrix"]), 9)  # P055: + evidence read, review record
+        self.assertEqual(len(briefing["access_matrix"]), 12)  # P055: + evidence read, review record; P059: + maintenance, Handoff, Pipeline
 
     def test_warm_turn_carries_only_the_owner_message_and_no_documents_or_source(self) -> None:
         self.activate()
