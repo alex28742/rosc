@@ -41,6 +41,19 @@ environment is not inherited.  Each child still has its own empty ``data`` direc
 NOT verified live: an actual model reply, and whether a repeated prompt id is deduplicated by the provider. ROSC
 therefore never re-sends an ambiguous attempt; it only looks the id up again.
 
+P062 provisional text (adapter-local; the shared contract is ``provisional.py``).  Verified against the installed
+OpenCode 2.2.6 binary without any model or network call (an isolated ``serve`` in an offline network namespace with a
+local fake OpenAI-compatible provider): ``GET /api/event?types=...`` is ``text/event-stream`` with one JSON object per
+``data:`` frame (Basic auth like every route, ``server.connected`` first, ``: heartbeat`` comments), the ``types`` filter
+accepts repeated values, ``session.inbox.delivered.data.inboxID`` equals the caller-chosen prompt id, and assistant text
+arrives live as ``session.text.delta {sessionID, assistantMessageID, ordinal, delta}`` bracketed by
+``session.text.started`` / ``session.text.ended {..., text}``, while reasoning (``session.reasoning.*``) and tool input
+(``session.tool.input.*``) are separate types that ROSC does not even subscribe to.  When Core bound a draft sink to the
+call, ``ask`` subscribes BEFORE sending the prompt and forwards text only for the exact native session, only after the
+delivery of ITS prompt id and only for assistant messages whose step started after that delivery; it stops at the
+execution end.  The reply is still exclusively the ``wait`` + ``lookup`` result; any problem of the observer only means
+no provisional text.
+
 Only a process whose identity ROSC can prove (pid + /proc start time + a per-session marker in its environment) is ever
 signalled. A foreign process, including the Owner's background OpenCode service, is never adopted or stopped.
 """
@@ -48,6 +61,7 @@ from __future__ import annotations
 
 import base64
 import errno
+import http.client
 import json
 import os
 import re
@@ -66,6 +80,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Mapping, Protocol
 
+from . import provisional
 from .architect_latency import DISABLED, LatencyTrace
 from .architect_tools import PERMISSION_PATTERN, SERVER_NAME, TOOL_NAMES, ToolEndpoint
 
@@ -99,6 +114,128 @@ RESTRICTED_ACTIONS = ("shell", "edit", "read", "webfetch", "subagent")
 ALLOW_ROSC_TOOLS = {"action": PERMISSION_PATTERN, "resource": "*", "effect": "allow"}
 TOOLS_PERMISSIONS = DENY_ALL + [ALLOW_ROSC_TOOLS]
 MCP_CONNECT_TIMEOUT = 15.0
+# P062: native partial-text events (see module docstring).  Only these types are requested from the server.
+EVENT_TYPES = ("session.inbox.delivered", "session.step.started", "session.text.started", "session.text.delta",
+               "session.text.ended", "session.execution.succeeded", "session.execution.failed",
+               "session.execution.interrupted")
+EVENT_READY_TIMEOUT = 3.0        # the subscription must be confirmed before the prompt is sent, else no streaming
+EVENT_MAX_LINE = 1 << 20
+EVENT_MAX_FRAME = 4 << 20
+
+
+class OpenCodeTextObserver:
+    """Adapter-local state machine over OpenCode's native event frames for ONE prompt (pure; no I/O)."""
+
+    END_TYPES = frozenset({"session.execution.succeeded", "session.execution.failed", "session.execution.interrupted"})
+
+    def __init__(self, runtime_session_id: str, runtime_message_id: str, sink: "provisional.ProvisionalSink") -> None:
+        self._session, self._prompt, self._sink = runtime_session_id, runtime_message_id, sink
+        self.armed = False
+        self.done = False
+        self._messages: set[str] = set()
+
+    def event(self, frame: object) -> None:
+        if self.done or not isinstance(frame, dict) or not isinstance(frame.get("data"), dict):
+            return
+        data, kind = frame["data"], frame.get("type")
+        if data.get("sessionID") != self._session:
+            return
+        if kind == "session.inbox.delivered":
+            if data.get("inboxID") == self._prompt:
+                self.armed = True
+            return
+        if not self.armed:
+            return
+        if kind in self.END_TYPES:
+            self.done = True
+            return
+        message = data.get("assistantMessageID")
+        if not isinstance(message, str):
+            return
+        if kind == "session.step.started":
+            self._messages.add(message)
+            return
+        if message not in self._messages or not isinstance(data.get("ordinal"), int):
+            return
+        key = f"{message}:{data['ordinal']}"
+        if kind == "session.text.started":
+            self._sink.segment(key)
+        elif kind == "session.text.delta" and isinstance(data.get("delta"), str):
+            self._sink.delta(key, data["delta"])
+        elif kind == "session.text.ended" and isinstance(data.get("text"), str):
+            self._sink.replace(key, data["text"])
+
+
+class _EventSubscription:
+    """One loopback SSE subscription to the owned server, read on a daemon thread; never raises into ``ask``."""
+
+    def __init__(self, port: int, authorization: str, observer: OpenCodeTextObserver, timeout: float) -> None:
+        self._port, self._auth, self._observer, self._timeout = port, authorization, observer, timeout
+        self.ready = threading.Event()
+        self._conn: http.client.HTTPConnection | None = None
+        self._stopped = False
+        self.connected = False
+        self._thread = threading.Thread(target=self._run, name="rosc-opencode-events", daemon=True)
+
+    def start(self) -> bool:
+        self._thread.start()
+        return self.ready.wait(EVENT_READY_TIMEOUT) and self.connected
+
+    def stop(self) -> None:
+        self._stopped = True
+        conn = self._conn
+        try:
+            if conn is not None and conn.sock is not None:
+                conn.sock.shutdown(socket.SHUT_RDWR)  # unblocks the reader at once
+        except OSError:
+            pass
+        try:
+            if conn is not None:
+                conn.close()
+        except OSError:
+            pass
+        self._thread.join(2.0)
+
+    def _run(self) -> None:
+        try:
+            query = urllib.parse.urlencode([("types", name) for name in EVENT_TYPES])
+            conn = http.client.HTTPConnection("127.0.0.1", self._port, timeout=EVENT_READY_TIMEOUT)
+            self._conn = conn
+            conn.request("GET", f"/api/event?{query}", headers={"Authorization": self._auth,
+                                                                "Accept": "text/event-stream"})
+            response = conn.getresponse()
+            if response.status != 200 or not (response.getheader("content-type") or "").startswith("text/event-stream"):
+                return
+            if conn.sock is not None:
+                conn.sock.settimeout(self._timeout)
+            data: list[str] = []
+            size = 0
+            while not self._stopped and not self._observer.done:
+                raw = response.readline(EVENT_MAX_LINE + 1)
+                if not raw:
+                    return
+                if len(raw) > EVENT_MAX_LINE:
+                    return  # an oversized frame: stop observing (no provisional text), never guess
+                line = raw.decode("utf-8").rstrip("\r\n")
+                if line == "":
+                    if data:
+                        frame = json.loads("\n".join(data))
+                        data, size = [], 0
+                        if isinstance(frame, dict) and frame.get("type") == "server.connected":
+                            self.connected = True
+                            self.ready.set()
+                        elif self.connected:
+                            self._observer.event(frame)
+                    continue
+                if line.startswith("data:"):
+                    size += len(line)
+                    if size > EVENT_MAX_FRAME:
+                        return
+                    data.append(line[5:].lstrip())
+        except Exception:  # noqa: BLE001 - provisional text is best-effort; nothing is logged (no content, no secret)
+            return
+        finally:
+            self.ready.set()  # wakes ``start`` at once on any failure; ``connected`` tells the truth
 
 
 class _NoRedirect(urllib.request.HTTPRedirectHandler):
@@ -236,6 +373,29 @@ class OpenCodeRuntime:
 
     def attach_diagnostics(self, trace: LatencyTrace) -> None:
         self._diag = trace
+
+    def provisional_capability(self) -> str:
+        """P062: native ``session.text.delta`` events were verified for this adapter's event contract (see the module
+        docstring); a server that does not deliver them simply yields no provisional text (canonical-only)."""
+        return provisional.CAP_SUPPORTED if self._binary() is not None else provisional.CAP_UNSUPPORTED
+
+    def _observe_text(self, handle: RuntimeHandle, runtime_message_id: str, timeout: float) -> "_EventSubscription | None":
+        sink = provisional.current()
+        if sink is None:
+            return None
+        password = self._password(handle.rosc_session_id)
+        if password is None:
+            return None
+        token = base64.b64encode(f"opencode:{password}".encode()).decode()
+        observer = OpenCodeTextObserver(handle.runtime_session_id, runtime_message_id, sink)
+        subscription = _EventSubscription(handle.port, f"Basic {token}", observer, timeout + 30.0)
+        try:
+            if subscription.start():
+                return subscription
+        except Exception:  # noqa: BLE001
+            pass
+        subscription.stop()  # not confirmed before the prompt: no streaming rather than a misattributed one
+        return None
 
     # -- configuration ----------------------------------------------------------------------------------------
     def _binary(self) -> str | None:
@@ -668,6 +828,14 @@ class OpenCodeRuntime:
             raise
 
     def ask(self, handle: RuntimeHandle, runtime_message_id: str, text: str, timeout: float) -> str:
+        subscription = self._observe_text(handle, runtime_message_id, timeout)
+        try:
+            return self._ask(handle, runtime_message_id, text, timeout)
+        finally:
+            if subscription is not None:
+                subscription.stop()
+
+    def _ask(self, handle: RuntimeHandle, runtime_message_id: str, text: str, timeout: float) -> str:
         sid = handle.runtime_session_id
         diag = self._diag
         started = diag.now()

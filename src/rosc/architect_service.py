@@ -44,6 +44,7 @@ from .authorization import (ARCHITECT_ACTIVATE, ARCHITECT_CONTEXT_READ, ARCHITEC
                             evaluate)
 from .project_context import ACCESS_MATRIX, ProjectContextBroker, project_label
 from . import architect_maintenance as maintenance
+from . import provisional
 from .task_lifecycle import activate_task
 from .conversation import (SAFE_RETRY_CODES, ConversationConflict, ConversationDenied, ConversationNotFound, ConversationStoreError, InvalidConversationInput, UnsafeProjectIdentity, _architect_body, ensure_task_conversation, _utc_iso, delivery_state_view, recoverable_failure)
 from .models import (OBLIGATION_FAILED, OBLIGATION_PENDING, OBLIGATION_PROCESSING, WAKE_AMBIGUOUS,
@@ -2004,6 +2005,10 @@ class ArchitectGroupTransport:
     def activity(self, lane, correlation_id) -> str | None:
         return None
 
+    def provisional_capability(self) -> str:
+        """P062: whatever the CONNECTED runtime adapter declares (not the Architect role, not the model)."""
+        return provisional.capability_of(self._service._runtime)
+
     def ready_problem(self, project_id: int) -> str | None:
         """Read-only (DB only, no probe, no start): why a group turn could not be sent to the Architect now."""
         svc = self._service
@@ -2113,7 +2118,9 @@ class ArchitectGroupTransport:
             #   re-sends it.  If a later evidence ``lookup`` finds the provider did receive it, priming is recorded
             #   there; otherwise the next authorized turn re-sends the short preface (a safe superset, never a gap).
             try:
-                reply = svc._runtime.ask(handle, runtime_id, text, svc._timeout)
+                # P062: only the sink Core bound for THIS turn's correlation reaches the runtime adapter.
+                with provisional.narrowed(payload.correlation_id):
+                    reply = svc._runtime.ask(handle, runtime_id, text, svc._timeout)
             except RuntimeAmbiguous as exc:
                 return SubmitOutcome(SUBMIT_UNKNOWN, exc.code)
             except RuntimeProblem as exc:

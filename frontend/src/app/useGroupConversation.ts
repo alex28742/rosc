@@ -3,6 +3,7 @@ import { describeError, type CoreApi } from '../core/api';
 import type { ConversationMessage, ConversationMessageResult, GroupStatus } from '../core/models';
 import type { GroupControls, LoadStatus } from './presentation/contracts';
 import { useRoomEvents } from './useRoomEvents';
+import { useProvisionalDrafts } from './provisionalDrafts';
 import type { HistoryRefresh } from './olderAssessments';
 
 /** While Core reports work in this room (a running driver or a held turn) the status and history are re-read. */
@@ -89,7 +90,10 @@ export function useGroupConversation(api: CoreApi, projectId: string | null, tas
     onMessagesRef.current('loaded');
   }, [load, projectId, taskId, scope]);
   const openEvents = useCallback(() => (projectId ? api.openRoomEvents(projectId, taskId) : null), [api, projectId, taskId]);
-  const liveState = useRoomEvents(liveKey, openEvents, onRoomChange);
+  // P062: provisional agent text of this room from the same stream (runtime/model/role agnostic, never canonical).
+  const onDraftPublished = useCallback(() => { if (scopeRef.current === scope) onMessagesRef.current(); }, [scope]);
+  const [drafts, onDraft] = useProvisionalDrafts(liveKey, onDraftPublished);
+  const liveState = useRoomEvents(liveKey, openEvents, onRoomChange, onDraft);
 
   const followUntil = useRef(0);
   const info = visible.info;
@@ -179,6 +183,6 @@ export function useGroupConversation(api: CoreApi, projectId: string | null, tas
   const onReconcile = useCallback(() => act('reconcile', (pid, tid) => api.reconcileGroup(pid, tid)), [act, api]);
   const onContinue = useCallback(() => act('continue', (pid, tid) => api.continueGroup(pid, tid)), [act, api]);
 
-  return { status: visible.status, info: visible.info, error: visible.error, busy: visible.busy, notice: visible.notice, live: liveState, onReload, onPost,
+  return { status: visible.status, info: visible.info, error: visible.error, busy: visible.busy, notice: visible.notice, live: liveState, drafts, onReload, onPost,
     onAuthorize, onStart, onControls, onRelease, onKeep, onCatchup, onReconcile, onContinue, onFollow };
 }

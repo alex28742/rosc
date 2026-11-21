@@ -1,4 +1,4 @@
-import { useEffect, useId, useRef, useState, type ReactNode } from 'react';
+import { useEffect, useId, useLayoutEffect, useRef, useState, type ReactNode, type RefObject } from 'react';
 import type { GroupControls } from '../../../app/presentation/contracts';
 import type { ConversationMessage, GroupStatus, GroupTurn, MessageAssessment } from '../../../core/models';
 import { findMentions } from './mentions';
@@ -352,6 +352,56 @@ export function GroupActivityRow({ info }: { info: GroupStatus | null }) {
     <span>{confirmed ? '· формирует ответ' : turn.state === 'submitted' ? '· ожидает подтверждения CLI' : turn.state === 'reserved' ? '· подготовка хода' : '· публикация ответа'}</span>
     {confirmed && <Dots label="формирует ответ" />}
   </div>;
+}
+
+/** P062: the reader is "at the bottom" within this many pixels; only then does a growing draft keep the view pinned. */
+const STICK_PX = 48;
+
+/**
+ * P062: provisional (non-canonical) text of the turn(s) being generated in this room — the SAME component for the
+ * Project and every Task Conversation, independent of the Agent's runtime, model and role (the roster only supplies the
+ * participant's name and the bubble side).  Plain text only (no HTML, no Markdown).  A draft disappears as soon as the
+ * canonical message of its turn is in the loaded history, so the reply is never shown twice; it is never searched.
+ */
+export function ProvisionalDrafts({ group, messages, feed, follow }: {
+  group: GroupControls; messages: ConversationMessage[]; feed: RefObject<HTMLDivElement | null>; follow: boolean;
+}) {
+  const published = new Set(messages.map(message => message.group?.turn_id).filter(Boolean));
+  const visible = (group.drafts ?? []).filter(draft => draft.text && !published.has(draft.turnId));
+  const stick = useRef(true);
+  useEffect(() => {
+    const element = feed.current;
+    if (!element) return;
+    const measure = () => { stick.current = element.scrollHeight - element.scrollTop - element.clientHeight <= STICK_PX; };
+    measure();
+    element.addEventListener('scroll', measure, { passive: true });
+    return () => element.removeEventListener('scroll', measure);
+  }, [feed]);
+  const size = visible.reduce((total, draft) => total + draft.text.length, 0);
+  useLayoutEffect(() => {
+    const element = feed.current;
+    if (follow && size > 0 && element && stick.current) element.scrollTop = element.scrollHeight;
+  }, [size, follow, feed]);
+  if (visible.length === 0) return null;
+  return <>{visible.map(draft => {
+    const entry = group.info?.roster.find(item => item.agent_id === draft.agentId);
+    const architect = entry?.role === 'architect';
+    const name = nameOf(group.info, draft.agentId);
+    const streaming = draft.state === 'streaming';
+    return <article key={draft.turnId} data-provisional-turn={draft.turnId} aria-busy={streaming}
+      className={`rosc-chat-message ${architect ? 'rosc-chat-message--architect' : 'rosc-chat-message--worker'} rosc-chat-message--provisional`}>
+      <span className="rosc-chat-avatar" aria-hidden="true">{architect ? 'A' : (name[0] ?? 'W').toUpperCase()}</span>
+      <div className="rosc-chat-bubble">
+        <div className="rosc-chat-meta">
+          <span>{name}{entry?.role === 'worker' ? ' · Worker' : ''}</span>
+          <span className="rosc-chat-provisional-label" role="status">
+            {streaming ? 'печатает · временный ответ' : 'публикуется…'}</span>
+        </div>
+        <p className="rosc-chat-body">{draft.text}{streaming && <span className="rosc-chat-caret" aria-hidden="true" />}</p>
+        {draft.truncated && <p className="rosc-chat-delivery">Показано начало ответа; полный текст появится после публикации.</p>}
+      </div>
+    </article>;
+  })}</>;
 }
 
 export const ARCHITECT_CHIP = 'architect';

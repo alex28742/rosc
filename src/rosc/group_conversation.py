@@ -38,9 +38,10 @@ from .claude_conversation import ClaudeConversationTransport, TransportConfigErr
 from .conversation import (ConversationConflict, ConversationDenied, ConversationNotFound, ConversationStoreError,
                            InvalidConversationInput, load_message_view)
 from .mentions import find_mentions
+from . import provisional
 from .room_events import room_fingerprint
 from .models import (ASSIGNMENT_ACTIVE, MEMBER_RELEASED, PARTICIPANT_OWNER, PARTY_OWNER_REF, ROLE_ARCHITECT,
-                     ROLE_WORKER, ROUND_OPEN, TURN_ACCEPTED, TURN_HOLDING_STATES, TURN_QUEUED, TURN_SUBMITTED, TURN_UNKNOWN,
+                     ROLE_WORKER, ROUND_OPEN, TURN_ACCEPTED, TURN_PUBLISHED, TURN_HOLDING_STATES, TURN_QUEUED, TURN_SUBMITTED, TURN_UNKNOWN,
                      AgentDefinition, AgentNativeLane, Conversation, ConversationMessage, ConversationParticipant, GroupRoundGrant,
                      GroupTurn, MessageEnvelope, RoleAssignment)
 from .worker_conversation import (LOOKUP_UNKNOWN, SETTINGS_SCHEMA, SUBMIT_NOT_ACCEPTED, LookupOutcome, SubmitOutcome,
@@ -98,8 +99,10 @@ def claude_transport_factory(session_factory: sessionmaker[Session], evidence_di
 class GroupConversationBridge:
     def __init__(self, session_factory: sessionmaker[Session], policy: AuthorizationPolicy,
                  core: WorkerConversationCore, transport_factory: TransportFactory,
-                 architect_transport: object | None = None) -> None:
+                 architect_transport: object | None = None,
+                 drafts: provisional.ProvisionalBroker | None = None) -> None:
         self._sessions = session_factory
+        self._drafts = drafts  # P062: provisional text broker (None = canonical-only, the pre-P062 behaviour)
         self._policy = policy
         self._core = core
         self._factory = transport_factory
@@ -226,14 +229,25 @@ class GroupConversationBridge:
     def change_token(self, actor: ActorContext, project_id: int, task_id: int | None) -> str:
         """P061: opaque change token of ONE room for the read-only SSE invalidation stream.  Authorizes and validates
         the Project/Task scope exactly like ``status``; never claims, dispatches, reconciles, launches or writes."""
+        return self.live_room(actor, project_id, task_id)[0]
+
+    def live_room(self, actor: ActorContext, project_id: int, task_id: int | None) -> tuple[str, str | None]:
+        """P061 change token + (P062) the id of exactly this authorized room, used only to select its in-memory
+        provisional drafts for the same SSE connection.  Same authorization/scope check; read-only."""
         self._authorize(actor, CONVERSATION_READ, project_id, task_id)
         with self._sessions() as session:
             room = self._room(session, project_id, task_id)
             if room is None:
-                return "none"
+                return "none", None
             conversation_id = room.conversation_id
             token = room_fingerprint(session, conversation_id)
-        return f"{token}:{int(self.running(conversation_id))}"
+        return f"{token}:{int(self.running(conversation_id))}", conversation_id
+
+    def drafts_state(self, conversation_id: str | None):
+        """P062: in-memory provisional drafts of one room (already authorized by the caller's ``live_room``)."""
+        if self._drafts is None:
+            return 0, ()
+        return self._drafts.room_state(conversation_id)
 
     def status(self, actor: ActorContext, project_id: int, task_id: int | None) -> dict:
         """Typed room state for the UI.  Read-only: never claims, dispatches, reconciles or launches."""
@@ -649,10 +663,16 @@ class GroupConversationBridge:
                                 "turn_id": claim.turn_id}
                         break
                     transport = self.transport(claim.agent_id)
-                    view = self._core.dispatch(claim.turn_id, transport)
-                    view.pop("payload", None)
-                    if view["state"] == TURN_ACCEPTED:
-                        view = self._core.reconcile(claim.turn_id, transport)  # evidence lookup -> publish once
+                    sink = self._open_draft(claim.turn_id, transport)
+                    view = None
+                    try:
+                        with provisional.scoped(sink):
+                            view = self._core.dispatch(claim.turn_id, transport)
+                            view.pop("payload", None)
+                            if view["state"] == TURN_ACCEPTED:
+                                view = self._core.reconcile(claim.turn_id, transport)  # evidence lookup -> publish once
+                    finally:
+                        self._finish_draft(sink, view)
                     if view["state"] in (TURN_UNKNOWN, TURN_SUBMITTED, TURN_ACCEPTED):
                         last = {"state": "stopped", "reason": view["state"], "agent_id": claim.agent_id,
                                 "turn_id": claim.turn_id, "error_code": view.get("error_code")}
@@ -666,6 +686,31 @@ class GroupConversationBridge:
                 self._wanted.discard(conversation_id)
                 self._last[conversation_id] = {"state": "stopped", "reason": "driver_error", "at": _now_iso()}
             self._trace("driver_stopped", conversation_id, reason="driver_error", steps=steps)
+
+    def _open_draft(self, turn_id: str, transport) -> provisional.ProvisionalSink | None:
+        """P062: bind a provisional draft to this claimed turn when the TRANSPORT ITSELF declares the capability.
+        The identity comes from the durable Core rows, never from the adapter; no role/model/runtime condition."""
+        if self._drafts is None or provisional.capability_of(transport) != provisional.CAP_SUPPORTED:
+            return None
+        try:
+            with self._sessions() as session:
+                turn = session.get(GroupTurn, turn_id)
+                room = session.get(Conversation, turn.conversation_id) if turn is not None else None
+                if turn is None or room is None:
+                    return None
+                identity = provisional.TurnIdentity(room.project_id, room.conversation_id, room.task_id, turn.turn_id,
+                                                    turn.agent_id, turn.correlation_id)
+            return self._drafts.open(identity)
+        except Exception:
+            log.debug("Provisional draft not opened", exc_info=True)
+            return None
+
+    def _finish_draft(self, sink: provisional.ProvisionalSink | None, view: dict | None) -> None:
+        """Only Core's committed outcome ends a draft: ``published`` needs the committed reply message id."""
+        if sink is None or self._drafts is None:
+            return
+        published = bool(view and view.get("state") == TURN_PUBLISHED and view.get("reply_message_id"))
+        self._drafts.finish(sink, published=published, message_id=view.get("reply_message_id") if published else None)
 
     def reconcile(self, actor: ActorContext, project_id: int, task_id: int | None) -> dict:
         """Explicit Owner evidence reconciliation of the room's held turn.  Never re-submits; inconclusive evidence

@@ -2,7 +2,7 @@
 // callbacks; they never reach the API client, the router or Core persistence.
 import type { ComponentType, ReactNode } from 'react';
 import type { RunJournalPage, RunReportPage, RunView } from '../../core/models';
-import type { AgentDefinition, AgentFormValues, ArchitectStatus, ContextAccess, ConversationDiagnostics, ConversationMessage, GroupStatus, MessageRecipient, OwnerDecisionKind, Project, PromptRevision, ProjectFormValues, RepairConfirmation, RoleAssignment, SpecRevision, SpecRevisionSummary, Task, TaskArchitectStatus, TaskAuthoring, TaskFormValues, ProjectWorker } from '../../core/models';
+import type { AgentDefinition, AgentFormValues, ArchitectStatus, ContextAccess, ConversationDiagnostics, ConversationMessage, GroupStatus, MessageRecipient, ProvisionalDraft, OwnerDecisionKind, Project, PromptRevision, ProjectFormValues, RepairConfirmation, RoleAssignment, SpecRevision, SpecRevisionSummary, Task, TaskArchitectStatus, TaskAuthoring, TaskFormValues, ProjectWorker } from '../../core/models';
 import type { ScrollRegions } from '../scroll';
 import type { RoomLiveState } from '../useRoomEvents';
 
@@ -241,6 +241,8 @@ export type GroupControls = {
   notice: string;
   /** P061: the room's live-update channel (never a business status); absent in presentations that do not use it. */
   live?: RoomLiveState;
+  /** P062: provisional text of turns being generated in this room (not canonical; absent without a live stream). */
+  drafts?: ProvisionalDraft[];
   onReload: () => void;
   onPost: (body: string, clientKey: string, to: string[]) => Promise<string | null>;
   onAuthorize: (agents: string[], quota: number, renew: boolean) => Promise<string | null>;

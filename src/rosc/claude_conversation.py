@@ -43,6 +43,18 @@ writes; never in git, never credentials):
   malformed output) is ``unknown`` and is never re-sent.  Provider error text is never returned as a reply.
 * ``busy`` = an exclusive ``flock`` on the lane's ``lane.lock`` is held.  The child inherits the locked descriptor, so
   the lease lasts exactly as long as a ROSC-launched process for that lane is alive, even if the driver died.
+
+P062 provisional text (adapter-local; the shared contract is ``provisional.py``): when the installed CLI itself lists
+``--include-partial-messages`` (checked with a local ``--help``, cached per binary) and Core bound a draft sink to THIS
+turn's correlation, the launch adds that flag and, while waiting for the process, tails the same private
+``stdout.jsonl`` with a bounded incremental parser (``ClaudePartialObserver``).  Only ``stream_event`` /
+``content_block_delta`` with ``delta.type == "text_delta"`` of a ``text`` block of the main agent
+(``parent_tool_use_id`` null, ``session_id`` = the lane's native session) and the CLI's own per-message ``assistant``
+text snapshots reach the sink; thinking, signatures, tool input JSON, tool results, system events and sub-agent output
+never do.  The reply that Core publishes is still ONLY the final ``result`` (never the sum of fragments); evidence,
+intent, timeouts/UNKNOWN, budget and the restricted environment are unchanged.  ``_facts`` reads the head (``init``)
+and the tail (``result``) of a stdout that grew beyond the evidence read limit, so the larger partial stream can never
+hide the final result.
 """
 from __future__ import annotations
 
@@ -64,6 +76,7 @@ from typing import Callable, Mapping, Protocol
 from sqlalchemy import select
 from sqlalchemy.orm import Session, sessionmaker
 
+from . import provisional
 from .models import (LANE_ACTIVE, TURN_SUBMITTED, AgentDefinition, AgentNativeLane, Conversation,
                      ConversationDispatchControl, GroupTurn, Project, ProjectIdentityError, Task, validate_project_identity)
 from .worker_conversation import (LOOKUP_ACCEPTED, LOOKUP_NOT_RECEIVED, LOOKUP_REPLY, LOOKUP_UNKNOWN, SUBMIT_ACCEPTED,
@@ -75,6 +88,11 @@ ASSURANCE = "claude_cli_headless"
 DEFAULT_TIMEOUT_SECONDS = 900.0  # a tool-using turn (read, edit, run tests) legitimately takes minutes
 DEFAULT_MAX_BUDGET_USD = 1.00
 MAX_STDOUT_BYTES = 4 * 1024 * 1024
+PARTIAL_FLAG = "--include-partial-messages"
+PARTIAL_POLL_SECONDS = 0.1          # how often the waiting driver tails stdout.jsonl for new complete lines
+PARTIAL_READ_BYTES = 1 << 20        # bytes read per poll (bounded; the rest is read on the next poll)
+PARTIAL_MAX_LINE = 8 * 1024 * 1024  # an unterminated line longer than this is dropped (never parsed)
+_HELP_CACHE: dict[tuple, bool] = {}
 _UUID = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$")
 # Environment of the parent Claude Code / P042A worker that must not leak into a ROSC-launched chat process.
 _STRIPPED_ENV_PREFIXES = ("ROSC_", "CLAUDECODE", "CLAUDE_CODE_ENTRYPOINT", "CLAUDE_CODE_SSE_PORT", "CLAUDE_CODE_SESSION_",
@@ -275,6 +293,129 @@ def parse_stream(raw: bytes) -> StreamFacts:
     return StreamFacts(**facts)
 
 
+def read_evidence(path: Path) -> bytes:
+    """At most ``2 * MAX_STDOUT_BYTES``: the whole file when it fits, else its head (``init``) plus its tail (``result``,
+    always the last line), each cut at line boundaries, so a large partial-message stream never hides the result."""
+    with open(path, "rb") as handle:
+        size = os.fstat(handle.fileno()).st_size
+        if size <= 2 * MAX_STDOUT_BYTES:
+            return handle.read(2 * MAX_STDOUT_BYTES)
+        head = handle.read(MAX_STDOUT_BYTES)
+        handle.seek(size - MAX_STDOUT_BYTES)
+        tail = handle.read(MAX_STDOUT_BYTES)
+    head = head[:head.rfind(b"\n") + 1]
+    cut = tail.find(b"\n")
+    return head + (tail[cut + 1:] if cut != -1 else b"")
+
+
+class ClaudePartialObserver:
+    """Incremental, bounded parser of the CLI's live ``stream-json`` output for ONE turn (adapter-local).
+
+    It sees only complete lines (split JSONL and split UTF-8 are buffered until the newline), ignores anything it does
+    not positively recognise, de-duplicates by the CLI's event ``uuid`` and corrects a segment from the CLI's own
+    ``assistant`` message snapshot (duplicate/reordered deltas cannot double the text)."""
+
+    MAX_SEEN = 50_000
+
+    def __init__(self, native_session_id: str, sink: "provisional.ProvisionalSink") -> None:
+        self._session = native_session_id
+        self._sink = sink
+        self._buffer = b""
+        self._skip = False
+        self._seen: set[str] = set()
+        self._blocks: dict[tuple[str, int], str] = {}  # (api message id, block index) -> block type
+        self._streamed: set[str] = set()  # api message ids that produced partial stream events
+
+    def feed(self, data: bytes) -> None:
+        if not data:
+            return
+        self._buffer += data
+        while True:
+            cut = self._buffer.find(b"\n")
+            if cut == -1:
+                if len(self._buffer) > PARTIAL_MAX_LINE:
+                    self._buffer, self._skip = b"", True  # drop the oversized line up to its newline
+                return
+            line, self._buffer = self._buffer[:cut], self._buffer[cut + 1:]
+            if self._skip:
+                self._skip = False
+                continue
+            self._line(line)
+
+    def _line(self, line: bytes) -> None:
+        try:
+            event = json.loads(line.decode("utf-8"))
+        except (ValueError, UnicodeDecodeError):
+            return
+        if not isinstance(event, dict) or event.get("session_id") != self._session:
+            return
+        if event.get("parent_tool_use_id") is not None:
+            return  # a sub-agent's output is not this agent's reply text
+        uuid_ = event.get("uuid")
+        if isinstance(uuid_, str):
+            if uuid_ in self._seen:
+                return
+            if len(self._seen) < self.MAX_SEEN:
+                self._seen.add(uuid_)
+        kind = event.get("type")
+        if kind == "stream_event":
+            self._stream_event(event)
+        elif kind == "assistant":
+            self._snapshot(event.get("message"), uuid_)
+
+    def _stream_event(self, event: dict) -> None:
+        native = event.get("event")
+        message_id = event.get("api_message_id")
+        if not isinstance(native, dict) or not isinstance(message_id, str):
+            return
+        index = native.get("index")
+        name = native.get("type")
+        if len(self._streamed) < self.MAX_SEEN:
+            self._streamed.add(message_id)
+        if name == "content_block_start" and isinstance(index, int) and isinstance(native.get("content_block"), dict):
+            block_type = native["content_block"].get("type")
+            self._blocks[(message_id, index)] = block_type if isinstance(block_type, str) else ""
+            if block_type == "text":
+                self._sink.segment(f"{message_id}:{index}")
+        elif name == "content_block_delta" and isinstance(index, int) and isinstance(native.get("delta"), dict):
+            delta = native["delta"]
+            if (delta.get("type") == "text_delta" and isinstance(delta.get("text"), str)
+                    and self._blocks.get((message_id, index)) == "text"):
+                self._sink.delta(f"{message_id}:{index}", delta["text"])
+
+    def _snapshot(self, message: object, uuid_: object) -> None:
+        """The CLI's per-block ``assistant`` snapshot (verified on 2.1.327: ONE block per event, so its list index is
+        not the stream block index).  Used only for a message that produced no partial events (never double-counted)."""
+        if not isinstance(message, dict) or not isinstance(message.get("id"), str) or message["id"] in self._streamed:
+            return
+        content = message.get("content")
+        if not isinstance(content, list):
+            return
+        for index, block in enumerate(content):
+            if isinstance(block, dict) and block.get("type") == "text" and isinstance(block.get("text"), str):
+                self._sink.replace(f"{message['id']}:snapshot:{uuid_}:{index}", block["text"])
+
+
+def cli_supports_partial(cli: str | None, env: Mapping[str, str]) -> bool:
+    """Does THIS installed CLI list ``--include-partial-messages``?  A local ``--help`` (no model call), cached per
+    binary path/size/mtime; any failure means "no" (canonical-only)."""
+    if not cli:
+        return False
+    try:
+        info = os.stat(cli)
+    except OSError:
+        return False
+    key = (cli, info.st_size, info.st_mtime_ns)
+    if key not in _HELP_CACHE:
+        try:
+            done = subprocess.run([cli, "--help"], env=dict(env), stdin=subprocess.DEVNULL, capture_output=True,
+                                  timeout=15, check=False)
+            _HELP_CACHE[key] = PARTIAL_FLAG.encode() in done.stdout
+        except (OSError, subprocess.SubprocessError):
+            return False
+    return _HELP_CACHE[key]
+
+
 def render_turn_prompt(lane: LaneRef, payload: TurnPayload, context: dict) -> str:
     """Trusted envelope + ONLY the frozen eligible delta; bodies are JSON-encoded untrusted content."""
     scope = context["project_ref"] + (f"/T{context['task_id']:04d}" if context.get("task_id") else "")
@@ -403,6 +544,12 @@ def quota_guidance(quota: dict) -> str:
 
 
 # -- transport ----------------------------------------------------------------------------------------------------------
+def log_partial_failure() -> None:
+    """Never logs content: the observer's failure only degrades the provisional view to canonical-only."""
+    import logging
+    logging.getLogger(__name__).debug("Partial text observer failed")
+
+
 class TransportConfigError(Exception):
     pass
 
@@ -416,7 +563,7 @@ class ClaudeConversationTransport:
                  max_budget_usd: float = DEFAULT_MAX_BUDGET_USD, timeout: float = DEFAULT_TIMEOUT_SECONDS,
                  cli: str | None = None, runner: ProcessRunner | None = None,
                  environ: Mapping[str, str] | None = None, clock: Callable[[], float] = time.monotonic,
-                 trace: object | None = None) -> None:
+                 trace: object | None = None, partial_messages: bool | None = None) -> None:
         if not isinstance(model, str) or not re.fullmatch(r"[A-Za-z0-9._:\[\]-]{1,96}", model):
             raise TransportConfigError("an explicit model alias or id is required")
         if not (isinstance(max_budget_usd, (int, float)) and 0 < max_budget_usd <= 1.0):
@@ -432,6 +579,13 @@ class ClaudeConversationTransport:
         self._env = {k: v for k, v in source.items() if not k.startswith(_STRIPPED_ENV_PREFIXES)}
         self._clock = clock
         self._trace = trace  # P052 r03: ConversationTrace (OFF = no-op); never receives argv or environment
+        self._partial = partial_messages  # P062: None = ask the installed CLI (``--help``); tests pin it
+
+    def provisional_capability(self) -> str:
+        """P062 adapter capability: decided by the installed CLI itself, never by role or model."""
+        if self._partial is None:
+            self._partial = cli_supports_partial(self._cli, self._env)
+        return provisional.CAP_SUPPORTED if self._partial else provisional.CAP_UNSUPPORTED
 
     # ------------------------------------------------------------------ paths / leases
     def _lane_dir(self, lane: LaneRef) -> Path:
@@ -575,7 +729,7 @@ class ClaudeConversationTransport:
             if child == exclude or not child.is_dir():
                 continue
             try:
-                facts = parse_stream((child / "stdout.jsonl").read_bytes()[:MAX_STDOUT_BYTES])
+                facts = parse_stream(read_evidence(child / "stdout.jsonl"))
             except FileNotFoundError:
                 continue
             if lane.native_session_id in (facts.init_session_id, facts.result_session_id):
@@ -585,18 +739,22 @@ class ClaudeConversationTransport:
     def build_prompt(self, lane: LaneRef, payload: TurnPayload, context: dict) -> str:
         return render_turn_prompt(lane, payload, context)
 
-    def argv(self, lane: LaneRef, resume: bool, context: dict | None = None) -> list[str]:
+    def argv(self, lane: LaneRef, resume: bool, context: dict | None = None, *, partial: bool = False) -> list[str]:
         role = role_text(context) if context else ROLE_TEXT
         return [self._cli or "claude", "-p", "--permission-mode", "auto", "--permission-prompts", "none",
                 "--system-prompt-snapshot", "off",
                 "--model", self._model, "--max-budget-usd", f"{self._budget:.2f}",
-                "--output-format", "stream-json", "--verbose", "--append-system-prompt", role,
+                "--output-format", "stream-json", "--verbose", *([PARTIAL_FLAG] if partial else []),
+                "--append-system-prompt", role,
                 "--resume" if resume else "--session-id", lane.native_session_id]
 
     def _launch(self, lane: LaneRef, payload: TurnPayload, turn_dir: Path, context: dict, lease: int) -> SubmitOutcome:
         resume = self._established(lane, turn_dir)
         prompt = self.build_prompt(lane, payload, context)
-        argv = self.argv(lane, resume, context)
+        sink = provisional.current_for(payload.correlation_id)
+        if sink is not None and self.provisional_capability() != provisional.CAP_SUPPORTED:
+            sink = None
+        argv = self.argv(lane, resume, context, partial=sink is not None)
         if self._trace is not None and self._trace.enabled:
             # P052 r03: the exact stdin prompt ROSC hands to the CLI (never argv, env or the role/system text).
             self._trace.emit("transport_request", transport="claude_cli", turn_id=payload.turn_id,
@@ -637,7 +795,7 @@ class ClaudeConversationTransport:
             _write_json(turn_dir / "intent.json", intent)
         except OSError:
             pass  # stdout/stderr remain the evidence; classification stays conservative
-        code = handle.wait(self._timeout)
+        code = self._wait(handle, turn_dir, lane, sink)
         timed_out = code is None
         if timed_out:
             handle.kill()
@@ -658,10 +816,33 @@ class ClaudeConversationTransport:
             return SubmitOutcome(SUBMIT_NOT_ACCEPTED, reason)
         return SubmitOutcome(SUBMIT_UNKNOWN, reason)
 
+    def _wait(self, handle: ProcessHandle, turn_dir: Path, lane: LaneRef,
+              sink: "provisional.ProvisionalSink | None") -> int | None:
+        """Wait for the process exactly as before; with a sink, tail stdout.jsonl meanwhile (read-only observer)."""
+        if sink is None:
+            return handle.wait(self._timeout)
+        observer = ClaudePartialObserver(lane.native_session_id, sink)
+        deadline = self._clock() + self._timeout
+        try:
+            stream = open(turn_dir / "stdout.jsonl", "rb")
+        except OSError:
+            return handle.wait(self._timeout)
+        with stream:
+            while True:
+                remaining = deadline - self._clock()
+                if remaining <= 0:
+                    return None
+                code = handle.wait(min(PARTIAL_POLL_SECONDS, remaining))
+                try:
+                    observer.feed(stream.read(PARTIAL_READ_BYTES))
+                except Exception:  # the observer is best-effort; the process wait is what matters
+                    log_partial_failure()
+                if code is not None:
+                    return code
+
     def _facts(self, turn_dir: Path) -> StreamFacts:
         try:
-            with open(turn_dir / "stdout.jsonl", "rb") as handle:
-                return parse_stream(handle.read(MAX_STDOUT_BYTES))
+            return parse_stream(read_evidence(turn_dir / "stdout.jsonl"))
         except FileNotFoundError:
             return StreamFacts()
 

@@ -41,6 +41,7 @@ from .conversation import (DEFAULT_PAGE_SIZE, ConversationConflict, Conversation
                            ProjectConversationService, UnsafeProjectIdentity as UnsafeConversationIdentity)
 from .db import make_session_factory
 from .group_conversation import GroupConversationBridge, TransportFactory, claude_transport_factory
+from .provisional import ProvisionalBroker
 from .room_events import RoomEventStreams
 from .worker_conversation import WorkerConversationCore
 from . import conversation_trace as ctrace
@@ -459,7 +460,8 @@ def create_app(db_path: Path | None = None, workspace_root: Path | None = None, 
                group_transport_factory: TransportFactory | None = None,
                conversation_trace: ctrace.ConversationTrace | None = None,
                run_monitor_interval: float | None = RUN_MONITOR_INTERVAL,
-               room_event_streams: RoomEventStreams | None = None) -> FastAPI:
+               room_event_streams: RoomEventStreams | None = None,
+               provisional_broker: ProvisionalBroker | None = None) -> FastAPI:
     """``auth_provider``/``authorization_policy`` and the ``extra_allowed_*`` sets are Python-level composition and
     test seams only. Nothing in a request (body, query, header, cookie) can select an actor, a role or these values,
     and there is deliberately no environment knob.
@@ -504,7 +506,8 @@ def create_app(db_path: Path | None = None, workspace_root: Path | None = None, 
     architect.conv_trace = conv_trace
     group = GroupConversationBridge(sessions, policy, group_core, group_transport_factory or claude_transport_factory(
         sessions, db_path.parent / "conversation-evidence", trace=conv_trace),
-        architect_transport=ArchitectGroupTransport(architect))
+        architect_transport=ArchitectGroupTransport(architect),
+        drafts=provisional_broker or ProvisionalBroker())  # P062: in-memory, bounded, runtime/role agnostic
     architect.peer_bridge = group  # P052: an authenticated direct Architect reply may invite in-scope peers once
     # P061: read-only room SSE invalidation (capped, bounded lifetime); timing knobs are a Python-level test seam only.
     room_streams = room_event_streams or RoomEventStreams()
@@ -1144,12 +1147,14 @@ def create_app(db_path: Path | None = None, workspace_root: Path | None = None, 
             """P061: read-only room-scoped SSE invalidation (no text, no commands; the UI re-reads the GETs).
             Authorization and scope are checked BEFORE the stream opens and again on every probe."""
             pid, tid = scope(project_id, task_id)
+            room: dict = {"id": None}  # P062: the authorized room of THIS connection, refreshed by every probe
 
             def probe() -> str:
-                return group.change_token(current_actor(), pid, tid)
+                token, room["id"] = group.live_room(current_actor(), pid, tid)
+                return token
 
             initial = await run_in_threadpool(conversation_call, probe)
-            return room_streams.response(request, probe, initial)
+            return room_streams.response(request, probe, initial, drafts=lambda: group.drafts_state(room["id"]))
 
         @app.post(f"{prefix}/messages", status_code=201)
         def group_message(project_id: str, data: GroupMessageInput, response: Response, task_id: str | None = None) -> dict:

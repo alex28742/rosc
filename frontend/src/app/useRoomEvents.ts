@@ -1,4 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
+import type { DraftFrame } from '../core/models';
+import { parseDraftFrame } from './provisionalDrafts';
 
 /** P061: the live-update channel of ONE open room.  It is never a business status: `offline` only means the browser is
  * not currently receiving Core's invalidation stream, so the room is re-read on the bounded fallback instead. */
@@ -20,13 +22,20 @@ const REOPEN_MAX_MS = 60000;
  * reconnect, on each (coalesced) invalidation and when the tab regains focus/visibility.  A hidden tab holds no
  * connection and issues no background reads; returning revalidates once.  `open` returning null (no EventSource in
  * this environment) leaves the caller's existing behaviour unchanged.
+ *
+ * P062: the same stream also carries typed `draft` frames (provisional agent text).  `onDraft` receives each valid frame
+ * of the CURRENT source, and `null` whenever the previous provisional state can no longer be trusted (a fresh
+ * connection — whose own snapshot follows —, a closed stream, a room change).
  */
-export function useRoomEvents(key: string | null, open: () => EventSource | null, onChange: () => void): RoomLiveState {
+export function useRoomEvents(key: string | null, open: () => EventSource | null, onChange: () => void,
+  onDraft?: (frame: DraftFrame | null) => void): RoomLiveState {
   const [state, setState] = useState<RoomLiveState>('off');
   const openRef = useRef(open);
   const onChangeRef = useRef(onChange);
   openRef.current = open;
   onChangeRef.current = onChange;
+  const onDraftRef = useRef(onDraft);
+  onDraftRef.current = onDraft;
 
   useEffect(() => {
     if (!key) { setState('off'); return; }
@@ -59,7 +68,7 @@ export function useRoomEvents(key: string | null, open: () => EventSource | null
     const clearGrace = () => { if (grace !== undefined) { clearTimeout(grace); grace = undefined; } };
     /** Closes the current source and a pending reopen; the offline grace keeps running until a `hello` arrives. */
     const close = () => {
-      if (source) { source.close(); source = null; }
+      if (source) { source.close(); source = null; onDraftRef.current?.(null); }
       if (reopen !== undefined) { clearTimeout(reopen); reopen = undefined; }
     };
 
@@ -76,7 +85,13 @@ export function useRoomEvents(key: string | null, open: () => EventSource | null
         clearGrace();
         stopFallback();
         setState('live');
+        onDraftRef.current?.(null); // this connection's own draft snapshot follows
         revalidate(); // a fresh (re)connection: whatever was missed meanwhile is read from Core
+      });
+      es.addEventListener('draft', event => {
+        if (source !== es) return;
+        const frame = parseDraftFrame((event as MessageEvent).data);
+        if (frame) onDraftRef.current?.(frame);
       });
       es.addEventListener('invalidate', () => { if (source === es) revalidate(); });
       es.onerror = () => {

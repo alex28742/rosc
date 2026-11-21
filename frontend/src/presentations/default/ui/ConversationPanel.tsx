@@ -2,7 +2,7 @@ import { useEffect, useId, useMemo, useRef, useState, type FormEvent } from 'rea
 import type { ConversationControls } from '../../../app/presentation/contracts';
 import { architectReason, describeArchitect } from './architectView';
 import { findMatches, renderBody } from './chatSearch';
-import { ARCHITECT_CHIP, GroupActivityRow, GroupBar, GroupCatchupDialog, MessageAddress, RecipientChips, ReleaseOffers,
+import { ARCHITECT_CHIP, GroupActivityRow, ProvisionalDrafts, GroupBar, GroupCatchupDialog, MessageAddress, RecipientChips, ReleaseOffers,
   chipTargets, effectiveSelection, nameOf, routeSelection, senderName, typedAddressees, typedProblem as describeTyped } from './GroupConversation';
 
 type Props = {
@@ -241,6 +241,7 @@ export function ConversationPanel({ projectId, conversation, collapsed, onCollap
           </div>
         </article>;
       })}
+      <ProvisionalDrafts group={group} messages={state.messages} feed={feed} follow={!searchTerm.trim()} />
       <GroupActivityRow info={group.info} />
     </div>
     <ReleaseOffers group={group} />

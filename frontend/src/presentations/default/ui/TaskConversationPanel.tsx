@@ -3,7 +3,7 @@ import type { MessageRecipient } from '../../../core/models';
 import type { TaskConversationControls } from '../../../app/presentation/contracts';
 import { architectReason, describeArchitect, describeTaskArchitect } from './architectView';
 import { findMatches, renderBody } from './chatSearch';
-import { ARCHITECT_CHIP, GroupActivityRow, GroupBar, GroupCatchupDialog, MessageAddress, RecipientChips, ReleaseOffers,
+import { ARCHITECT_CHIP, GroupActivityRow, ProvisionalDrafts, GroupBar, GroupCatchupDialog, MessageAddress, RecipientChips, ReleaseOffers,
   chipTargets, effectiveSelection, nameOf, routeSelection, runHandoffNote, senderName, typedAddressees, typedProblem as describeTyped } from './GroupConversation';
 
 /** Delivery wording is about the stored Owner message, never proof that the Architect answered. */
@@ -234,6 +234,7 @@ export function TaskConversationPanel({ taskId, conversation, collapsed, onColla
           </div>
         </article>;
       })}
+      <ProvisionalDrafts group={group} messages={state.messages} feed={feed} follow={!searchTerm.trim()} />
       <GroupActivityRow info={group.info} />
     </div>
     <ReleaseOffers group={group} />

@@ -12,6 +12,12 @@ and last ordinal, per-state counts/latest timestamps of deliveries, P060 assessm
 rounds, members, controls) plus the in-process driver liveness, so ANY canonical change of the room — including a P060
 ACK written after ``next=finish`` when no group round is running — changes it.  Connections are capped, live for a
 bounded time (the browser then reconnects and revalidates) and are cleaned up on disconnect.
+
+P062 adds ONE typed event to this same stream: ``draft`` — the provisional, non-canonical text of the turn currently
+being generated in this room (see ``provisional.py``).  It is runtime/model/role agnostic: it carries only sanitized
+assistant-visible text and minimal routing (turn id, agent id, offset, state, the published message id), read from the
+in-memory broker for the room this connection was authorized for.  Invalidations keep working exactly as before;
+drafts are checked on a short in-memory tick (no DB), the DB probe still runs every ``interval``.
 """
 from __future__ import annotations
 
@@ -29,19 +35,21 @@ from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from .conversation import ConversationDenied, ConversationNotFound
+from .provisional import DraftCursor, DraftView
 from .models import (EVENT_SOURCE_MESSAGE, ArchitectMaintenanceWake, ArchitectObligation, ConversationDelivery,
                      ConversationDispatchControl, ConversationMember, ConversationMemberGap, ConversationMessage,
                      GroupRound, GroupRoundGrant, GroupTurn, ProjectEvent)
 
 log = logging.getLogger(__name__)
 
-EVENT_HELLO, EVENT_INVALIDATE, EVENT_HEARTBEAT = "hello", "invalidate", "heartbeat"
+EVENT_HELLO, EVENT_INVALIDATE, EVENT_HEARTBEAT, EVENT_DRAFT = "hello", "invalidate", "heartbeat", "draft"
 STREAM_VERSION = 1
 DEFAULT_INTERVAL = 1.0          # probe period (seconds): the UI sees a change within ~1-2 s
 DEFAULT_HEARTBEAT = 15.0        # keeps proxies and the browser's connection-liveness honest
 DEFAULT_MAX_SECONDS = 300.0     # bounded lifetime; EventSource reconnects and the client revalidates
 DEFAULT_MAX_STREAMS = 16        # per Core process; one visible room per tab needs one
 DEFAULT_RETRY_MS = 3000
+DEFAULT_DRAFT_TICK = 0.08       # in-memory provisional-text check; also coalesces many small deltas into one frame
 
 
 def _stamp(value) -> str:
@@ -99,8 +107,9 @@ class RoomEventStreams:
 
     def __init__(self, *, interval: float = DEFAULT_INTERVAL, heartbeat: float = DEFAULT_HEARTBEAT,
                  max_seconds: float = DEFAULT_MAX_SECONDS, max_streams: int = DEFAULT_MAX_STREAMS,
-                 retry_ms: int = DEFAULT_RETRY_MS) -> None:
+                 retry_ms: int = DEFAULT_RETRY_MS, draft_tick: float = DEFAULT_DRAFT_TICK) -> None:
         self.interval, self.heartbeat, self.max_seconds = interval, heartbeat, max_seconds
+        self.draft_tick = draft_tick
         self.max_streams, self.retry_ms = max_streams, retry_ms
         self._lock = threading.Lock()
         self._active = 0
@@ -121,38 +130,62 @@ class RoomEventStreams:
         with self._lock:
             self._active -= 1
 
-    def response(self, request: Request, probe: Callable[[], str], initial: str) -> StreamingResponse:
+    def response(self, request: Request, probe: Callable[[], str], initial: str,
+                 drafts: Callable[[], tuple[int, tuple[DraftView, ...]]] | None = None) -> StreamingResponse:
         """``probe`` re-authorizes and returns the room token; ``initial`` was computed (and authorized) by the caller
-        BEFORE the stream opens, so a denied or out-of-scope request never gets a ``200 text/event-stream``."""
+        BEFORE the stream opens, so a denied or out-of-scope request never gets a ``200 text/event-stream``.
+        ``drafts`` (P062, optional) returns the provisional-draft state of exactly the authorized room."""
         if self.active >= self.max_streams:
             raise HTTPException(429, "Too many live conversation streams")
-        return StreamingResponse(self._events(request, probe, initial), media_type="text/event-stream",
+        return StreamingResponse(self._events(request, probe, initial, drafts), media_type="text/event-stream",
                                  headers={"Cache-Control": "no-store", "X-Accel-Buffering": "no"})
 
-    async def _events(self, request: Request, probe: Callable[[], str], initial: str):
+    async def _events(self, request: Request, probe: Callable[[], str], initial: str, drafts=None):
         if not self._enter():  # lost a race against the cap check: end at once (the client falls back)
             return
         try:
-            yield f"retry: {self.retry_ms}\n" + _frame(EVENT_HELLO, {"v": STREAM_VERSION})
+            hello = {"v": STREAM_VERSION, "drafts": True} if drafts is not None else {"v": STREAM_VERSION}
+            yield f"retry: {self.retry_ms}\n" + _frame(EVENT_HELLO, hello)
+            cursor = DraftCursor() if drafts is not None else None
             last, seq = initial, 0
             started = quiet_since = time.monotonic()
+            next_probe = started + self.interval
+            tick = min(self.interval, self.draft_tick) if cursor is not None else self.interval
+            if cursor is not None:
+                for frame in self._draft_frames(cursor, drafts):  # reconnect: the current snapshot, if any
+                    yield frame
             while time.monotonic() - started < self.max_seconds:
-                await anyio.sleep(self.interval)
+                await anyio.sleep(max(0.0, min(tick, next_probe - time.monotonic())))
                 if await request.is_disconnected():
                     break
-                try:
-                    token = await anyio.to_thread.run_sync(probe)
-                except (ConversationDenied, ConversationNotFound, HTTPException):
-                    break  # access or scope lost: end the stream; the client's own GET shows the real error
-                except Exception as exc:  # busy/locked database etc.: skip this probe, never claim a change
-                    log.debug("Room event probe skipped: %s", type(exc).__name__)
-                    token = last
                 now = time.monotonic()
-                if token != last:
-                    last, seq, quiet_since = token, seq + 1, now
-                    yield _frame(EVENT_INVALIDATE, {"seq": seq})
-                elif now - quiet_since >= self.heartbeat:
-                    quiet_since = now
-                    yield _frame(EVENT_HEARTBEAT, {})
+                if now >= next_probe:
+                    next_probe = now + self.interval
+                    try:
+                        token = await anyio.to_thread.run_sync(probe)
+                    except (ConversationDenied, ConversationNotFound, HTTPException):
+                        break  # access or scope lost: end the stream; the client's own GET shows the real error
+                    except Exception as exc:  # busy/locked database etc.: skip this probe, never claim a change
+                        log.debug("Room event probe skipped: %s", type(exc).__name__)
+                        token = last
+                    now = time.monotonic()
+                    if token != last:
+                        last, seq, quiet_since = token, seq + 1, now
+                        yield _frame(EVENT_INVALIDATE, {"seq": seq})
+                    elif now - quiet_since >= self.heartbeat:
+                        quiet_since = now
+                        yield _frame(EVENT_HEARTBEAT, {})
+                if cursor is not None:
+                    for frame in self._draft_frames(cursor, drafts):
+                        quiet_since = now
+                        yield frame
         finally:
             self._leave()
+
+    @staticmethod
+    def _draft_frames(cursor: DraftCursor, drafts) -> list[str]:
+        try:
+            return [_frame(EVENT_DRAFT, frame) for frame in cursor.frames(drafts())]
+        except Exception as exc:  # provisional text is best-effort; it never ends or breaks the stream
+            log.debug("Draft frames skipped: %s", type(exc).__name__)
+            return []

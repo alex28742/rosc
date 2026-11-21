@@ -68,6 +68,29 @@ export type ConversationParticipant = {
   agent_display_name?: string | null;
 };
 
+/** P062: one typed provisional-text frame of the room SSE.  Runtime/model/role agnostic; never a canonical message.
+ * `offset` 0 replaces the draft text, otherwise `text` is appended at exactly that offset. */
+export type DraftFrame = {
+  turn: string;
+  agent: string | null;
+  offset: number;
+  text: string;
+  state: 'streaming' | 'published' | 'ended' | 'gone';
+  /** The committed canonical reply id once Core published it (state `published`), else null. */
+  message: string | null;
+  truncated: boolean;
+};
+
+/** P062: what the PC/TC shows while an Agent turn is generating (plain text, not stored, not delivered). */
+export type ProvisionalDraft = {
+  turnId: string;
+  agentId: string;
+  text: string;
+  state: 'streaming' | 'published';
+  messageId: string | null;
+  truncated: boolean;
+};
+
 /** P046: immutable P043B group envelope of a message. `to`/`audience` hold stable Agent ids or `owner`. */
 export type MessageGroup = {
   to: string[];

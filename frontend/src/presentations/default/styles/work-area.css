@@ -3850,6 +3850,34 @@
   border-color: var(--rosc-line);
 }
 
+/* P062: provisional (not yet published) agent text; same bubble for every runtime/model/role. */
+.rosc-chat-message--provisional .rosc-chat-bubble {
+  border-style: dashed;
+}
+
+.rosc-chat-provisional-label {
+  color: var(--rosc-muted);
+  font-style: italic;
+}
+
+.rosc-chat-caret {
+  display: inline-block;
+  width: 0.5em;
+  height: 1em;
+  margin-left: 1px;
+  vertical-align: text-bottom;
+  border-left: 2px solid var(--rosc-green);
+  animation: rosc-chat-caret 1s steps(1) infinite;
+}
+
+@keyframes rosc-chat-caret {
+  50% { opacity: 0; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .rosc-chat-caret { animation: none; }
+}
+
 .rosc-chat-to {
   color: var(--rosc-blue-strong);
   font-weight: 500;
