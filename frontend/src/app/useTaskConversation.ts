@@ -3,6 +3,7 @@ import { describeError, type CoreApi } from '../core/api';
 import type { ArchitectStatus, TaskArchitectStatus, ConversationMessage, MessageDelivery, MessageRecipient } from '../core/models';
 import type { TaskConversationControls } from './presentation/contracts';
 import { useGroupConversation } from './useGroupConversation';
+import { LATEST_PAGE, pendingOlderOrdinals, refreshOlderAssessments, replaceKnown, type HistoryRefresh } from './olderAssessments';
 
 type ArchitectCache = { status: 'loading' | 'ready' | 'failed'; info: ArchitectStatus | null };
 type TaskArchitectCache = { status: 'loading' | 'ready' | 'failed'; info: TaskArchitectStatus | null; busy: boolean };
@@ -48,7 +49,26 @@ export function useTaskConversation(api: CoreApi, projectId: string | null, task
     setCache(prev => (prev.scope === forScope ? { ...prev, ...change } : prev));
   }, []);
 
-  const load = useCallback(async (forScope: string, pid: string, tid: string) => {
+  const olderSeq = useRef(0);
+  /** P061: re-reads (replace-only) the older loaded pages that hold a message whose Core assessment may still change;
+   * a result for another Task, or one overtaken by a newer such read, is dropped. */
+  const refreshOlder = useCallback(async (forScope: string, pid: string, tid: string, latestFirst: number) => {
+    const pending = pendingOlderOrdinals(cacheRef.current.scope === forScope ? cacheRef.current.messages : [], latestFirst);
+    if (pending.length === 0) return;
+    const mine = ++olderSeq.current;
+    await refreshOlderAssessments(pending, before => api.getTaskConversation(pid, tid, before), messages => {
+      if (mine !== olderSeq.current || scopeRef.current !== forScope) return false;
+      setCache(prev => prev.scope !== forScope ? prev : { ...prev, messages: replaceKnown(prev.messages, messages) });
+      return true;
+    }).catch(() => undefined); // best effort: the next room change or reload re-reads; never an error banner
+  }, [api]);
+
+  const load = useCallback(async (forScope: string, pid: string, tid: string, refresh: HistoryRefresh = 'latest') => {
+    if (refresh === 'older') {
+      const known = cacheRef.current.scope === forScope ? cacheRef.current.messages : [];
+      void refreshOlder(forScope, pid, tid, known[Math.max(0, known.length - LATEST_PAGE)]?.ordinal ?? Infinity);
+      return;
+    }
     const mine = ++seq.current;
     try {
       const page = await api.getTaskConversation(pid, tid);
@@ -63,11 +83,12 @@ export function useTaskConversation(api: CoreApi, projectId: string | null, task
           nextBefore: olderKnown ? prev.nextBefore : page.page.next_before,
         };
       });
+      if (refresh === 'loaded') void refreshOlder(forScope, pid, tid, page.messages[0]?.ordinal ?? Infinity);
     } catch (e) {
       if (mine !== seq.current || scopeRef.current !== forScope) return;
       patch(forScope, { status: 'failed', error: describeError(e) });
     }
-  }, [api, patch]);
+  }, [api, patch, refreshOlder]);
 
   useEffect(() => {
     scopeRef.current = scope;
@@ -149,11 +170,6 @@ export function useTaskConversation(api: CoreApi, projectId: string | null, task
   }, [api, loadArchitect, loadTaskArchitect, projectId, taskId]);
 
   const awaiting = visible.messages.some(message => message.delivery?.state === 'pending');
-  useEffect(() => {
-    if (!awaiting || !scope || !projectId || !taskId) return;
-    const timer = setInterval(() => void load(scope, projectId, taskId), DELIVERY_POLL_MS);
-    return () => clearInterval(timer);
-  }, [awaiting, scope, projectId, taskId, load]);
 
   const setDelivery = useCallback((forScope: string, messageId: string, delivery: MessageDelivery) => {
     setCache(prev => prev.scope !== forScope ? prev : {
@@ -249,9 +265,9 @@ export function useTaskConversation(api: CoreApi, projectId: string | null, task
   }, [api, patch, projectId, taskId]);
 
   /** P046: the group bridge re-reads or merges into the SAME canonical Task history (never a second chat). */
-  const reloadGroupMessages = useCallback(() => {
+  const reloadGroupMessages = useCallback((refresh?: HistoryRefresh) => {
     const current = scopeRef.current;
-    if (current && projectId && taskId && cacheRef.current.scope === current) void load(current, projectId, taskId);
+    if (current && projectId && taskId && cacheRef.current.scope === current) void load(current, projectId, taskId, refresh);
   }, [load, projectId, taskId]);
   const mergeGroupMessage = useCallback((message: ConversationMessage) => {
     const current = scopeRef.current;
@@ -264,6 +280,13 @@ export function useTaskConversation(api: CoreApi, projectId: string | null, task
   const architectKey = archInfo ? `${archInfo.state}:${archInfo.agent?.agent_id ?? ''}:${archInfo.session?.session_id ?? ''}` : null;
   const group = useGroupConversation(api, projectId && taskId ? projectId : null, taskId, reloadGroupMessages,
     mergeGroupMessage, architectKey);
+  // P061: while the room's live stream is up, a delivery/reply change already invalidates it; poll only without it.
+  const liveRoom = group.live === 'live';
+  useEffect(() => {
+    if (!awaiting || liveRoom || !scope || !projectId || !taskId) return;
+    const timer = setInterval(() => void load(scope, projectId, taskId), DELIVERY_POLL_MS);
+    return () => clearInterval(timer);
+  }, [awaiting, liveRoom, scope, projectId, taskId, load]);
   // P052 r03: a finished legacy direct Architect delivery may have opened a bounded peer discussion: follow it (bounded).
   const followGroup = group.onFollow;
   const wasAwaiting = useRef<string | null>(null);

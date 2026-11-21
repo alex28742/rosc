@@ -6,6 +6,7 @@ import type { AgentRegistryState, AssignmentIntent, EngineNotice, Feedback, Load
 import { assignmentBaseline, ROLE_REQUIRED_CAPABILITIES } from './presentation/contracts';
 import { projectIdOf } from './route';
 import { useGroupConversation } from './useGroupConversation';
+import { LATEST_PAGE, pendingOlderOrdinals, refreshOlderAssessments, replaceKnown, type HistoryRefresh } from './olderAssessments';
 import { useConversationDiagnostics } from './useConversationDiagnostics';
 
 export type Layer = 'dashboard' | 'project' | 'task' | 'modal' | 'settings';
@@ -312,7 +313,26 @@ export function useWorkspaceController({ route, routeKey, go }: Navigation, api:
     setChat(prev => (prev.projectId === id ? { ...prev, ...patch } : prev));
   }, []);
 
-  const loadConversation = useCallback(async (id: string) => {
+  const olderSeq = useRef(0);
+  /** P061: re-reads (replace-only) the older loaded pages that hold a message whose Core assessment may still change;
+   * a result for another Project, or one overtaken by a newer such read, is dropped. */
+  const refreshOlder = useCallback(async (id: string, latestFirst: number) => {
+    const pending = pendingOlderOrdinals(chatRef.current.projectId === id ? chatRef.current.messages : [], latestFirst);
+    if (pending.length === 0) return;
+    const mine = ++olderSeq.current;
+    await refreshOlderAssessments(pending, before => api.getConversation(id, before), messages => {
+      if (mine !== olderSeq.current || projectIdOf(routeRef.current) !== id) return false;
+      setChat(prev => prev.projectId !== id ? prev : { ...prev, messages: replaceKnown(prev.messages, messages) });
+      return true;
+    }).catch(() => undefined); // best effort: the next room change or reload re-reads; never an error banner
+  }, [api]);
+
+  const loadConversation = useCallback(async (id: string, refresh: HistoryRefresh = 'latest') => {
+    if (refresh === 'older') {
+      const known = chatRef.current.projectId === id ? chatRef.current.messages : [];
+      void refreshOlder(id, known[Math.max(0, known.length - LATEST_PAGE)]?.ordinal ?? Infinity);
+      return;
+    }
     const seq = ++chatSeq.current;
     try {
       const page = await trackRead(() => api.getConversation(id),
@@ -329,11 +349,12 @@ export function useWorkspaceController({ route, routeKey, go }: Navigation, api:
           nextBefore: olderKnown ? prev.nextBefore : page.page.next_before, error: '',
         };
       });
+      if (refresh === 'loaded') void refreshOlder(id, page.messages[0]?.ordinal ?? Infinity);
     } catch (e) {
       if (seq !== chatSeq.current || projectIdOf(routeRef.current) !== id) return;
       patchChat(id, { status: 'failed', error: describeError(e) });
     }
-  }, [api, patchChat, trackRead]);
+  }, [api, patchChat, refreshOlder, trackRead]);
 
   const reloadConversation = useCallback(() => {
     const id = projectIdOf(routeRef.current);
@@ -647,9 +668,9 @@ export function useWorkspaceController({ route, routeKey, go }: Navigation, api:
   }, [api, patchChat]);
 
   /** P046: the group bridge re-reads or merges into the SAME canonical Project history (never a second chat). */
-  const reloadGroupMessages = useCallback(() => {
+  const reloadGroupMessages = useCallback((refresh?: HistoryRefresh) => {
     const id = projectIdOf(routeRef.current);
-    if (id && chatRef.current.projectId === id) void loadConversation(id);
+    if (id && chatRef.current.projectId === id) void loadConversation(id, refresh);
   }, [loadConversation]);
   const mergeGroupMessage = useCallback((message: ConversationMessage) => {
     const id = projectIdOf(routeRef.current);
@@ -709,10 +730,11 @@ export function useWorkspaceController({ route, routeKey, go }: Navigation, api:
   }, [projectId, projectTab, loadAssignments]);
   const awaitingReply = chat.projectId === projectId && chat.messages.some(m => m.delivery?.state === 'pending');
   useEffect(() => {
-    if (!projectId || !awaitingReply) return;
+    // P061: while the room's live stream is up, a delivery/reply change already invalidates it; poll only without it.
+    if (!projectId || !awaitingReply || group.live === 'live') return;
     const timer = setInterval(() => { void loadConversation(projectId); }, DELIVERY_POLL_MS);
     return () => clearInterval(timer);
-  }, [projectId, awaitingReply, loadConversation]);
+  }, [projectId, awaitingReply, loadConversation, group.live]);
   // P052 r03: when a legacy direct Architect delivery finishes, its reply may have opened a bounded peer discussion that
   // runs at once; re-read the room state and history (bounded) even though the previous round was idle.
   const followGroup = group.onFollow;

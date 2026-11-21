@@ -239,3 +239,82 @@ describe('P061 Core client', () => {
     expect(openRoomEvents('P0001', null)).toBeNull();
   });
 });
+
+describe('P061 follow-up: an OLDER loaded page keeps its assessments live', () => {
+  // Newest page: ordinals 60-61 (has_more). Older page: ordinal 10 is a Worker message awaiting assessment.
+  const scenario = (taskId: string | null) => {
+    const owner = (body: string, ordinal: number) => conversationMessage(body, { message_id: `m-${ordinal}`, ordinal });
+    const latest = [owner('Newest A', 60), owner('Newest B', 61)];
+    const awaiting = worker('Old worker report', 10, env({ expectation: 'informational', assessment: assessment({}) }));
+    const assessed = worker('Old worker report', 10, env({ expectation: 'informational',
+      assessment: assessment({ state: 'assessed', outcome: 'no_reply_needed' }) }));
+    let old = awaiting;
+    const extra = owner('Never loaded before', 5); // part of the re-read page but outside the loaded window
+    const read = vi.fn(async (...args: unknown[]) => {
+      const before = args[taskId ? 2 : 1] as number | undefined;
+      const base = { task_id: taskId } as Partial<ConversationPage>;
+      if (before === undefined) return conversationPage({ ...base, messages: latest, page: { limit: 50, has_more: true, next_before: 60 } });
+      if (before === 60) return conversationPage({ ...base, messages: [old], page: { limit: 50, has_more: true, next_before: 10 } });
+      return conversationPage({ ...base, messages: [extra, old], page: { limit: 50, has_more: false, next_before: null } });
+    });
+    return { read, assessedNow: () => { old = assessed; } };
+  };
+
+  const exercise = async (panelOf: () => HTMLElement, read: ReturnType<typeof vi.fn>, assessedNow: () => void, beforeArg: number) => {
+    const panel = await ready(panelOf);
+    await within(panel).findByText('Newest B');
+    fireEvent.click(within(panel).getByRole('button', { name: 'Загрузить более ранние' }));
+    const bubble = (await within(panel).findByText('Old worker report')).closest('article') as HTMLElement;
+    expect(within(bubble).getByText('Architect: ожидает оценки')).toBeTruthy();
+    const composer = within(panel).getByRole('textbox') as HTMLTextAreaElement;
+    fireEvent.change(composer, { target: { value: 'draft stays' } });
+    assessedNow();
+    act(() => FakeSource.open()[0].emit('invalidate'));
+    await within(bubble).findByText('Architect: оценено · ответ не требуется');
+    expect(read.mock.calls.some(call => call[beforeArg] === 11)).toBe(true); // the page ending at the pending message
+    expect(within(panel).getAllByText('Old worker report')).toHaveLength(1);
+    expect(within(panel).getByText('Newest A')).toBeTruthy(); // newest page kept
+    expect(within(panel).queryByText('Never loaded before')).toBeNull(); // replace-only: the window did not grow
+    expect(within(panel).getByRole('button', { name: 'Загрузить более ранние' })).toBeTruthy(); // cursor unchanged
+    expect(within(panel).getByText('Old worker report').closest('article')).toBe(bubble);
+    expect(composer.value).toBe('draft stays');
+    // Final now: a further invalidation reads no older page again.
+    const older = read.mock.calls.filter(call => call[beforeArg] !== undefined).length;
+    act(() => FakeSource.open()[0].emit('invalidate'));
+    await waitFor(() => expect(read.mock.calls.filter(call => call[beforeArg] === undefined).length).toBeGreaterThanOrEqual(3));
+    expect(read.mock.calls.filter(call => call[beforeArg] !== undefined).length).toBe(older);
+  };
+
+  it('TC: old awaiting -> assessed after invalidate, older pages and composer kept', async () => {
+    at('/projects/P0001/tasks/T0001');
+    const { read, assessedNow } = scenario('T0001');
+    const stub = stubApi({ listProjects: vi.fn(async () => [P1]), listTasks: vi.fn(async () => [T1]),
+      getConversation: vi.fn(async () => conversationPage({})), getTaskConversation: read,
+      getGroupStatus: vi.fn(async () => idle()), openRoomEvents: opener() });
+    render(<App api={stub} />);
+    await exercise(tcPanel, read, assessedNow, 2);
+  });
+
+  it('PC: old awaiting -> assessed after invalidate, older pages and composer kept', async () => {
+    at('/projects/P0001');
+    const { read, assessedNow } = scenario(null);
+    const stub = stubApi({ listProjects: vi.fn(async () => [P1]), getConversation: read,
+      getGroupStatus: vi.fn(async () => idle()), openRoomEvents: opener() });
+    render(<App api={stub} />);
+    await exercise(pcPanel, read, assessedNow, 1);
+  });
+
+  it('while a turn is active, an invalidation adds no duplicate status/newest-page read (the poll covers them)', async () => {
+    vi.useFakeTimers();
+    const api = stubApi({ openRoomEvents: opener(),
+      getGroupStatus: vi.fn(async () => groupStatus({ conversation_id: 'c1', driver: { running: true, last: null } })) });
+    const onMessages = vi.fn();
+    renderHook(() => useGroupConversation(api, 'P0001', 'T0001', onMessages, vi.fn()));
+    await act(async () => { vi.advanceTimersByTime(10); });
+    const status = api.getGroupStatus.mock.calls.length;
+    act(() => FakeSource.open()[0].emit('invalidate'));
+    await act(async () => { vi.advanceTimersByTime(REVALIDATE_GAP_MS + 1); });
+    expect(onMessages).toHaveBeenLastCalledWith('older');
+    expect(api.getGroupStatus.mock.calls.length).toBe(status);
+  });
+});

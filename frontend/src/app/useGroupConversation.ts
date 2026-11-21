@@ -3,6 +3,7 @@ import { describeError, type CoreApi } from '../core/api';
 import type { ConversationMessage, ConversationMessageResult, GroupStatus } from '../core/models';
 import type { GroupControls, LoadStatus } from './presentation/contracts';
 import { useRoomEvents } from './useRoomEvents';
+import type { HistoryRefresh } from './olderAssessments';
 
 /** While Core reports work in this room (a running driver or a held turn) the status and history are re-read. */
 const ACTIVE_POLL_MS = 1500;
@@ -28,7 +29,7 @@ const BLOCKED_TEXT: Record<string, string> = {
  * `onMessages` re-reads the canonical history; `onMessage` merges one Core-confirmed message immediately.
  */
 export function useGroupConversation(api: CoreApi, projectId: string | null, taskId: string | null,
-  onMessages: () => void, onMessage: (message: ConversationMessage) => void, revalidateKey: string | null = null,
+  onMessages: (refresh?: HistoryRefresh) => void, onMessage: (message: ConversationMessage) => void, revalidateKey: string | null = null,
   live = true): GroupControls {
   const scope = projectId ? `${projectId}/${taskId ?? 'PC'}` : null;
   const [cache, setCache] = useState<Cache>(() => emptyFor(scope));
@@ -77,11 +78,15 @@ export function useGroupConversation(api: CoreApi, projectId: string | null, tas
    * ordinary GETs.  This also covers changes after the round finished (no polling then).  Stale results of another
    * scope are dropped by `load` and the history loaders. */
   const liveKey = live && scope ? scope : null;
+  const workingRef = useRef(false);
   const onRoomChange = useCallback(() => {
     const current = scopeRef.current;
     if (!current || !projectId || current !== scope) return;
+    // While a turn is active the existing poll (needed for the CLI activity line, which is not a Core DB fact)
+    // already re-reads the status and the newest page every ACTIVE_POLL_MS: only the older loaded pages are added.
+    if (workingRef.current) { onMessagesRef.current('older'); return; }
     void load(current, projectId, taskId);
-    onMessagesRef.current();
+    onMessagesRef.current('loaded');
   }, [load, projectId, taskId, scope]);
   const openEvents = useCallback(() => (projectId ? api.openRoomEvents(projectId, taskId) : null), [api, projectId, taskId]);
   const liveState = useRoomEvents(liveKey, openEvents, onRoomChange);
@@ -93,6 +98,7 @@ export function useGroupConversation(api: CoreApi, projectId: string | null, tas
   const queued = Boolean(info && info.round?.state === 'open' && info.waiting.length > 0 && !blocked
     && Date.now() < followUntil.current);
   const working = Boolean(info && (info.driver.running || (info.holding_turn && info.holding_turn.state !== 'unknown') || queued));
+  workingRef.current = working;
   const wasWorking = useRef(false);
   useEffect(() => {
     if (!scope || !projectId) return;
