@@ -72,9 +72,12 @@ describe('P062 draft frames', () => {
     expect(apply([frame({ text: 'x' }), frame({ state: 'ended' })]).size).toBe(0);
   });
 
-  it('a newer streaming turn supersedes an older streaming one; invalid frames are rejected', () => {
-    const map = apply([frame({ turn: 't1', text: 'one' }), frame({ turn: 't2', agent: ARCH, text: 'two' })]);
+  it('a newer streaming turn of the same Agent supersedes its older one; invalid frames are rejected', () => {
+    const map = apply([frame({ turn: 't1', text: 'one' }), frame({ turn: 't2', text: 'two' })]);
     expect([...map.keys()]).toEqual(['t2']);
+    // P062.1: another Agent's live draft (e.g. a direct Architect reply beside a Worker group turn) is left alone.
+    const both = apply([frame({ turn: 't1', text: 'one' }), frame({ turn: 'direct-m1', agent: ARCH, text: 'two' })]);
+    expect([...both.keys()]).toEqual(['t1', 'direct-m1']);
     expect(parseDraftFrame('{"turn":"t","offset":-1,"text":"","state":"streaming"}')).toBeNull();
     expect(parseDraftFrame('{"turn":"t","offset":0,"text":"","state":"hacked"}')).toBeNull();
     expect(parseDraftFrame('not json')).toBeNull();
@@ -182,9 +185,11 @@ describe('P062 PC: the same renderer for every role, runtime and model', () => {
     await waitFor(() => expect(drafts(panel)).toHaveLength(1));
     const workerShape = drafts(panel)[0].querySelector('.rosc-chat-body')?.outerHTML;
     expect(drafts(panel)[0].textContent).toContain('Claude');
+    act(() => source.emit('draft', frame({ turn: 'tw', agent: WORKER, offset: 9, state: 'ended' })));
+    await waitFor(() => expect(drafts(panel)).toHaveLength(0)); // Core ended the Worker turn
     act(() => source.emit('draft', frame({ turn: 'ta', agent: ARCH, text: 'Same text' })));
     await waitFor(() => expect(drafts(panel)[0]?.dataset.provisionalTurn).toBe('ta'));
-    expect(drafts(panel)).toHaveLength(1); // the newer turn superseded the older streaming one
+    expect(drafts(panel)).toHaveLength(1);
     expect(drafts(panel)[0].querySelector('.rosc-chat-body')?.outerHTML).toBe(workerShape);
     expect(drafts(panel)[0].textContent).toContain('Architect');
   });
@@ -212,5 +217,59 @@ describe('P062 shared hook: room isolation and batching', () => {
     await act(async () => { vi.advanceTimersByTime(DRAFT_RENDER_MS + 1); });
     expect(hook.result.current.drafts?.map(d => d.text)).toEqual(['mine']);
     hook.unmount();
+  });
+});
+
+describe('P062.1 direct Architect (no Worker, no GroupTurn): the same stream and the same bubble', () => {
+  const directReply = (id: string, body: string) => conversationMessage(body, { message_id: id, ordinal: 2,
+    sender: { kind: 'architect', agent_id: ARCH, agent_display_name: 'Architect' } as never });
+
+  it('PC: the draft grows, a foreign message never hides it, and the committed reply replaces it exactly once', async () => {
+    at('/projects/P0001');
+    const owner = conversationMessage('@Architect plain question', { message_id: 'm-1', ordinal: 1 });
+    let page = conversationPage({ messages: [owner] } as Partial<ConversationPage>);
+    const stub = stubApi({ listProjects: vi.fn(async () => [P1]), getConversation: vi.fn(async () => page),
+      getGroupStatus: vi.fn(async () => status()), openRoomEvents: opener() });
+    render(<App api={stub} />);
+    const panel = await ready(pcPanel);
+    const [source] = FakeSource.open();
+    act(() => source.emit('hello', { v: 1, drafts: true }));
+    act(() => source.emit('draft', frame({ turn: 'direct-m-1', agent: ARCH, text: 'Гипотеза №1: ' })));
+    await waitFor(() => expect(drafts(panel)).toHaveLength(1));
+    act(() => source.emit('draft', frame({ turn: 'direct-m-1', agent: ARCH, offset: 13, text: 'кэш' })));
+    await waitFor(() => expect(drafts(panel)[0]?.textContent).toContain('Гипотеза №1: кэш'));
+    expect(drafts(panel)[0].className).toContain('rosc-chat-message--architect');
+    // An unrelated message (no group envelope, another id) is published meanwhile: the draft stays.
+    page = conversationPage({ messages: [owner, directReply('m-other', 'Other reply')] } as Partial<ConversationPage>);
+    act(() => source.emit('invalidate', { seq: 1 }));
+    await within(panel).findByText('Other reply');
+    expect(drafts(panel)).toHaveLength(1);
+    // Core committed THIS delivery's reply: matched by its committed id only.
+    page = conversationPage({ messages: [owner, directReply('m-other', 'Other reply'),
+      { ...directReply('m-2', 'Canonical full answer'), ordinal: 3 }] } as Partial<ConversationPage>);
+    act(() => source.emit('draft', frame({ turn: 'direct-m-1', agent: ARCH, offset: 16, state: 'published', message: 'm-2' })));
+    await within(panel).findByText('Canonical full answer');
+    await waitFor(() => expect(drafts(panel)).toHaveLength(0));
+    expect(within(panel).getAllByText('Canonical full answer')).toHaveLength(1);
+    expect(within(panel).queryByText(/Гипотеза/)).toBeNull();
+  });
+
+  it('TC: a direct Architect draft coexists with a Worker group draft and ends without a message on failure', async () => {
+    at('/projects/P0001/tasks/T0001');
+    const stub = stubApi({ listProjects: vi.fn(async () => [P1]), listTasks: vi.fn(async () => [T1]),
+      getConversation: vi.fn(async () => conversationPage({})),
+      getTaskConversation: vi.fn(async () => conversationPage({ task_id: 'T0001', messages: [] } as Partial<ConversationPage>)),
+      getGroupStatus: vi.fn(async () => status()), openRoomEvents: opener() });
+    render(<App api={stub} />);
+    const panel = await ready(tcPanel);
+    const [source] = FakeSource.open();
+    expect(source.url).toBe('/api/projects/P0001/tasks/T0001/conversation/group/events');
+    act(() => source.emit('draft', frame({ turn: 'g1', agent: WORKER, text: 'worker typing' })));
+    act(() => source.emit('draft', frame({ turn: 'direct-m-9', agent: ARCH, text: 'architect typing' })));
+    await waitFor(() => expect(drafts(panel)).toHaveLength(2));
+    act(() => source.emit('draft', frame({ turn: 'direct-m-9', agent: ARCH, offset: 16, state: 'ended' })));
+    await waitFor(() => expect(drafts(panel).map(d => d.dataset.provisionalTurn)).toEqual(['g1']));
+    expect(within(panel).queryByText(/architect typing/)).toBeNull();
+    expect(stub.sendGroupMessage).not.toHaveBeenCalled();
   });
 });

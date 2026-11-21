@@ -35,6 +35,11 @@ CAPABILITIES = frozenset({CAP_SUPPORTED, CAP_UNSUPPORTED, CAP_UNVERIFIED})
 
 STATE_STREAMING, STATE_PUBLISHED, STATE_ENDED, STATE_GONE = "streaming", "published", "ended", "gone"
 
+# P062.1: independent sequential producers inside ONE room.  A Core GroupTurn driver and the legacy direct Architect
+# delivery (``ConversationDelivery``) are separate business lifecycles that may overlap in time (an Architect direct
+# reply while a Worker group turn runs); a new draft supersedes only an older STREAMING draft of its OWN lane.
+LANE_GROUP, LANE_DIRECT = "group", "direct"
+
 DEFAULT_MAX_CHARS = 100_000      # raw text per draft; beyond it the draft is frozen (the canonical reply is unaffected)
 DEFAULT_MAX_SEGMENTS = 256
 DEFAULT_MAX_DRAFTS_PER_ROOM = 4
@@ -57,7 +62,9 @@ def capability_of(adapter: object) -> str:
 
 @dataclass(frozen=True)
 class TurnIdentity:
-    """Core-validated routing of one physical Agent turn (read from the durable GroupTurn, never from the adapter)."""
+    """Core-validated routing of one physical Agent turn (read from the durable GroupTurn or, P062.1, the durable direct
+    ``ConversationDelivery`` — never from the adapter, the client or model text).  ``turn_id`` is unique per room across
+    lanes (a direct draft id is derived from the delivery's Owner message id and never collides with a GroupTurn id)."""
 
     project_id: int
     conversation_id: str
@@ -65,6 +72,13 @@ class TurnIdentity:
     turn_id: str
     agent_id: str
     correlation_id: str
+    lane: str = LANE_GROUP
+
+
+def direct_turn_id(message_id: str) -> str:
+    """P062.1: the draft id of the direct Architect delivery of ``message_id`` (the Owner message, already visible to
+    every reader of the room); prefixed so it can never equal a GroupTurn uuid."""
+    return "direct-" + message_id
 
 
 @dataclass(frozen=True)
@@ -153,13 +167,16 @@ class ProvisionalBroker:
             now = self._clock()
             self._prune(now)
             room = self._rooms.setdefault(identity.conversation_id, {})
-            # A new physical turn of this room: earlier STREAMING drafts can no longer be current (one driver per room).
+            # A new physical turn of this lane: its earlier STREAMING drafts can no longer be current (one driver per
+            # lane and room).  Another lane's live draft (P062.1 direct vs group) is left untouched.
             for draft in room.values():
-                if draft.state == STATE_STREAMING:
+                if draft.state == STATE_STREAMING and draft.identity.lane == identity.lane:
                     draft.state, draft.updated = STATE_ENDED, now
             room[identity.turn_id] = _Draft(identity, token, now)
             while len(room) > self.max_drafts_per_room:
-                room.pop(min(room, key=lambda k: room[k].updated))
+                # Finished drafts go first; a live draft of another lane is evicted only when nothing else is left.
+                room.pop(min(room, key=lambda k: (room[k].state == STATE_STREAMING and k != identity.turn_id,
+                                                  k == identity.turn_id, room[k].updated)))
             while len(self._rooms) > self.max_rooms:
                 oldest = min(self._rooms, key=lambda c: max((d.updated for d in self._rooms[c].values()), default=0))
                 self._rooms.pop(oldest)
@@ -250,7 +267,8 @@ class ProvisionalBroker:
 # Core binds the sink for the claimed turn (``scoped``).  An adapter that has the turn payload takes it only for its exact
 # correlation (``current_for``).  A lower-level runtime call that receives no payload (e.g. ``ArchitectRuntime.ask``)
 # sees a sink only inside ``narrowed(correlation_id)`` opened by its caller for that very turn, so any other call of
-# the same runtime on the same thread (a legacy direct reply, a maintenance wake) never streams into the draft.
+# the same runtime on the same thread (an onboarding or maintenance wake) never streams into the draft.  P062.1: a direct
+# Architect delivery binds and narrows its OWN sink (lane ``direct``) for exactly its prompt id in the same way.
 _BOUND: contextvars.ContextVar[ProvisionalSink | None] = contextvars.ContextVar("rosc_provisional_bound", default=None)
 _NARROWED: contextvars.ContextVar[ProvisionalSink | None] = contextvars.ContextVar("rosc_provisional_narrowed",
                                                                                    default=None)

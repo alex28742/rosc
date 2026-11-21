@@ -27,9 +27,11 @@ GLOBAL = ROOT / "global"
 
 # Installed-file inventory fixed by the frozen P021 prompt (sha256 of the exact installed bytes, and byte size).
 # P053 Owner-authorized amendment: role.md, onboarding.md and documentation-standard.yaml (familiarization vs initialization).
+# P062.1 Owner-approved amendment: role.md Final Answer Completeness (bytes/digest only; the loader binds the ruleset
+# version to documentation-standard.yaml, which P062.1 does not change, so the version stays 0.4.0).
 INSTALLED = {
     "agents/architect/documentation-standard.yaml": ("8986dac0c1e313061f8ae4445c03804f79938fcfbe7598224c65ed650f9a431f", 2949),
-    "agents/architect/rules/role.md": ("825f6d3e5e76127596f17b64a83b14bc6bd624dc058ac4e7295ba4e888818cac", 2572),
+    "agents/architect/rules/role.md": ("dcd68c6be0e908928184ddc7323cb68d617fd7720a8cdf9a8b7314bcd9ac7ef5", 3158),  # P062.1
     "agents/architect/rules/onboarding.md": ("ea0b9337b41703fd7939f884b619b73273381ec807af0b58e13be6c8752e0244", 4857),
     "agents/architect/rules/context-maintenance.md": ("a9e8786cfaaba6ad9ce22912b9ee54eec74ad071a2826a1a0569b481539f1241", 2316),
     "agents/architect/rules/pipeline-management.md": ("9150730f60438d783bb945cfea61015921a753f917e2c49b71f54c3642fdbe7a", 2081),

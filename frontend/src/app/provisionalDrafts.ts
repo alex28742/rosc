@@ -7,7 +7,9 @@ import type { DraftFrame, ProvisionalDraft } from '../core/models';
  * Runtime/model/role agnostic: the frames carry only text, a turn id, an agent id and a state — the UI never learns which
  * runtime or model produced them and never picks a renderer by role.  The draft is only shown; it is not stored, sent,
  * searched or counted.  Its end is decided by Core: a `published` frame names the committed canonical message, and the
- * bubble is replaced by that message once it is in the loaded history (see `ProvisionalDrafts`).
+ * bubble is replaced by that message once it is in the loaded history (see `ProvisionalDrafts`).  P062.1: the same frames
+ * carry a direct (non-group) Architect delivery too; its draft is matched to the canonical reply only by that committed
+ * message id, never by a guess.
  */
 
 /** Rendering is batched: many small deltas inside this window become one React update (no re-render storm). */
@@ -48,8 +50,12 @@ export function applyDraftFrame(drafts: Map<string, ProvisionalDraft>, frame: Dr
   if (!agentId) return drafts;
   const next = new Map(drafts);
   if (frame.state === 'streaming') {
-    // One driver per room: a newer streaming turn supersedes an older still-streaming one.
-    for (const [turn, draft] of next) if (turn !== frame.turn && draft.state === 'streaming') next.delete(turn);
+    // One Agent generates one turn at a time: its newer streaming turn supersedes its older still-streaming one.  A
+    // draft of ANOTHER Agent is left alone (P062.1: a direct Architect reply may stream beside a Worker group turn);
+    // Core itself ends superseded drafts with an explicit `ended` frame.
+    for (const [turn, draft] of next) {
+      if (turn !== frame.turn && draft.state === 'streaming' && draft.agentId === agentId) next.delete(turn);
+    }
   }
   next.set(frame.turn, {
     turnId: frame.turn, agentId, text: text.slice(0, MAX_DRAFT_CHARS),

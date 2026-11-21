@@ -367,7 +367,10 @@ export function ProvisionalDrafts({ group, messages, feed, follow }: {
   group: GroupControls; messages: ConversationMessage[]; feed: RefObject<HTMLDivElement | null>; follow: boolean;
 }) {
   const published = new Set(messages.map(message => message.group?.turn_id).filter(Boolean));
-  const visible = (group.drafts ?? []).filter(draft => draft.text && !published.has(draft.turnId));
+  // P062.1: a direct Architect reply has no group envelope; Core's `published` frame names its committed message id.
+  const loaded = new Set(messages.map(message => message.message_id));
+  const visible = (group.drafts ?? []).filter(draft => draft.text && !published.has(draft.turnId)
+    && !(draft.messageId && loaded.has(draft.messageId)));
   const stick = useRef(true);
   useEffect(() => {
     const element = feed.current;

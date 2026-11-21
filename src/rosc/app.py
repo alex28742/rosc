@@ -504,11 +504,13 @@ def create_app(db_path: Path | None = None, workspace_root: Path | None = None, 
     group_core = WorkerConversationCore(sessions, policy)
     group_core.trace = conv_trace
     architect.conv_trace = conv_trace
+    drafts = provisional_broker or ProvisionalBroker()  # P062: in-memory, bounded, runtime/role agnostic
     group = GroupConversationBridge(sessions, policy, group_core, group_transport_factory or claude_transport_factory(
         sessions, db_path.parent / "conversation-evidence", trace=conv_trace),
         architect_transport=ArchitectGroupTransport(architect),
-        drafts=provisional_broker or ProvisionalBroker())  # P062: in-memory, bounded, runtime/role agnostic
+        drafts=drafts)
     architect.peer_bridge = group  # P052: an authenticated direct Architect reply may invite in-scope peers once
+    architect.drafts = drafts  # P062.1: a direct Architect delivery streams into the SAME room broker and SSE
     # P061: read-only room SSE invalidation (capped, bounded lifetime); timing knobs are a Python-level test seam only.
     room_streams = room_event_streams or RoomEventStreams()
 

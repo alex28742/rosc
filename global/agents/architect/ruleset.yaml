@@ -11,7 +11,9 @@ requires_explicit_activation: true
 # Order is the deterministic order of the composed ruleset digest. A file's presence on disk grants nothing.
 # `source_sha256` keeps the provenance of the Owner-accepted r01 source.  `sha256`/`bytes` are the installed bytes; for
 # role.md, onboarding.md and documentation-standard.yaml they include the P053 Owner-authorized amendment that separates
-# Session Familiarization (implemented) from the target Project Initialization workflow.
+# Session Familiarization (implemented) from the target Project Initialization workflow.  P062.1: role.md `sha256`/`bytes`
+# include the Owner-approved Final Answer Completeness amendment (the composed digest changes; the version stays bound to
+# documentation-standard.yaml).  It reaches a session only through a NEW activation's onboarding read.
 schema_reference:
   id: documentation-standard
   path: agents/architect/documentation-standard.yaml
@@ -22,8 +24,8 @@ active_bootstrap:
   - id: role
     path: agents/architect/rules/role.md
     source_sha256: be162d01c9c84ad2fafc7e5d6dd4662e16d51731de0a6a5d1254a5a3cdec6004
-    sha256: 825f6d3e5e76127596f17b64a83b14bc6bd624dc058ac4e7295ba4e888818cac
-    bytes: 2572
+    sha256: dcd68c6be0e908928184ddc7323cb68d617fd7720a8cdf9a8b7314bcd9ac7ef5
+    bytes: 3158
   - id: onboarding
     path: agents/architect/rules/onboarding.md
     source_sha256: 59c94119bd0e0b2ca724b1c44dd71491da614447349bca615774e814f80b7b3b
