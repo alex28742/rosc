@@ -226,8 +226,7 @@ export function ConversationPanel({ projectId, conversation, collapsed, onCollap
               <MessageAddress message={message} info={group.info} refPrefix="" />
               <time dateTime={message.created_at}>{formatTime(message.created_at)}</time>
             </div>
-            <p className="rosc-chat-body">{renderBody(message.body,
-              matches.filter(match => match.messageId === message.message_id), currentId)}</p>
+            {renderBody(message.body, matches.filter(match => match.messageId === message.message_id), currentId)}
             {delivery && delivery.state !== 'not_sent' && <p className={`rosc-chat-delivery rosc-chat-delivery--${delivery.state}`}
               aria-live="polite">
               {DELIVERY_TEXT[delivery.state]}{delivery.error_code ? ` (${architectReason(delivery.error_code) || delivery.error_code})` : ''}

@@ -1,17 +1,22 @@
 import type { ReactNode } from 'react';
 import type { ConversationMessage } from '../../../core/models';
+import { ConversationMarkdown, visibleText } from './ConversationMarkdown';
 
 export type Match = { messageId: string; start: number; end: number; id: string };
 
 export const MAX_MATCHES = 500;
 
-/** Case-insensitive, client-local search. IDs are unique to the mounted Conversation, not global match indices. */
+/**
+ * Case-insensitive, client-local search. IDs are unique to the mounted Conversation, not global match indices.
+ * P063: offsets index the text the reader SEES (the rendered Markdown projection), not the raw body: `**`, backticks
+ * and link destinations are not searchable, and highlights land inside the formatted nodes.
+ */
 export function findMatches(messages: ConversationMessage[], term: string, instanceId: string): Match[] {
   const needle = term.toLocaleLowerCase('ru');
   const matches: Match[] = [];
   if (!needle) return matches;
   for (const message of messages) {
-    const haystack = message.body.toLocaleLowerCase('ru');
+    const haystack = visibleText(message.body).toLocaleLowerCase('ru');
     let from = 0;
     let at = haystack.indexOf(needle, from);
     while (at !== -1) {
@@ -25,19 +30,7 @@ export function findMatches(messages: ConversationMessage[], term: string, insta
   return matches;
 }
 
-/** Renders plain text, wrapping search hits in <mark>. Never uses HTML insertion: the body is text, not markup. */
+/** Renders the body through the single safe Markdown renderer, wrapping search hits in <mark>. Never inserts HTML. */
 export function renderBody(body: string, matches: Match[], currentId: string | null): ReactNode {
-  if (matches.length === 0) return body;
-  const nodes: ReactNode[] = [];
-  let cursor = 0;
-  for (const match of matches) {
-    if (match.start > cursor) nodes.push(body.slice(cursor, match.start));
-    nodes.push(<mark key={match.id} id={match.id}
-      className={match.id === currentId ? 'rosc-chat-mark rosc-chat-mark--current' : 'rosc-chat-mark'}>
-      {body.slice(match.start, match.end)}
-    </mark>);
-    cursor = match.end;
-  }
-  if (cursor < body.length) nodes.push(body.slice(cursor));
-  return nodes;
+  return <ConversationMarkdown body={body} matches={matches} currentId={currentId} />;
 }

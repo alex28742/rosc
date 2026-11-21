@@ -2,6 +2,7 @@ import { useEffect, useId, useLayoutEffect, useRef, useState, type ReactNode, ty
 import type { GroupControls } from '../../../app/presentation/contracts';
 import type { ConversationMessage, GroupStatus, GroupTurn, MessageAssessment } from '../../../core/models';
 import { findMentions } from './mentions';
+import { ConversationMarkdown } from './ConversationMarkdown';
 
 /**
  * P046 group conversation pieces shared by the Project (PC) and Task (TC) conversation panels. Everything rendered
@@ -400,7 +401,9 @@ export function ProvisionalDrafts({ group, messages, feed, follow }: {
           <span className="rosc-chat-provisional-label" role="status">
             {streaming ? 'печатает · временный ответ' : 'публикуется…'}</span>
         </div>
-        <p className="rosc-chat-body">{draft.text}{streaming && <span className="rosc-chat-caret" aria-hidden="true" />}</p>
+        {/* P063: the same safe Markdown renderer; a partial (unclosed) block simply re-renders on the next batch. */}
+        <ConversationMarkdown body={draft.text} transient
+          tail={streaming ? <span className="rosc-chat-caret" aria-hidden="true" /> : null} />
         {draft.truncated && <p className="rosc-chat-delivery">Показано начало ответа; полный текст появится после публикации.</p>}
       </div>
     </article>;

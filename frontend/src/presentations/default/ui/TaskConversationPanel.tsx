@@ -210,8 +210,7 @@ export function TaskConversationPanel({ taskId, conversation, collapsed, onColla
               {!grouped && <MessageAddress message={{ ...message, recipient: null }} info={group.info} refPrefix={`${taskId}/`} />}
               <time dateTime={message.created_at}>{formatTime(message.created_at)}</time>
             </div>
-            <p className="rosc-chat-body">{renderBody(message.body,
-              matches.filter(match => match.messageId === message.message_id), currentId)}</p>
+            {renderBody(message.body, matches.filter(match => match.messageId === message.message_id), currentId)}
             {handoffNote && <p className="rosc-chat-delivery" data-testid="run-handoff-note">{handoffNote}</p>}
             {!fromArchitect && !fromWorker && !grouped && (!delivery || delivery.state === 'not_sent') && <p className="rosc-chat-delivery">
               {addressed ? 'Сохранено · не отправлено Architect' : 'Сохранено'}

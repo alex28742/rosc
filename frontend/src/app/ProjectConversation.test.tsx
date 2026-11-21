@@ -106,7 +106,7 @@ describe('Project Conversation composing', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Отправить' }));
 
     expect(within(panel()).getByRole('button', { name: 'Сохранение…' })).toBeTruthy();
-    expect(screen.queryByText('Новое сообщение Owner', { selector: '.rosc-chat-body' })).toBeNull();
+    expect(screen.queryByText('Новое сообщение Owner', { selector: '.rosc-chat-body, .rosc-chat-body *' })).toBeNull();
     expect(sendConversationMessage).toHaveBeenCalledTimes(1);
     const [projectId, input] = sendConversationMessage.mock.calls[0] as unknown as [string, { client_key: string; body: string }];
     expect(projectId).toBe('P0001');
@@ -130,7 +130,7 @@ describe('Project Conversation composing', () => {
     const alert = await within(panel()).findByRole('alert');
     expect(alert.textContent).toContain('HTTP 503');
     expect((textarea as HTMLTextAreaElement).value).toBe('Повторная отправка');
-    expect(screen.queryByText('Повторная отправка', { selector: '.rosc-chat-body' })).toBeNull();
+    expect(screen.queryByText('Повторная отправка', { selector: '.rosc-chat-body, .rosc-chat-body *' })).toBeNull();
 
     fireEvent.click(screen.getByRole('button', { name: 'Отправить' }));
     expect(await screen.findByText('Повторная отправка')).toBeTruthy();
@@ -415,6 +415,6 @@ describe('Project Conversation send/reload safety (P014.1)', () => {
     await screen.findByLabelText('Task Work Area');
     expect(field().value).toBe('не отправлено');
     expect(within(panel()).getByRole('alert').textContent).toContain('HTTP 503');
-    expect(screen.queryByText('не отправлено', { selector: '.rosc-chat-body' })).toBeNull();
+    expect(screen.queryByText('не отправлено', { selector: '.rosc-chat-body, .rosc-chat-body *' })).toBeNull();
   });
 });
