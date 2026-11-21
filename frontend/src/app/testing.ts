@@ -150,6 +150,7 @@ export function stubApi(over: Partial<{ [K in keyof CoreApi]: ReturnType<typeof 
     repairTask: vi.fn(async () => ({ ...task('T0001', 'P0001'), repair: null })),
     getConversation: vi.fn(async () => conversationPage()),
     getGroupStatus: vi.fn(async () => groupStatus()),
+    openRoomEvents: vi.fn(() => null),
     sendGroupMessage: vi.fn(async (_projectId: string, _taskId: string | null, input: { body: string; to: string[] }) => ({
       message: conversationMessage(input.body, { group: { to: input.to, audience: ['owner', ...input.to], reply_to: null, reply_to_ordinal: null, round_id: null, turn_id: null, sender_agent_id: null } }), replayed: false,
     })),

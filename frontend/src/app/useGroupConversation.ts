@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import { describeError, type CoreApi } from '../core/api';
 import type { ConversationMessage, ConversationMessageResult, GroupStatus } from '../core/models';
 import type { GroupControls, LoadStatus } from './presentation/contracts';
+import { useRoomEvents } from './useRoomEvents';
 
 /** While Core reports work in this room (a running driver or a held turn) the status and history are re-read. */
 const ACTIVE_POLL_MS = 1500;
@@ -27,7 +28,8 @@ const BLOCKED_TEXT: Record<string, string> = {
  * `onMessages` re-reads the canonical history; `onMessage` merges one Core-confirmed message immediately.
  */
 export function useGroupConversation(api: CoreApi, projectId: string | null, taskId: string | null,
-  onMessages: () => void, onMessage: (message: ConversationMessage) => void, revalidateKey: string | null = null): GroupControls {
+  onMessages: () => void, onMessage: (message: ConversationMessage) => void, revalidateKey: string | null = null,
+  live = true): GroupControls {
   const scope = projectId ? `${projectId}/${taskId ?? 'PC'}` : null;
   const [cache, setCache] = useState<Cache>(() => emptyFor(scope));
   const scopeRef = useRef(scope);
@@ -69,6 +71,20 @@ export function useGroupConversation(api: CoreApi, projectId: string | null, tas
     if (!scope || !projectId || previous.scope !== scope || previous.key === revalidateKey) return;
     void load(scope, projectId, taskId);
   }, [revalidateKey, scope, projectId, taskId, load]);
+
+  /** P061: while this room is OPEN AND VISIBLE, Core's read-only SSE says when its canonical state may have changed
+   * (a published reply, a delivery/assessment transition, ...) and the room status + history are re-read via the
+   * ordinary GETs.  This also covers changes after the round finished (no polling then).  Stale results of another
+   * scope are dropped by `load` and the history loaders. */
+  const liveKey = live && scope ? scope : null;
+  const onRoomChange = useCallback(() => {
+    const current = scopeRef.current;
+    if (!current || !projectId || current !== scope) return;
+    void load(current, projectId, taskId);
+    onMessagesRef.current();
+  }, [load, projectId, taskId, scope]);
+  const openEvents = useCallback(() => (projectId ? api.openRoomEvents(projectId, taskId) : null), [api, projectId, taskId]);
+  const liveState = useRoomEvents(liveKey, openEvents, onRoomChange);
 
   const followUntil = useRef(0);
   const info = visible.info;
@@ -157,6 +173,6 @@ export function useGroupConversation(api: CoreApi, projectId: string | null, tas
   const onReconcile = useCallback(() => act('reconcile', (pid, tid) => api.reconcileGroup(pid, tid)), [act, api]);
   const onContinue = useCallback(() => act('continue', (pid, tid) => api.continueGroup(pid, tid)), [act, api]);
 
-  return { status: visible.status, info: visible.info, error: visible.error, busy: visible.busy, notice: visible.notice, onReload, onPost,
+  return { status: visible.status, info: visible.info, error: visible.error, busy: visible.busy, notice: visible.notice, live: liveState, onReload, onPost,
     onAuthorize, onStart, onControls, onRelease, onKeep, onCatchup, onReconcile, onContinue, onFollow };
 }

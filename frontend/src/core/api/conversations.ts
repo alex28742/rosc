@@ -5,6 +5,11 @@ import { post, request } from './http';
 const groupBase = (projectId: string, taskId: string | null) =>
   `/projects/${projectId}${taskId ? `/tasks/${taskId}` : ''}/conversation/group`;
 
+/** P061: Core's read-only invalidation stream of ONE room (`hello`/`invalidate`/`heartbeat`, never message text or
+ * commands).  null where the environment has no EventSource; the caller then keeps its ordinary GET behaviour. */
+export const openRoomEvents = (projectId: string, taskId: string | null): EventSource | null =>
+  typeof EventSource === 'undefined' ? null : new EventSource(`/api${groupBase(projectId, taskId)}/events`);
+
 /** Read-only room state. Never claims, dispatches or launches a model. */
 export const getGroupStatus = (projectId: string, taskId: string | null) => request<GroupStatus>(groupBase(projectId, taskId));
 /** P047: ONE Owner Send. Stores the message with explicit addressees AND authorizes their replies (one Agent: a direct

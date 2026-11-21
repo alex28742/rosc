@@ -15,6 +15,7 @@ from fastapi import FastAPI, HTTPException, Request, Response
 from fastapi.exception_handlers import request_validation_exception_handler
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
+from starlette.concurrency import run_in_threadpool
 from pydantic import BaseModel, Field, field_validator
 from sqlalchemy import select
 from sqlalchemy.orm import undefer
@@ -40,6 +41,7 @@ from .conversation import (DEFAULT_PAGE_SIZE, ConversationConflict, Conversation
                            ProjectConversationService, UnsafeProjectIdentity as UnsafeConversationIdentity)
 from .db import make_session_factory
 from .group_conversation import GroupConversationBridge, TransportFactory, claude_transport_factory
+from .room_events import RoomEventStreams
 from .worker_conversation import WorkerConversationCore
 from . import conversation_trace as ctrace
 from .models import (CURRENT_BINDING, Project, ProjectIdentityError, ProjectRootBinding, Task, reserved_roots,
@@ -456,7 +458,8 @@ def create_app(db_path: Path | None = None, workspace_root: Path | None = None, 
                run_launch_service: RunLaunchService | None = None,
                group_transport_factory: TransportFactory | None = None,
                conversation_trace: ctrace.ConversationTrace | None = None,
-               run_monitor_interval: float | None = RUN_MONITOR_INTERVAL) -> FastAPI:
+               run_monitor_interval: float | None = RUN_MONITOR_INTERVAL,
+               room_event_streams: RoomEventStreams | None = None) -> FastAPI:
     """``auth_provider``/``authorization_policy`` and the ``extra_allowed_*`` sets are Python-level composition and
     test seams only. Nothing in a request (body, query, header, cookie) can select an actor, a role or these values,
     and there is deliberately no environment knob.
@@ -503,6 +506,8 @@ def create_app(db_path: Path | None = None, workspace_root: Path | None = None, 
         sessions, db_path.parent / "conversation-evidence", trace=conv_trace),
         architect_transport=ArchitectGroupTransport(architect))
     architect.peer_bridge = group  # P052: an authenticated direct Architect reply may invite in-scope peers once
+    # P061: read-only room SSE invalidation (capped, bounded lifetime); timing knobs are a Python-level test seam only.
+    room_streams = room_event_streams or RoomEventStreams()
 
     def load_diagnostics() -> None:
         try:
@@ -559,6 +564,7 @@ def create_app(db_path: Path | None = None, workspace_root: Path | None = None, 
     app.state.architect = architect
     app.state.group = group
     app.state.conversation_trace = conv_trace
+    app.state.room_streams = room_streams
 
     @app.exception_handler(RequestValidationError)
     async def validation_failed(request: Request, exc: RequestValidationError):
@@ -1132,6 +1138,18 @@ def create_app(db_path: Path | None = None, workspace_root: Path | None = None, 
         def group_status(project_id: str, task_id: str | None = None) -> dict:
             pid, tid = scope(project_id, task_id)
             return conversation_call(group.status, current_actor(), pid, tid)
+
+        @app.get(f"{prefix}/events")
+        async def group_events(request: Request, project_id: str, task_id: str | None = None):
+            """P061: read-only room-scoped SSE invalidation (no text, no commands; the UI re-reads the GETs).
+            Authorization and scope are checked BEFORE the stream opens and again on every probe."""
+            pid, tid = scope(project_id, task_id)
+
+            def probe() -> str:
+                return group.change_token(current_actor(), pid, tid)
+
+            initial = await run_in_threadpool(conversation_call, probe)
+            return room_streams.response(request, probe, initial)
 
         @app.post(f"{prefix}/messages", status_code=201)
         def group_message(project_id: str, data: GroupMessageInput, response: Response, task_id: str | None = None) -> dict:

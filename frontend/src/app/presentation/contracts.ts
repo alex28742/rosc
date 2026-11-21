@@ -4,6 +4,7 @@ import type { ComponentType, ReactNode } from 'react';
 import type { RunJournalPage, RunReportPage, RunView } from '../../core/models';
 import type { AgentDefinition, AgentFormValues, ArchitectStatus, ContextAccess, ConversationDiagnostics, ConversationMessage, GroupStatus, MessageRecipient, OwnerDecisionKind, Project, PromptRevision, ProjectFormValues, RepairConfirmation, RoleAssignment, SpecRevision, SpecRevisionSummary, Task, TaskArchitectStatus, TaskAuthoring, TaskFormValues, ProjectWorker } from '../../core/models';
 import type { ScrollRegions } from '../scroll';
+import type { RoomLiveState } from '../useRoomEvents';
 
 export type LoadStatus = 'loading' | 'ready' | 'failed';
 
@@ -238,6 +239,8 @@ export type GroupControls = {
   busy: string | null;
   /** P047: truthful note about the last Send when Core is holding dispatch (pause / brake / UNKNOWN); '' otherwise. */
   notice: string;
+  /** P061: the room's live-update channel (never a business status); absent in presentations that do not use it. */
+  live?: RoomLiveState;
   onReload: () => void;
   onPost: (body: string, clientKey: string, to: string[]) => Promise<string | null>;
   onAuthorize: (agents: string[], quota: number, renew: boolean) => Promise<string | null>;

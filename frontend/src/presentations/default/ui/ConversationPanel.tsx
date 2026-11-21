@@ -275,6 +275,8 @@ export function ConversationPanel({ projectId, conversation, collapsed, onCollap
       </div>
       {failure && <p className="rosc-conversation__error" role="alert">{failure}</p>}
       {group.notice && <p className="rosc-conversation__hint" role="status">{group.notice}</p>}
+      {group.live === 'offline' && <p className="rosc-conversation__hint" role="status">
+        Живые обновления временно недоступны: история перечитывается реже, идёт переподключение.</p>}
       {ambiguous && <p className="rosc-conversation__hint">
         Предыдущая попытка могла сохраниться в ROSC. Проверьте историю: изменённый текст будет отправлен как новое сообщение.
       </p>}

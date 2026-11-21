@@ -660,7 +660,9 @@ export function useWorkspaceController({ route, routeKey, go }: Navigation, api:
   // P055: the PC composer's roster is revalidated when the verified Project Architect status changes.
   const architectKey = architect.projectId === projectId && architect.info
     ? `${architect.info.state}:${architect.info.agent?.agent_id ?? ''}:${architect.info.session?.session_id ?? ''}` : null;
-  const group = useGroupConversation(api, projectId, null, reloadGroupMessages, mergeGroupMessage, architectKey);
+  // P061: the PC room's live stream is held only while the Project page (where the PC panel lives) is open.
+  const group = useGroupConversation(api, projectId, null, reloadGroupMessages, mergeGroupMessage, architectKey,
+    route.kind === 'project');
 
   // Effect order matters: the first one starts a new message epoch before the loaders capture it.
   useEffect(() => { epoch.current++; setError(''); setNotice(''); }, [routeKey]);

@@ -38,6 +38,7 @@ from .claude_conversation import ClaudeConversationTransport, TransportConfigErr
 from .conversation import (ConversationConflict, ConversationDenied, ConversationNotFound, ConversationStoreError,
                            InvalidConversationInput, load_message_view)
 from .mentions import find_mentions
+from .room_events import room_fingerprint
 from .models import (ASSIGNMENT_ACTIVE, MEMBER_RELEASED, PARTICIPANT_OWNER, PARTY_OWNER_REF, ROLE_ARCHITECT,
                      ROLE_WORKER, ROUND_OPEN, TURN_ACCEPTED, TURN_HOLDING_STATES, TURN_QUEUED, TURN_SUBMITTED, TURN_UNKNOWN,
                      AgentDefinition, AgentNativeLane, Conversation, ConversationMessage, ConversationParticipant, GroupRoundGrant,
@@ -222,6 +223,18 @@ class GroupConversationBridge:
             return thread is not None and thread.is_alive()
 
     # ------------------------------------------------------------------ reads
+    def change_token(self, actor: ActorContext, project_id: int, task_id: int | None) -> str:
+        """P061: opaque change token of ONE room for the read-only SSE invalidation stream.  Authorizes and validates
+        the Project/Task scope exactly like ``status``; never claims, dispatches, reconciles, launches or writes."""
+        self._authorize(actor, CONVERSATION_READ, project_id, task_id)
+        with self._sessions() as session:
+            room = self._room(session, project_id, task_id)
+            if room is None:
+                return "none"
+            conversation_id = room.conversation_id
+            token = room_fingerprint(session, conversation_id)
+        return f"{token}:{int(self.running(conversation_id))}"
+
     def status(self, actor: ActorContext, project_id: int, task_id: int | None) -> dict:
         """Typed room state for the UI.  Read-only: never claims, dispatches, reconciles or launches."""
         self._authorize(actor, CONVERSATION_READ, project_id, task_id)

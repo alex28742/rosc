@@ -270,6 +270,8 @@ export function TaskConversationPanel({ taskId, conversation, collapsed, onColla
       </div>
       {failure && <p className="rosc-conversation__error" role="alert">{failure}</p>}
       {group.notice && <p className="rosc-conversation__hint" role="status">{group.notice}</p>}
+      {group.live === 'offline' && <p className="rosc-conversation__hint" role="status">
+        Живые обновления временно недоступны: история перечитывается реже, идёт переподключение.</p>}
       {deliveryFailure && <p className="rosc-conversation__error" role="alert">{deliveryFailure}</p>}
       {!ready && <p className="rosc-conversation__hint">Отправка станет доступна после загрузки истории.</p>}
       <p className="rosc-conversation__hint">
