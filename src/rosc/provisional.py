@@ -298,6 +298,10 @@ class DraftCursor:
         self._version = -1
         self._sent: dict[str, tuple[str, str]] = {}  # turn_id -> (state, text sent)
 
+    def pending(self, state: tuple[int, tuple[DraftView, ...]]) -> bool:
+        """True when ``state`` may hold something this connection has not been sent yet (cheap, no side effects)."""
+        return state[0] != self._version
+
     def frames(self, state: tuple[int, tuple[DraftView, ...]]) -> list[dict]:
         version, views = state
         if version == self._version:

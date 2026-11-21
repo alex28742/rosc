@@ -142,6 +142,30 @@ describe('P062 TC: provisional text while the Agent is generating', () => {
     act(() => source.emit('hello', { v: 1, drafts: true })); // reconnect: its own snapshot (none here) follows
     await waitFor(() => expect(drafts(panel)).toHaveLength(0));
   });
+
+  it('a finally CLOSED stream clears the shown draft at once, and a failed reconnect never brings it back', async () => {
+    at('/projects/P0001/tasks/T0001');
+    const stub = stubApi({ listProjects: vi.fn(async () => [P1]), listTasks: vi.fn(async () => [T1]),
+      getConversation: vi.fn(async () => conversationPage({})),
+      getTaskConversation: vi.fn(async () => conversationPage({ task_id: 'T0001', messages: [] } as Partial<ConversationPage>)),
+      getGroupStatus: vi.fn(async () => status()), openRoomEvents: opener() });
+    render(<App api={stub} />);
+    const panel = await ready(tcPanel);
+    const [source] = FakeSource.open();
+    act(() => source.emit('hello', { v: 1, drafts: true }));
+    act(() => source.emit('draft', frame({ text: 'STALE partial' })));
+    await waitFor(() => expect(drafts(panel)).toHaveLength(1));
+    // The browser gives up on this connection for good (e.g. HTTP error): readyState CLOSED, no automatic retry.
+    act(() => { source.readyState = 2; source.onerror?.(new Event('error')); });
+    expect(drafts(panel)).toHaveLength(0); // synchronously: not after a batch, not after a reconnect
+    expect(panel.textContent).not.toContain('STALE partial');
+    // The guarded reopen happens later and fails as well: still nothing provisional is shown.
+    const retry = await waitFor(() => { const next = FakeSource.open().find(s => s !== source); if (!next) throw new Error('no reopen'); return next; },
+      { timeout: 4000 });
+    act(() => { retry.readyState = 2; retry.onerror?.(new Event('error')); });
+    expect(drafts(panel)).toHaveLength(0);
+    expect(panel.textContent).not.toContain('STALE partial');
+  }, 10000);
 });
 
 describe('P062 PC: the same renderer for every role, runtime and model', () => {

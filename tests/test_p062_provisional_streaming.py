@@ -759,6 +759,55 @@ class DraftSseTests(RoomEventsCase):
         self.assertEqual(self.streams.active, 0)
         self.policy.allow = True
 
+    def count_decisions(self) -> list[int]:
+        calls = [0]
+        decide = self.policy.decide
+
+        def counted(*args, **kwargs):
+            calls[0] += 1
+            return decide(*args, **kwargs)
+
+        self.policy.decide = counted
+        return calls
+
+    def test_revocation_between_probes_never_sends_new_draft_text(self) -> None:
+        """r01: no DB probe is due (interval 30 s), access is revoked, then a delta arrives: it is NOT written."""
+        self.streams.interval = 30.0
+        room, _ = self.worker_says("Done.")
+        sink = self.broker.open(provisional.TurnIdentity(1, room, None, "turn-x", self.A, "corr-x"))
+        sink.delta("k", "before ")
+
+        def revoke_then_delta():
+            self.policy.allow = False
+            sink.delta("k", "AFTER-REVOKE")
+
+        result = self.run_stream(self.PC, [("draft", revoke_then_delta)], linger=0.5)
+        self.policy.allow = True
+        self.assertEqual(result["status"], 200)
+        self.assertIn("\"text\":\"before\"", result["body"])
+        self.assertNotIn("AFTER-REVOKE", result["body"])
+        self.assertTrue(result["closed"])  # the server ended the stream itself
+        self.assertEqual(self.streams.active, 0)
+
+    def test_changed_draft_is_authorized_but_idle_ticks_are_not(self) -> None:
+        self.streams.interval = 30.0
+        room, _ = self.worker_says("Done.")
+        sink = self.broker.open(provisional.TurnIdentity(1, room, None, "turn-x", self.A, "corr-x"))
+        sink.delta("k", "one")
+        calls = self.count_decisions()
+        marks: dict[str, int] = {}
+
+        def idle_then_delta():
+            time.sleep(0.3)  # ~30 empty 10-ms draft ticks, no probe due
+            marks["idle"] = calls[0]
+            sink.delta("k", " two")
+
+        stream = self.run_stream(self.PC, [("draft", idle_then_delta), ("draft", None)], linger=0.1)
+        self.assertEqual(stream["status"], 200)
+        self.assertEqual(marks["idle"], 1)  # idle ticks did no authorization at all
+        self.assertIn(" two", stream["body"])  # a changed draft still flows while access holds
+        self.assertGreaterEqual(calls[0], 2)  # ...after its own read-only check
+
     def test_denied_request_never_gets_a_stream(self) -> None:
         self.worker_says("Done.")
         self.policy.allow = False

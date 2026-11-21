@@ -1153,8 +1153,12 @@ def create_app(db_path: Path | None = None, workspace_root: Path | None = None, 
                 token, room["id"] = group.live_room(current_actor(), pid, tid)
                 return token
 
+            def authorize() -> None:  # P062 r01: read-only gate for a changed draft between two probes
+                group.authorize_room(current_actor(), pid, tid, room["id"])
+
             initial = await run_in_threadpool(conversation_call, probe)
-            return room_streams.response(request, probe, initial, drafts=lambda: group.drafts_state(room["id"]))
+            return room_streams.response(request, probe, initial, drafts=lambda: group.drafts_state(room["id"]),
+                                         authorize=authorize)
 
         @app.post(f"{prefix}/messages", status_code=201)
         def group_message(project_id: str, data: GroupMessageInput, response: Response, task_id: str | None = None) -> dict:

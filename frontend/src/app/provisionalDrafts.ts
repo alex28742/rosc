@@ -65,7 +65,7 @@ export function applyDraftFrame(drafts: Map<string, ProvisionalDraft>, frame: Dr
 export function useProvisionalDrafts(scope: string | null, onPublished: () => void): [ProvisionalDraft[], (frame: DraftFrame | null) => void] {
   const [state, setState] = useState<{ scope: string | null; drafts: Map<string, ProvisionalDraft> }>(
     () => ({ scope, drafts: new Map() }));
-  const pending = useRef<(DraftFrame | null)[]>([]);
+  const pending = useRef<DraftFrame[]>([]);
   const timer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
   const scopeRef = useRef(scope);
   const onPublishedRef = useRef(onPublished);
@@ -80,6 +80,15 @@ export function useProvisionalDrafts(scope: string | null, onPublished: () => vo
   useEffect(() => () => { if (timer.current !== undefined) clearTimeout(timer.current); }, []);
 
   const onDraft = useCallback((frame: DraftFrame | null) => {
+    if (frame === null) {
+      // A reset (closed stream, fresh connection) is applied at once: queued frames of the old state are dropped and the
+      // bubbles disappear without waiting for the render batch or for any reconnect.
+      pending.current = [];
+      if (timer.current !== undefined) { clearTimeout(timer.current); timer.current = undefined; }
+      const forScope = scopeRef.current;
+      setState(prev => (prev.scope !== forScope || !prev.drafts.size ? prev : { scope: forScope, drafts: new Map() }));
+      return;
+    }
     pending.current.push(frame);
     if (timer.current !== undefined) return;
     const forScope = scopeRef.current;
@@ -91,11 +100,11 @@ export function useProvisionalDrafts(scope: string | null, onPublished: () => vo
       setState(prev => {
         if (prev.scope !== forScope) return prev;
         let drafts = prev.drafts;
-        for (const f of frames) drafts = f === null ? (drafts.size ? new Map() : drafts) : applyDraftFrame(drafts, f);
+        for (const f of frames) drafts = applyDraftFrame(drafts, f);
         return drafts === prev.drafts ? prev : { scope: forScope, drafts };
       });
       // Core committed a reply: read the newest page now so the canonical bubble replaces the draft promptly.
-      if (frames.some(f => f?.state === 'published')) onPublishedRef.current();
+      if (frames.some(f => f.state === 'published')) onPublishedRef.current();
     }, DRAFT_RENDER_MS);
   }, []);
 

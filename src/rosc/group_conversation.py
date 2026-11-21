@@ -243,6 +243,14 @@ class GroupConversationBridge:
             token = room_fingerprint(session, conversation_id)
         return f"{token}:{int(self.running(conversation_id))}", conversation_id
 
+    def authorize_room(self, actor: ActorContext, project_id: int, task_id: int | None,
+                       conversation_id: str | None) -> None:
+        """P062 r01: read-only re-check that ``actor`` may still read this exact room (policy + Project/Task scope),
+        used before a changed provisional draft is sent between two P061 probes.  Raises like ``live_room``."""
+        self._authorize(actor, CONVERSATION_READ, project_id, task_id)
+        if conversation_id is not None and self._room_id(project_id, task_id) != conversation_id:
+            raise ConversationNotFound("Conversation not found")
+
     def drafts_state(self, conversation_id: str | None):
         """P062: in-memory provisional drafts of one room (already authorized by the caller's ``live_room``)."""
         if self._drafts is None:

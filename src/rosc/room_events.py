@@ -17,7 +17,10 @@ P062 adds ONE typed event to this same stream: ``draft`` — the provisional, no
 being generated in this room (see ``provisional.py``).  It is runtime/model/role agnostic: it carries only sanitized
 assistant-visible text and minimal routing (turn id, agent id, offset, state, the published message id), read from the
 in-memory broker for the room this connection was authorized for.  Invalidations keep working exactly as before;
-drafts are checked on a short in-memory tick (no DB), the DB probe still runs every ``interval``.
+drafts are checked on a short in-memory tick (no DB), the DB probe still runs every ``interval``.  Before a CHANGED
+draft is written, access is re-checked read-only (``authorize``) unless the probe already did so on this tick, so text
+produced after a revocation never leaves the server even when the next probe is not due yet; an idle tick (no new draft
+version) does no check at all.
 """
 from __future__ import annotations
 
@@ -131,16 +134,19 @@ class RoomEventStreams:
             self._active -= 1
 
     def response(self, request: Request, probe: Callable[[], str], initial: str,
-                 drafts: Callable[[], tuple[int, tuple[DraftView, ...]]] | None = None) -> StreamingResponse:
+                 drafts: Callable[[], tuple[int, tuple[DraftView, ...]]] | None = None,
+                 authorize: Callable[[], None] | None = None) -> StreamingResponse:
         """``probe`` re-authorizes and returns the room token; ``initial`` was computed (and authorized) by the caller
         BEFORE the stream opens, so a denied or out-of-scope request never gets a ``200 text/event-stream``.
-        ``drafts`` (P062, optional) returns the provisional-draft state of exactly the authorized room."""
+        ``drafts`` (P062, optional) returns the provisional-draft state of exactly the authorized room; ``authorize``
+        (read-only, raises like ``probe`` on lost access/scope) gates every changed draft between two probes."""
         if self.active >= self.max_streams:
             raise HTTPException(429, "Too many live conversation streams")
-        return StreamingResponse(self._events(request, probe, initial, drafts), media_type="text/event-stream",
+        return StreamingResponse(self._events(request, probe, initial, drafts, authorize),
+                                 media_type="text/event-stream",
                                  headers={"Cache-Control": "no-store", "X-Accel-Buffering": "no"})
 
-    async def _events(self, request: Request, probe: Callable[[], str], initial: str, drafts=None):
+    async def _events(self, request: Request, probe: Callable[[], str], initial: str, drafts=None, authorize=None):
         if not self._enter():  # lost a race against the cap check: end at once (the client falls back)
             return
         try:
@@ -151,18 +157,20 @@ class RoomEventStreams:
             started = quiet_since = time.monotonic()
             next_probe = started + self.interval
             tick = min(self.interval, self.draft_tick) if cursor is not None else self.interval
-            if cursor is not None:
-                for frame in self._draft_frames(cursor, drafts):  # reconnect: the current snapshot, if any
+            if cursor is not None:  # reconnect: the current snapshot, if any (``initial`` was just authorized)
+                for frame in self._draft_frames(cursor, self._draft_state(drafts)):
                     yield frame
             while time.monotonic() - started < self.max_seconds:
                 await anyio.sleep(max(0.0, min(tick, next_probe - time.monotonic())))
                 if await request.is_disconnected():
                     break
                 now = time.monotonic()
+                authorized = False  # access was confirmed on THIS tick
                 if now >= next_probe:
                     next_probe = now + self.interval
                     try:
                         token = await anyio.to_thread.run_sync(probe)
+                        authorized = True
                     except (ConversationDenied, ConversationNotFound, HTTPException):
                         break  # access or scope lost: end the stream; the client's own GET shows the real error
                     except Exception as exc:  # busy/locked database etc.: skip this probe, never claim a change
@@ -175,17 +183,39 @@ class RoomEventStreams:
                     elif now - quiet_since >= self.heartbeat:
                         quiet_since = now
                         yield _frame(EVENT_HEARTBEAT, {})
-                if cursor is not None:
-                    for frame in self._draft_frames(cursor, drafts):
-                        quiet_since = now
-                        yield frame
+                if cursor is None:
+                    continue
+                state = self._draft_state(drafts)
+                if state is None or not cursor.pending(state):
+                    continue  # idle tick: nothing new to send, so nothing to authorize
+                if not authorized and authorize is not None:
+                    try:
+                        await anyio.to_thread.run_sync(authorize)
+                    except (ConversationDenied, ConversationNotFound, HTTPException):
+                        break  # revoked between probes: the new text is never written
+                    except Exception as exc:  # unverifiable now: hold the text (cursor not advanced), retry next tick
+                        log.debug("Draft authorization skipped: %s", type(exc).__name__)
+                        continue
+                for frame in self._draft_frames(cursor, state):
+                    quiet_since = now
+                    yield frame
         finally:
             self._leave()
 
     @staticmethod
-    def _draft_frames(cursor: DraftCursor, drafts) -> list[str]:
+    def _draft_state(drafts):
         try:
-            return [_frame(EVENT_DRAFT, frame) for frame in cursor.frames(drafts())]
+            return drafts()
         except Exception as exc:  # provisional text is best-effort; it never ends or breaks the stream
+            log.debug("Draft state skipped: %s", type(exc).__name__)
+            return None
+
+    @staticmethod
+    def _draft_frames(cursor: DraftCursor, state) -> list[str]:
+        if state is None:
+            return []
+        try:
+            return [_frame(EVENT_DRAFT, frame) for frame in cursor.frames(state)]
+        except Exception as exc:
             log.debug("Draft frames skipped: %s", type(exc).__name__)
             return []

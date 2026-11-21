@@ -100,6 +100,7 @@ export function useRoomEvents(key: string | null, open: () => EventSource | null
         if (es.readyState === 2 /* CLOSED: the browser will not retry by itself */) {
           es.close();
           source = null;
+          onDraftRef.current?.(null); // provisional text is untrusted from now on: clear it now, not on a later reconnect
           failures += 1;
           const delay = Math.min(REOPEN_MAX_MS, REOPEN_BASE_MS * 2 ** (failures - 1));
           reopen = setTimeout(() => { reopen = undefined; connect(); }, delay);
